@@ -1,0 +1,44 @@
+name: Remote Modding Server
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_url:
+        description: 'URL of the file/ROM to mod'
+        required: true
+        default: 'none'
+      mod_type:
+        description: 'Type of mod to apply (e.g., icons, debloat, patch)'
+        required: true
+        default: 'standard'
+
+jobs:
+  build-and-mod:
+    runs-on: ubuntu-latest  # The "Server" provided by GitHub
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Set up Environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-pip zip unzip
+          # Add any other tools you typically use (e.g., apktool, signers)
+
+      - name: Download Target
+        run: |
+          echo "Receiving file from: ${{ inputs.target_url }}"
+          # wget ${{ inputs.target_url }} -O input_file.zip
+
+      - name: Run Modding Script
+        run: |
+          echo "Starting mod process: ${{ inputs.mod_type }}"
+          # chmod +x ./your_script.sh
+          # ./your_script.sh input_file.zip
+
+      - name: Upload Result
+        uses: actions/upload-artifact@v4
+        with:
+          name: Modded-Result
+          path: output_folder/ # Replace with your actual output directory
