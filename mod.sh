@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - ROM MODDER ENGINE (OPTIMIZED)
+#  NEXDROID GOONER - LOW DISK SPACE EDITION
 # =========================================================
 
 ROM_URL="$1"
@@ -12,49 +12,41 @@ IMAGES_DIR="$OUTPUT_DIR/images"
 TOOLS_DIR="$OUTPUT_DIR/tools"
 TEMP_DIR="$GITHUB_WORKSPACE/temp"
 
-# 1. SETUP & AUTO-INSTALL TOOLS
+# 1. SETUP
 echo "🛠️  Setting up Environment..."
 mkdir -p "$IMAGES_DIR" "$TOOLS_DIR" "$TEMP_DIR"
 chmod +x "$BIN_DIR"/*
 export PATH="$BIN_DIR:$PATH"
 
-# Install System Tools
 sudo apt-get update -y
 sudo apt-get install -y python3 python3-pip erofs-utils jq aria2 zip unzip
 
-# AUTO-DOWNLOAD PAYLOAD DUMPER (Smart Check)
-echo "⬇️  Fetching Tools..."
+# AUTO-DOWNLOAD PAYLOAD DUMPER
 if [ ! -f "$BIN_DIR/payload-dumper-go" ]; then
+    echo "⬇️  Fetching Tools..."
     wget -q https://github.com/ssut/payload-dumper-go/releases/download/1.2.2/payload-dumper-go_1.2.2_linux_amd64.tar.gz
     tar -xzf payload-dumper-go_1.2.2_linux_amd64.tar.gz
-    # Only move the file if found outside bin folder
     find . -type f -name "payload-dumper-go" -not -path "*/bin/*" -exec mv {} "$BIN_DIR/" \;
+    chmod +x "$BIN_DIR/payload-dumper-go"
 fi
-chmod +x "$BIN_DIR/payload-dumper-go"
 
-# 2. DOWNLOAD ROM (With Free Space Check)
+# 2. DOWNLOAD ROM (Streamlined)
 echo "⬇️  Downloading ROM..."
 cd "$TEMP_DIR"
-# Use aria2c with file allocation none to save time/space issues initially
 aria2c -x 16 -s 16 --file-allocation=none -o "rom.zip" "$ROM_URL"
 unzip -o "rom.zip" payload.bin
-rm "rom.zip" # Delete immediately to save space
+rm "rom.zip" # 🗑️ Free 6GB immediately
 
-# 3. DUMP FIRMWARE
-echo "🔍 Dumping Images..."
-payload-dumper-go -o raw_images payload.bin
-rm payload.bin # Delete immediately to save space
+# 3. EXTRACT FIRMWARE (Small files only)
+echo "🔍 Extracting Firmware..."
+# We dump ONLY the small boot partitions first to save space
+payload-dumper-go -p boot,dtbo,vendor_boot,recovery,init_boot,vbmeta,vbmeta_system,vbmeta_vendor -o "$IMAGES_DIR" payload.bin > /dev/null 2>&1
 
-# Move firmware to Output
-cd raw_images
-mv boot.img dtbo.img vendor_boot.img recovery.img init_boot.img "$IMAGES_DIR/" 2>/dev/null
-mv vbmeta.img vbmeta_system.img vbmeta_vendor.img "$IMAGES_DIR/" 2>/dev/null
-
-# 4. DETECT DEVICE (Smarter Logic)
-echo "🕵️  Detecting Device Identity..."
+# 4. DETECT DEVICE (Extract System Temporarily)
+echo "🕵️  Detecting Device..."
+payload-dumper-go -p system -o . payload.bin > /dev/null 2>&1
 extract.erofs -i system.img -x -o extracted_system
 
-# Logic to find build.prop
 if [ -f "extracted_system/system/build.prop" ]; then
     BUILD_PROP="extracted_system/system/build.prop"
 elif [ -f "extracted_system/build.prop" ]; then
@@ -63,78 +55,79 @@ else
     BUILD_PROP=$(find extracted_system -name "build.prop" | head -n 1)
 fi
 
-echo "🔎 Reading prop file: $BUILD_PROP"
-
 if [ -z "$BUILD_PROP" ]; then
-    echo "❌ CRITICAL: Could not find build.prop! Cannot verify device."
+    echo "❌ CRITICAL: build.prop not found!"
     exit 1
 fi
 
 DEVICE_CODE=$(grep "ro.product.device=" "$BUILD_PROP" | head -1 | cut -d'=' -f2)
 OS_VER=$(grep "ro.system.build.version.incremental=" "$BUILD_PROP" | head -1 | cut -d'=' -f2)
 ANDROID_VER=$(grep "ro.system.build.version.release=" "$BUILD_PROP" | head -1 | cut -d'=' -f2)
-rm -rf extracted_system
 
-echo "✅  Identity: $DEVICE_CODE | HyperOS $OS_VER | Android $ANDROID_VER"
+# CLEANUP SYSTEM IMMEDIATELY
+rm -rf extracted_system system.img 
+
+echo "✅  Identity: $DEVICE_CODE | $OS_VER"
 
 SUPER_SIZE=$(jq -r --arg dev "$DEVICE_CODE" '.[$dev].super_size' "$GITHUB_WORKSPACE/devices.json")
-
 if [ "$SUPER_SIZE" == "null" ] || [ -z "$SUPER_SIZE" ]; then
-    echo "❌  DEVICE UNKNOWN! Device '$DEVICE_CODE' is not in devices.json."
+    echo "❌  DEVICE UNKNOWN! Update devices.json."
     exit 1
 fi
 
-# 5. MOD & REPACK LOOP
+# 5. SEQUENTIAL MODDING LOOP (The Space Saver)
 LPM_ARGS=""
-for part in system system_dlkm vendor vendor_dlkm product odm mi_ext; do
+# List of big partitions to process one by one
+PARTITIONS="system system_dlkm vendor vendor_dlkm product odm mi_ext"
+
+for part in $PARTITIONS; do
+    echo "🔄 Processing: $part"
+    
+    # A. Extract ONE partition
+    payload-dumper-go -p "$part" -o . payload.bin > /dev/null 2>&1
+    
     if [ -f "${part}.img" ]; then
-        echo "⚙️  Modding: $part"
-        
+        # B. Unpack EROFS
         extract.erofs -i "${part}.img" -x -o "${part}_dump"
-        rm "${part}.img" # Delete raw image immediately
+        rm "${part}.img" # 🗑️ DELETE RAW IMAGE IMMEDIATELY
         
+        # C. Mod (Inject files)
         if [ -d "$GITHUB_WORKSPACE/mods/$part" ]; then
-            echo "    -> Injecting custom files..."
+            echo "    -> Injecting Mods..."
             cp -r "$GITHUB_WORKSPACE/mods/$part/"* "${part}_dump/"
         fi
         
+        # D. Repack to EROFS (Compressed)
         mkfs.erofs -zLZ4HC "${part}_mod.img" "${part}_dump"
-        rm -rf "${part}_dump" # Delete dump immediately
+        rm -rf "${part}_dump" # 🗑️ DELETE DUMP FOLDER
         
+        # E. Add to Super List
         IMG_SIZE=$(stat -c%s "${part}_mod.img")
         LPM_ARGS="$LPM_ARGS --partition ${part}:readonly:${IMG_SIZE}:main --image ${part}=${part}_mod.img"
+    else
+        echo "    (Skipped - Not found in payload)"
     fi
 done
 
-# 6. BUILD SUPER IMAGE
-echo "🔨  Building Super ($SUPER_SIZE bytes)..."
-if [ ! -f "$BIN_DIR/lpmake" ]; then
-    echo "❌ ERROR: lpmake binary is missing in bin/ folder!"
-    exit 1
-fi
+# We can now delete payload.bin as we are done with it
+rm payload.bin # 🗑️ Free 6GB
 
+# 6. BUILD SUPER IMAGE
+echo "🔨  Building Super..."
 lpmake --metadata-size 65536 --super-name super --metadata-slots 2 \
        --device super:$SUPER_SIZE --group main:$SUPER_SIZE \
        $LPM_ARGS --output "$IMAGES_DIR/super.img"
 
-# 7. FINALIZE PACKAGE
-echo "📜  Generating Scripts..."
+# 7. FINALIZE
 cd "$OUTPUT_DIR"
 python3 "$GITHUB_WORKSPACE/gen_scripts.py" "$DEVICE_CODE" "images"
 
-# Download ADB Tools
 echo "📥  Bundling ADB..."
 wget -q https://dl.google.com/android/repository/platform-tools-latest-windows.zip
-unzip -q platform-tools-latest-windows.zip
-mv platform-tools/* tools/
-rm -rf platform-tools platform-tools-latest-windows.zip
+unzip -q platform-tools-latest-windows.zip && mv platform-tools/* tools/ && rm -rf platform-tools*
 
-# 8. ZIP & UPLOAD
+# 8. UPLOAD
 ZIP_NAME="ota_NexDroid_${DEVICE_CODE}_${OS_VER}.zip"
-echo "📦  Zipping: $ZIP_NAME"
+echo "📦  Zipping..."
 zip -r -q "$ZIP_NAME" .
-
-echo "☁️  Uploading to PixelDrain..."
 curl -T "$ZIP_NAME" -u : https://pixeldrain.com/api/file/
-
-echo "✅  DONE!"
