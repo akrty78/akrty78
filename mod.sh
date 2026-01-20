@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - STRICT FACTORY EDITION
+#  NEXDROID GOONER - LIBSSL FIX EDITION
 # =========================================================
 
 ROM_URL="$1"
@@ -18,9 +18,15 @@ mkdir -p "$IMAGES_DIR" "$TOOLS_DIR" "$TEMP_DIR"
 chmod +x "$BIN_DIR"/*
 export PATH="$BIN_DIR:$PATH"
 
-# Install critical tools
+# Install standard tools
 sudo apt-get update -y
 sudo apt-get install -y python3 python3-pip erofs-utils erofsfuse jq aria2 zip unzip liblz4-tool
+
+# --- CRITICAL FIX: INSTALL LEGACY LIBSSL FOR LPMAKE ---
+echo "💉 Injecting Legacy Libraries..."
+wget -q http://nz2.archive.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2_amd64.deb
+sudo dpkg -i libssl1.1_1.1.1f-1ubuntu2_amd64.deb
+rm libssl1.1_1.1.1f-1ubuntu2_amd64.deb
 
 # 2. AUTO-HEAL TOOLS
 echo "⬇️  Checking Binary Tools..."
@@ -32,7 +38,7 @@ if [ ! -f "$BIN_DIR/payload-dumper-go" ]; then
     find . -type f -name "payload-dumper-go" -not -path "*/bin/*" -exec mv {} "$BIN_DIR/" \;
 fi
 
-# lpmake (CRITICAL FOR SUPER IMG)
+# lpmake
 if [ ! -f "$BIN_DIR/lpmake" ]; then
     echo "    -> Downloading lpmake..."
     wget -q -O "$BIN_DIR/lpmake" "https://github.com/elfamigos/android-tools-bin/raw/main/linux/lpmake"
@@ -40,15 +46,15 @@ fi
 
 chmod +x "$BIN_DIR/"*
 
-# TEST LPMAKE
+# TEST LPMAKE (Verbose)
 echo "🧪 Testing lpmake..."
 "$BIN_DIR/lpmake" --help > /dev/null 2>&1
 if [ $? -ne 0 ]; then
-    echo "❌ ERROR: lpmake binary is broken or missing dependencies!"
-    # Try installing common libs that might be missing
-    sudo apt-get install -y libssl-dev
+    echo "❌ ERROR: lpmake failed to run! Checking dependencies..."
+    ldd "$BIN_DIR/lpmake"
+    exit 1
 else
-    echo "    ✅ lpmake is ready."
+    echo "    ✅ lpmake is healthy."
 fi
 
 # 3. DOWNLOAD ROM
@@ -130,7 +136,7 @@ for part in $PARTITIONS; do
             cp -r "$GITHUB_WORKSPACE/mods/$part/"* "${part}_dump/"
         fi
         
-        # FIXED: Use standard -zlz4 (Lowercase)
+        # Using lowercase lz4 for compatibility
         mkfs.erofs -zlz4 "${part}_mod.img" "${part}_dump"
         if [ $? -ne 0 ]; then
             echo "❌ CRITICAL: Failed to compress $part! Check logs."
@@ -142,7 +148,7 @@ for part in $PARTITIONS; do
         IMG_SIZE=$(stat -c%s "${part}_mod.img")
         LPM_ARGS="$LPM_ARGS --partition ${part}:readonly:${IMG_SIZE}:main --image ${part}=${part}_mod.img"
     else
-        echo "    (Skipped - Not in ROM)"
+        echo "    (Skipped)"
     fi
 done
 
@@ -155,13 +161,16 @@ fi
 
 # 7. BUILD SUPER IMAGE
 echo "🔨  Building Super..."
+
+# We execute this openly to see any errors in the log
 "$BIN_DIR/lpmake" --metadata-size 65536 --super-name super --metadata-slots 2 \
        --device super:$SUPER_SIZE --group main:$SUPER_SIZE \
        $LPM_ARGS --output "$IMAGES_DIR/super.img"
 
-# VERIFY SUPER
+# Verify
 if [ ! -f "$IMAGES_DIR/super.img" ]; then
     echo "❌ CRITICAL: super.img was NOT created. lpmake failed."
+    # If it failed, we exit so we don't upload a broken zip
     exit 1
 fi
 
