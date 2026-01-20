@@ -1,8 +1,11 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - COMPATIBILITY MODE (BULLETPROOF)
+#  NEXDROID GOONER - COMPATIBILITY MODE (BULLETPROOF V2)
 # =========================================================
+
+# Fail on any error immediately (Safety First)
+set -e 
 
 ROM_URL="$1"
 GITHUB_WORKSPACE=$(pwd)
@@ -15,8 +18,7 @@ OTATOOLS_DIR="$GITHUB_WORKSPACE/otatools"
 
 # 1. SETUP & DEPENDENCIES
 echo "🛠️  Setting up Environment..."
-mkdir -p "$IMAGES_DIR" "$TOOLS_DIR" "$TEMP_DIR" "$OTATOOLS_DIR"
-chmod +x "$BIN_DIR"/*
+mkdir -p "$IMAGES_DIR" "$TOOLS_DIR" "$TEMP_DIR" "$OTATOOLS_DIR" "$BIN_DIR"
 export PATH="$BIN_DIR:$PATH"
 
 # Install standard tools
@@ -24,39 +26,49 @@ sudo apt-get update -y
 sudo apt-get install -y python3 python3-pip erofs-utils erofsfuse jq aria2 zip unzip liblz4-tool
 
 # --- STEP 1: FIX THE OS (Install Deleted Libraries) ---
-# Ubuntu 24.04 removed these, so we install them manually to stop Silent Crashes.
+# Ubuntu 24.04 (Noble) killed these libs. We fetch stable 22.04 (Jammy) versions.
 echo "💉 Injecting Legacy System Libraries..."
 
-# Install libssl1.1
-wget -q http://nz2.archive.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2_amd64.deb
-sudo dpkg -i libssl1.1_1.1.1f-1ubuntu2_amd64.deb || sudo apt-get install -f -y
+# Download with specific output names to avoid file-not-found errors
+wget -q -O libssl1.1.deb http://security.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2.23_amd64.deb
+wget -q -O libtinfo5.deb http://security.ubuntu.com/ubuntu/pool/universe/n/ncurses/libtinfo5_6.3-2ubuntu0.1_amd64.deb
 
-# Install libncurses5 (Crucial for android tools)
-wget -q http://nz2.archive.ubuntu.com/ubuntu/pool/universe/n/ncurses/libtinfo5_6.4-2_amd64.deb
-wget -q http://nz2.archive.ubuntu.com/ubuntu/pool/universe/n/ncurses/libncurses5_6.4-2_amd64.deb
-sudo dpkg -i libtinfo5_6.4-2_amd64.deb libncurses5_6.4-2_amd64.deb
-
+# Install them
+sudo dpkg -i libssl1.1.deb libtinfo5.deb
 rm *.deb
 
-# 2. DOWNLOAD VERIFIED TOOLS (Ignore User Uploads)
+# 2. DOWNLOAD VERIFIED TOOLS
 echo "⬇️  Fetching Verified Toolchain..."
 
-# Force delete any user uploaded lpmake to prevent conflicts
+# Clean old binaries
 rm -f "$BIN_DIR/lpmake" "$BIN_DIR/lpmake.exe"
 
-# Download complete OTATools package (Binary + Libs)
+# Download SebaUbuntu's OTATools (Known Good)
 wget -q -O "otatools.zip" "https://github.com/SebaUbuntu/otatools-build/releases/download/v0.0.1/otatools.zip"
-unzip -q "otatools.zip" -d "$OTATOOLS_DIR"
-rm "otatools.zip"
+
+# Verify zip before unzipping
+if unzip -tq otatools.zip; then
+    unzip -q -o "otatools.zip" -d "$OTATOOLS_DIR"
+    rm "otatools.zip"
+else
+    echo "❌ CRITICAL: OTATools download failed (Corrupt Zip). Dumping header:"
+    head -n 5 otatools.zip
+    exit 1
+fi
 
 # Link the internal libraries
 export PATH="$OTATOOLS_DIR/bin:$PATH"
 export LD_LIBRARY_PATH="$OTATOOLS_DIR/lib64:$LD_LIBRARY_PATH"
 
-# 3. PRE-FLIGHT CHECK (Fail Early if Broken)
+# 3. PRE-FLIGHT CHECK
 echo "🧪 Pre-flight check: Testing lpmake..."
+# Turn off 'set -e' temporarily to catch the error manually
+set +e
 lpmake --help > /dev/null 2>&1
-if [ $? -ne 0 ]; then
+LPM_STATUS=$?
+set -e
+
+if [ $LPM_STATUS -ne 0 ]; then
     echo "❌ CRITICAL ERROR: lpmake failed to start!"
     echo "   Dumping dependency info:"
     ldd "$OTATOOLS_DIR/bin/lpmake"
@@ -67,16 +79,19 @@ fi
 
 # 4. DOWNLOAD PAYLOAD DUMPER
 if [ ! -f "$BIN_DIR/payload-dumper-go" ]; then
-    wget -q https://github.com/ssut/payload-dumper-go/releases/download/1.2.2/payload-dumper-go_1.2.2_linux_amd64.tar.gz
-    tar -xzf payload-dumper-go_1.2.2_linux_amd64.tar.gz
-    find . -type f -name "payload-dumper-go" -not -path "*/bin/*" -exec mv {} "$BIN_DIR/" \;
+    wget -q -O pdg.tar.gz https://github.com/ssut/payload-dumper-go/releases/download/1.2.2/payload-dumper-go_1.2.2_linux_amd64.tar.gz
+    tar -xzf pdg.tar.gz
+    # Smart find to handle directory nesting
+    find . -name "payload-dumper-go" -type f -exec mv {} "$BIN_DIR/" \;
     chmod +x "$BIN_DIR/payload-dumper-go"
+    rm pdg.tar.gz
 fi
 
 # 5. DOWNLOAD ROM
 echo "⬇️  Downloading ROM..."
 cd "$TEMP_DIR"
-aria2c -x 16 -s 16 --file-allocation=none -o "rom.zip" "$ROM_URL"
+# aria2c is faster and handles errors better than wget
+aria2c -x 16 -s 16 --console-log-level=warn --file-allocation=none -o "rom.zip" "$ROM_URL"
 unzip -o "rom.zip" payload.bin
 rm "rom.zip"
 
@@ -89,41 +104,56 @@ echo "🕵️  Detecting Device Identity..."
 payload-dumper-go -p mi_ext,system -o . payload.bin > /dev/null 2>&1
 
 DEVICE_CODE=""
-if [ -f "mi_ext.img" ]; then
-    mkdir -p mnt_id
-    erofsfuse mi_ext.img mnt_id
-    if [ -f "mnt_id/etc/build.prop" ]; then
-        RAW_CODE=$(grep "ro.product.mod_device=" "mnt_id/etc/build.prop" | head -1 | cut -d'=' -f2)
-        if [ ! -z "$RAW_CODE" ]; then
-            DEVICE_CODE=$(echo "$RAW_CODE" | cut -d'_' -f1)
-            echo "    ✅ Found mod_device in mi_ext: $RAW_CODE (Using: $DEVICE_CODE)"
+detect_device() {
+    IMG_FILE="$1"
+    MOUNT_DIR="mnt_detect"
+    
+    if [ -f "$IMG_FILE" ]; then
+        mkdir -p "$MOUNT_DIR"
+        erofsfuse "$IMG_FILE" "$MOUNT_DIR"
+        
+        # Search widely for build.prop
+        PROP_FILE=$(find "$MOUNT_DIR" -name "build.prop" | head -n 1)
+        
+        if [ ! -z "$PROP_FILE" ]; then
+            # Try ro.product.device first, then mod_device
+            CODE=$(grep "ro.product.device=" "$PROP_FILE" | head -1 | cut -d'=' -f2)
+            if [ -z "$CODE" ]; then
+                 CODE=$(grep "ro.product.mod_device=" "$PROP_FILE" | head -1 | cut -d'=' -f2 | cut -d'_' -f1)
+            fi
+            
+            # Capture OS Version while we are here
+            if [ -z "$OS_VER" ]; then
+                OS_VER=$(grep "ro.system.build.version.incremental=" "$PROP_FILE" | head -1 | cut -d'=' -f2)
+            fi
         fi
+        
+        # Lazy unmount is safer on CI environments
+        fusermount -uz "$MOUNT_DIR"
+        rmdir "$MOUNT_DIR"
+        rm "$IMG_FILE"
+        echo "$CODE"
     fi
-    fusermount -u mnt_id
-    rm mi_ext.img
-fi
+}
 
-if [ -f "system.img" ]; then
-    mkdir -p mnt_id
-    erofsfuse system.img mnt_id
-    if [ -f "mnt_id/system/build.prop" ]; then SYS_PROP="mnt_id/system/build.prop"; else SYS_PROP=$(find mnt_id -name "build.prop" | head -n 1); fi
+# Try mi_ext first (Xiaomi usually hides identity here)
+DEVICE_CODE=$(detect_device "mi_ext.img")
 
-    if [ -z "$DEVICE_CODE" ]; then
-        DEVICE_CODE=$(grep "ro.product.device=" "$SYS_PROP" | head -1 | cut -d'=' -f2)
-        if [ -z "$DEVICE_CODE" ]; then DEVICE_CODE=$(grep "ro.product.system.device=" "$SYS_PROP" | head -1 | cut -d'=' -f2); fi
-    fi
-    OS_VER=$(grep "ro.system.build.version.incremental=" "$SYS_PROP" | head -1 | cut -d'=' -f2)
-    fusermount -u mnt_id
-    rmdir mnt_id
-    rm system.img
+# Fallback to system if mi_ext failed
+if [ -z "$DEVICE_CODE" ]; then
+    DEVICE_CODE=$(detect_device "system.img")
 fi
 
 if [ -z "$DEVICE_CODE" ]; then echo "❌ CRITICAL: Detection Failed!"; exit 1; fi
 
 echo "✅  Identity: $DEVICE_CODE | $OS_VER"
 
+# Validate against devices.json
 SUPER_SIZE=$(jq -r --arg dev "$DEVICE_CODE" '.[$dev].super_size' "$GITHUB_WORKSPACE/devices.json")
-if [ "$SUPER_SIZE" == "null" ] || [ -z "$SUPER_SIZE" ]; then echo "❌  DEVICE UNKNOWN: '$DEVICE_CODE' - Add to devices.json"; exit 1; fi
+if [ "$SUPER_SIZE" == "null" ] || [ -z "$SUPER_SIZE" ]; then 
+    echo "❌  DEVICE UNKNOWN: '$DEVICE_CODE' - Add this device and its super_size to devices.json"
+    exit 1
+fi
 
 # 8. MODDING ENGINE
 LPM_ARGS=""
@@ -140,27 +170,25 @@ for part in $PARTITIONS; do
         
         erofsfuse "${part}.img" "mnt_point"
         cp -a "mnt_point/." "${part}_dump/"
-        fusermount -u "mnt_point"
+        fusermount -uz "mnt_point"
         rmdir "mnt_point"
         rm "${part}.img"
         
+        # INJECT MODS IF THEY EXIST
         if [ -d "$GITHUB_WORKSPACE/mods/$part" ]; then
-            echo "    -> Injecting Mods..."
+            echo "    -> Injecting Mods into $part..."
             cp -r "$GITHUB_WORKSPACE/mods/$part/"* "${part}_dump/"
         fi
         
-        mkfs.erofs -zlz4 "${part}_mod.img" "${part}_dump"
-        if [ $? -ne 0 ]; then
-            echo "❌ CRITICAL: Failed to compress $part!"
-            exit 1
-        fi
+        # Re-pack as EROFS (LZ4)
+        mkfs.erofs -zlz4 "${part}_mod.img" "${part}_dump" > /dev/null
         
         rm -rf "${part}_dump"
         
         IMG_SIZE=$(stat -c%s "${part}_mod.img")
         LPM_ARGS="$LPM_ARGS --partition ${part}:readonly:${IMG_SIZE}:main --image ${part}=${part}_mod.img"
     else
-        echo "    (Skipped)"
+        echo "    (Skipped - Partition not found)"
     fi
 done
 
@@ -186,11 +214,14 @@ echo "✅ Super Image Created!"
 
 # 10. FINALIZE & UPLOAD
 cd "$OUTPUT_DIR"
-python3 "$GITHUB_WORKSPACE/gen_scripts.py" "$DEVICE_CODE" "images"
+# Only run gen_scripts if it exists
+if [ -f "$GITHUB_WORKSPACE/gen_scripts.py" ]; then
+    python3 "$GITHUB_WORKSPACE/gen_scripts.py" "$DEVICE_CODE" "images"
+fi
 
 echo "📥  Bundling ADB..."
-wget -q https://dl.google.com/android/repository/platform-tools-latest-windows.zip
-unzip -q platform-tools-latest-windows.zip && mv platform-tools/* tools/ && rm -rf platform-tools*
+wget -q -O adb.zip https://dl.google.com/android/repository/platform-tools-latest-windows.zip
+unzip -q adb.zip && mv platform-tools/* tools/ && rm -rf platform-tools* adb.zip
 
 ZIP_NAME="ota_NexDroid_${DEVICE_CODE}_${OS_VER}.zip"
 echo "📦  Zipping..."
@@ -204,7 +235,11 @@ else
 fi
 
 FILE_ID=$(echo $RESPONSE | jq -r '.id')
-if [ "$FILE_ID" == "null" ] || [ -z "$FILE_ID" ]; then echo "❌ Upload Failed: $RESPONSE"; exit 1; fi
+if [ "$FILE_ID" == "null" ] || [ -z "$FILE_ID" ]; then 
+    echo "❌ Upload Failed: $RESPONSE"
+    exit 1
+fi
 
 DOWNLOAD_LINK="https://pixeldrain.com/u/$FILE_ID"
+echo "::notice::Download Link: $DOWNLOAD_LINK"
 echo "✅ DONE! Link: $DOWNLOAD_LINK"
