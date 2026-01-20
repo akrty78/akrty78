@@ -1,44 +1,32 @@
-name: Remote Modding Server
-
+name: NexDroid ROM Factory
 on:
-  workflow_dispatch:
-    inputs:
-      target_url:
-        description: 'URL of the file/ROM to mod'
-        required: true
-        default: 'none'
-      mod_type:
-        description: 'Type of mod to apply (e.g., icons, debloat, patch)'
-        required: true
-        default: 'standard'
+  repository_dispatch:
+    types: [build_rom]
 
 jobs:
-  build-and-mod:
-    runs-on: ubuntu-latest  # The "Server" provided by GitHub
-
+  build:
+    runs-on: ubuntu-latest
+    permissions: { contents: write, actions: write }
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v3
-
-      - name: Set up Environment
+      - uses: actions/checkout@v4
+      - name: Setup
         run: |
-          sudo apt-get update
-          sudo apt-get install -y python3-pip zip unzip
-          # Add any other tools you typically use (e.g., apktool, signers)
-
-      - name: Download Target
+          sudo apt-get update && sudo apt-get install -y python3 python3-pip zip unzip aria2 jq erofs-utils
+          chmod +x bin/*
+      - name: Run Factory
+        id: build
         run: |
-          echo "Receiving file from: ${{ inputs.target_url }}"
-          # wget ${{ inputs.target_url }} -O input_file.zip
-
-      - name: Run Modding Script
+          bash mod.sh "${{ github.event.client_payload.rom_url }}" > build.log 2>&1
+          LINK=$(grep "https://pixeldrain.com" build.log | tail -n 1)
+          echo "DOWNLOAD_LINK=$LINK" >> $GITHUB_ENV
+      - name: Success
+        if: success()
         run: |
-          echo "Starting mod process: ${{ inputs.mod_type }}"
-          # chmod +x ./your_script.sh
-          # ./your_script.sh input_file.zip
-
-      - name: Upload Result
-        uses: actions/upload-artifact@v4
-        with:
-          name: Modded-Result
-          path: output_folder/ # Replace with your actual output directory
+          curl -s -X POST https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage \
+          -d chat_id=${{ secrets.CHAT_ID }} -d parse_mode=Markdown \
+          -d text="✅ *Build Complete!* %0A%0A📦 [Download Here](${{ env.DOWNLOAD_LINK }})"
+      - name: Failure
+        if: failure()
+        run: |
+          curl -s -X POST https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage \
+          -d chat_id=${{ secrets.CHAT_ID }} -d text="❌ Build Failed! Check GitHub Actions."
