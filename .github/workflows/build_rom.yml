@@ -1,0 +1,57 @@
+name: NexDroid ROM Factory
+
+on:
+  repository_dispatch:
+    types: [build_rom]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+
+    steps:
+      - name: ⬇️ Checkout Repo
+        uses: actions/checkout@v4
+
+      - name: 🛠️ Setup Environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3 python3-pip zip unzip aria2 jq erofs-utils
+          # We need to make sure binaries in bin/ are executable
+          chmod +x bin/*
+
+      - name: 🚀 Run Modder Engine
+        id: build_rom
+        run: |
+          # The URL comes from the Telegram Bot trigger
+          ROM_URL="${{ github.event.client_payload.rom_url }}"
+          
+          echo "Starting build for: $ROM_URL"
+          
+          # Run the main script
+          bash mod.sh "$ROM_URL" > build.log 2>&1
+          
+          # Capture the output link (We assume mod.sh prints the link at the very end)
+          # Note: We need to modify mod.sh slightly to ensure it prints just the link on the last line
+          # or we just grep it from the log.
+          DOWNLOAD_LINK=$(grep "https://pixeldrain.com" build.log | tail -n 1)
+          
+          # Save to GitHub Environment variable for next steps
+          echo "DOWNLOAD_LINK=$DOWNLOAD_LINK" >> $GITHUB_ENV
+
+      - name: ✅ Notify Success
+        if: success()
+        run: |
+          curl -s -X POST https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage \
+          -d chat_id=${{ secrets.CHAT_ID }} \
+          -d parse_mode=Markdown \
+          -d text="✅ *NexDroid Build Complete!* %0A%0A📦 *Download:* ${{ env.DOWNLOAD_LINK }} %0A%0A_Flash this zip in TWRP or unzip for Fastboot._"
+
+      - name: ❌ Notify Failure
+        if: failure()
+        run: |
+          curl -s -X POST https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage \
+          -d chat_id=${{ secrets.CHAT_ID }} \
+          -d text="❌ *Build Failed!* Check GitHub Actions logs for details."
