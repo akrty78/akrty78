@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - FULL OTATOOLS EDITION
+#  NEXDROID GOONER - STANDALONE BINARY EDITION
 # =========================================================
 
 ROM_URL="$1"
@@ -11,42 +11,43 @@ OUTPUT_DIR="$GITHUB_WORKSPACE/NexMod_Output"
 IMAGES_DIR="$OUTPUT_DIR/images"
 TOOLS_DIR="$OUTPUT_DIR/tools"
 TEMP_DIR="$GITHUB_WORKSPACE/temp"
-OTATOOLS_DIR="$GITHUB_WORKSPACE/otatools"
 
 # 1. SETUP
 echo "🛠️  Setting up Environment..."
-mkdir -p "$IMAGES_DIR" "$TOOLS_DIR" "$TEMP_DIR" "$OTATOOLS_DIR"
-chmod +x "$BIN_DIR"/*
+mkdir -p "$IMAGES_DIR" "$TOOLS_DIR" "$TEMP_DIR"
+# Force permissions on your uploaded file
+chmod -R +x "$BIN_DIR"
 export PATH="$BIN_DIR:$PATH"
 
 # Install basics
 sudo apt-get update -y
 sudo apt-get install -y python3 python3-pip erofs-utils erofsfuse jq aria2 zip unzip liblz4-tool
 
-# 2. DOWNLOAD FULL OTATOOLS (Binary + Libraries)
-echo "⬇️  Fetching OTATools (lpmake + libs)..."
+# 2. CHECK YOUR UPLOADED LPMAKE
+echo "⬇️  Checking lpmake..."
 
-# We use a trusted build of OTATools that includes the lib64 folder
-wget -q -O "otatools.zip" "https://github.com/SebaUbuntu/otatools-build/releases/download/v0.0.1/otatools.zip"
-unzip -q "otatools.zip" -d "$OTATOOLS_DIR"
-rm "otatools.zip"
+if [ -f "$BIN_DIR/lpmake" ]; then
+    echo "📦 FOUND LOCAL LPMAKE. Using your MIO Kitchen file."
+else
+    # Fallback if you forgot to upload it
+    echo "⚠️  lpmake not found in bin/. Downloading fallback..."
+    wget -q -O "$BIN_DIR/lpmake" "https://github.com/elfamigos/android-tools-bin/raw/main/linux/lpmake"
+    chmod +x "$BIN_DIR/lpmake"
+fi
 
-# SETUP PATHS FOR LPMAKE
-# This tells Linux to use the libraries included in the zip
-export PATH="$OTATOOLS_DIR/bin:$PATH"
-export LD_LIBRARY_PATH="$OTATOOLS_DIR/lib64:$LD_LIBRARY_PATH"
-
+# TEST IT (The Moment of Truth)
 echo "🧪 Testing lpmake..."
 lpmake --help > /dev/null 2>&1
 if [ $? -ne 0 ]; then
-    echo "❌ ERROR: lpmake still failing. Debug info:"
-    ldd "$OTATOOLS_DIR/bin/lpmake"
+    echo "❌ ERROR: Your lpmake file failed to run."
+    echo "    Debug Info (What is missing?):"
+    ldd "$BIN_DIR/lpmake"
     exit 1
 else
-    echo "    ✅ lpmake is ready and linked correctly."
+    echo "    ✅ IT WORKS! This binary is standalone."
 fi
 
-# 3. DOWNLOAD PAYLOAD DUMPER
+# 3. DOWNLOAD PAYLOAD DUMPER (If missing)
 if [ ! -f "$BIN_DIR/payload-dumper-go" ]; then
     echo "⬇️  Fetching Payload Dumper..."
     wget -q https://github.com/ssut/payload-dumper-go/releases/download/1.2.2/payload-dumper-go_1.2.2_linux_amd64.tar.gz
@@ -134,7 +135,6 @@ for part in $PARTITIONS; do
             cp -r "$GITHUB_WORKSPACE/mods/$part/"* "${part}_dump/"
         fi
         
-        # Using lowercase lz4 for compatibility
         mkfs.erofs -zlz4 "${part}_mod.img" "${part}_dump"
         if [ $? -ne 0 ]; then
             echo "❌ CRITICAL: Failed to compress $part!"
@@ -157,11 +157,10 @@ if [ "$FOUND_PARTITIONS" = false ]; then
     exit 1
 fi
 
-# 8. BUILD SUPER IMAGE (With Error Capture)
+# 8. BUILD SUPER IMAGE
 echo "🔨  Building Super..."
 echo "    Max Size: $SUPER_SIZE"
 
-# Run lpmake and capture output
 lpmake --metadata-size 65536 --super-name super --metadata-slots 2 \
        --device super:$SUPER_SIZE --group main:$SUPER_SIZE \
        $LPM_ARGS --output "$IMAGES_DIR/super.img" > lpmake_log.txt 2>&1
