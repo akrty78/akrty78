@@ -15,6 +15,18 @@ jobs:
       - name: ⬇️ Checkout Repo
         uses: actions/checkout@v4
 
+      # ✅ THIS FIXES THE "OUT OF SPACE" CRASH
+      - name: 🗑️ Free Disk Space (Ubuntu)
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
       - name: 🛠️ Setup Environment
         run: |
           sudo apt-get update
@@ -24,12 +36,11 @@ jobs:
 
       - name: 🚀 Run Modder Engine
         id: build
-        # We perform the build and redirect output to build.log
-        # We also force exit code 0 initially so we can check the log for the link
         run: |
+          # Redirect output to build.log for debugging
           bash mod.sh "${{ github.event.client_payload.rom_url }}" > build.log 2>&1
           
-          # Check if the build actually succeeded by looking for the link
+          # Check for success link
           LINK=$(grep "https://pixeldrain.com" build.log | tail -n 1)
           
           if [ -z "$LINK" ]; then
@@ -61,22 +72,3 @@ jobs:
           curl -s -X POST https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage \
           -d chat_id=${{ secrets.CHAT_ID }} \
           -d text="❌ Build Failed! I have printed the logs in the GitHub Actions tab. Go check them!"
-
-          - name: ⬇️ Checkout Repo
-        uses: actions/checkout@v4
-
-      # 👇 ADD THIS NEW STEP HERE 👇
-      - name: 🗑️ Free Disk Space (Ubuntu)
-        uses: jlumbroso/free-disk-space@main
-        with:
-          # This cleans up huge pre-installed apps to give us ~15GB extra space
-          tool-cache: true
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          docker-images: true
-          swap-storage: true
-
-      - name: 🛠️ Setup Environment
-        # ... (rest of your file)
