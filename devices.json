@@ -1,0 +1,17 @@
+{
+  "marble": {
+    "device_name": "Poco F5",
+    "super_size": 9126805504,
+    "header": "NexDroid Gooner - Marble Edition"
+  },
+  "houji": {
+    "device_name": "Xiaomi 14",
+    "super_size": 10737418240,
+    "header": "NexDroid Gooner - Houji Edition"
+  },
+  "mondrian": {
+    "device_name": "Poco F5 Pro",
+    "super_size": 9126805504,
+    "header": "NexDroid Gooner - Mondrian Edition"
+  }
+}
