@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - LOW DISK SPACE EDITION
+#  NEXDROID GOONER - SMART MOUNT EDITION (FIXED)
 # =========================================================
 
 ROM_URL="$1"
@@ -18,8 +18,9 @@ mkdir -p "$IMAGES_DIR" "$TOOLS_DIR" "$TEMP_DIR"
 chmod +x "$BIN_DIR"/*
 export PATH="$BIN_DIR:$PATH"
 
+# Install Tools (Added erofsfuse!)
 sudo apt-get update -y
-sudo apt-get install -y python3 python3-pip erofs-utils jq aria2 zip unzip
+sudo apt-get install -y python3 python3-pip erofs-utils erofsfuse jq aria2 zip unzip
 
 # AUTO-DOWNLOAD PAYLOAD DUMPER
 if [ ! -f "$BIN_DIR/payload-dumper-go" ]; then
@@ -30,89 +31,107 @@ if [ ! -f "$BIN_DIR/payload-dumper-go" ]; then
     chmod +x "$BIN_DIR/payload-dumper-go"
 fi
 
-# 2. DOWNLOAD ROM (Streamlined)
+# 2. DOWNLOAD ROM
 echo "⬇️  Downloading ROM..."
 cd "$TEMP_DIR"
 aria2c -x 16 -s 16 --file-allocation=none -o "rom.zip" "$ROM_URL"
 unzip -o "rom.zip" payload.bin
-rm "rom.zip" # 🗑️ Free 6GB immediately
+rm "rom.zip"
 
-# 3. EXTRACT FIRMWARE (Small files only)
+# 3. EXTRACT FIRMWARE (Small files)
 echo "🔍 Extracting Firmware..."
-# We dump ONLY the small boot partitions first to save space
 payload-dumper-go -p boot,dtbo,vendor_boot,recovery,init_boot,vbmeta,vbmeta_system,vbmeta_vendor -o "$IMAGES_DIR" payload.bin > /dev/null 2>&1
 
-# 4. DETECT DEVICE (Extract System Temporarily)
+# 4. DETECT DEVICE (Using Mount)
 echo "🕵️  Detecting Device..."
+# Extract system.img temporarily
 payload-dumper-go -p system -o . payload.bin > /dev/null 2>&1
-extract.erofs -i system.img -x -o extracted_system
 
-if [ -f "extracted_system/system/build.prop" ]; then
-    BUILD_PROP="extracted_system/system/build.prop"
-elif [ -f "extracted_system/build.prop" ]; then
-    BUILD_PROP="extracted_system/build.prop"
+# Mount it instead of extracting (Saves space/tools)
+mkdir -p mnt_system
+erofsfuse system.img mnt_system
+
+# Find build.prop inside mount
+if [ -f "mnt_system/system/build.prop" ]; then
+    BUILD_PROP="mnt_system/system/build.prop"
+elif [ -f "mnt_system/build.prop" ]; then
+    BUILD_PROP="mnt_system/build.prop"
 else
-    BUILD_PROP=$(find extracted_system -name "build.prop" | head -n 1)
+    BUILD_PROP=$(find mnt_system -name "build.prop" | head -n 1)
 fi
 
 if [ -z "$BUILD_PROP" ]; then
-    echo "❌ CRITICAL: build.prop not found!"
+    echo "❌ CRITICAL: build.prop not found in system image!"
+    fusermount -u mnt_system
     exit 1
 fi
 
+echo "🔎 Reading: $BUILD_PROP"
 DEVICE_CODE=$(grep "ro.product.device=" "$BUILD_PROP" | head -1 | cut -d'=' -f2)
 OS_VER=$(grep "ro.system.build.version.incremental=" "$BUILD_PROP" | head -1 | cut -d'=' -f2)
 ANDROID_VER=$(grep "ro.system.build.version.release=" "$BUILD_PROP" | head -1 | cut -d'=' -f2)
 
-# CLEANUP SYSTEM IMMEDIATELY
-rm -rf extracted_system system.img 
+# Unmount and Cleanup
+fusermount -u mnt_system
+rmdir mnt_system
+rm system.img 
 
 echo "✅  Identity: $DEVICE_CODE | $OS_VER"
 
 SUPER_SIZE=$(jq -r --arg dev "$DEVICE_CODE" '.[$dev].super_size' "$GITHUB_WORKSPACE/devices.json")
 if [ "$SUPER_SIZE" == "null" ] || [ -z "$SUPER_SIZE" ]; then
-    echo "❌  DEVICE UNKNOWN! Update devices.json."
+    echo "❌  DEVICE UNKNOWN! Add '$DEVICE_CODE' to devices.json."
     exit 1
 fi
 
-# 5. SEQUENTIAL MODDING LOOP (The Space Saver)
+# 5. MODDING LOOP (Mount & Copy)
 LPM_ARGS=""
-# List of big partitions to process one by one
 PARTITIONS="system system_dlkm vendor vendor_dlkm product odm mi_ext"
 
 for part in $PARTITIONS; do
     echo "🔄 Processing: $part"
     
-    # A. Extract ONE partition
+    # Extract RAW image
     payload-dumper-go -p "$part" -o . payload.bin > /dev/null 2>&1
     
     if [ -f "${part}.img" ]; then
-        # B. Unpack EROFS
-        extract.erofs -i "${part}.img" -x -o "${part}_dump"
-        rm "${part}.img" # 🗑️ DELETE RAW IMAGE IMMEDIATELY
+        # Create Dump Folder
+        mkdir -p "${part}_dump"
+        mkdir -p "mnt_point"
         
-        # C. Mod (Inject files)
+        # Mount EROFS
+        erofsfuse "${part}.img" "mnt_point"
+        
+        # Copy files OUT of mount (So we can edit them)
+        # -a preserves permissions
+        cp -a "mnt_point/." "${part}_dump/"
+        
+        # Unmount & Clean raw image
+        fusermount -u "mnt_point"
+        rmdir "mnt_point"
+        rm "${part}.img"
+        
+        # Inject Mods
         if [ -d "$GITHUB_WORKSPACE/mods/$part" ]; then
             echo "    -> Injecting Mods..."
             cp -r "$GITHUB_WORKSPACE/mods/$part/"* "${part}_dump/"
         fi
         
-        # D. Repack to EROFS (Compressed)
+        # Repack
         mkfs.erofs -zLZ4HC "${part}_mod.img" "${part}_dump"
-        rm -rf "${part}_dump" # 🗑️ DELETE DUMP FOLDER
+        rm -rf "${part}_dump"
         
-        # E. Add to Super List
+        # Add to list
         IMG_SIZE=$(stat -c%s "${part}_mod.img")
         LPM_ARGS="$LPM_ARGS --partition ${part}:readonly:${IMG_SIZE}:main --image ${part}=${part}_mod.img"
     else
-        echo "    (Skipped - Not found in payload)"
+        echo "    (Skipped)"
     fi
 done
 
-# We can now delete payload.bin as we are done with it
-rm payload.bin # 🗑️ Free 6GB
+rm payload.bin
 
-# 6. BUILD SUPER IMAGE
+# 6. BUILD SUPER
 echo "🔨  Building Super..."
 lpmake --metadata-size 65536 --super-name super --metadata-slots 2 \
        --device super:$SUPER_SIZE --group main:$SUPER_SIZE \
