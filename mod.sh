@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - LIBSSL FIX EDITION
+#  NEXDROID GOONER - LINUX COMPATIBILITY FIX
 # =========================================================
 
 ROM_URL="$1"
@@ -18,18 +18,25 @@ mkdir -p "$IMAGES_DIR" "$TOOLS_DIR" "$TEMP_DIR"
 chmod +x "$BIN_DIR"/*
 export PATH="$BIN_DIR:$PATH"
 
-# Install standard tools
+# Install critical tools (erofsfuse for mounting, lz4 for repacking)
 sudo apt-get update -y
 sudo apt-get install -y python3 python3-pip erofs-utils erofsfuse jq aria2 zip unzip liblz4-tool
 
 # --- CRITICAL FIX: INSTALL LEGACY LIBSSL FOR LPMAKE ---
+# lpmake needs an older library that isn't in Ubuntu 24.04 by default
 echo "💉 Injecting Legacy Libraries..."
 wget -q http://nz2.archive.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2_amd64.deb
 sudo dpkg -i libssl1.1_1.1.1f-1ubuntu2_amd64.deb
 rm libssl1.1_1.1.1f-1ubuntu2_amd64.deb
 
-# 2. AUTO-HEAL TOOLS
+# 2. AUTO-HEAL TOOLS (Ensuring Linux Binaries)
 echo "⬇️  Checking Binary Tools..."
+
+# Remove Windows .exe if present (It breaks Linux)
+if [ -f "$BIN_DIR/lpmake.exe" ]; then
+    echo "🗑️  Deleting incompatible Windows lpmake.exe..."
+    rm "$BIN_DIR/lpmake.exe"
+fi
 
 # Payload Dumper
 if [ ! -f "$BIN_DIR/payload-dumper-go" ]; then
@@ -38,15 +45,14 @@ if [ ! -f "$BIN_DIR/payload-dumper-go" ]; then
     find . -type f -name "payload-dumper-go" -not -path "*/bin/*" -exec mv {} "$BIN_DIR/" \;
 fi
 
-# lpmake
-if [ ! -f "$BIN_DIR/lpmake" ]; then
-    echo "    -> Downloading lpmake..."
-    wget -q -O "$BIN_DIR/lpmake" "https://github.com/elfamigos/android-tools-bin/raw/main/linux/lpmake"
-fi
+# lpmake (Download LINUX version)
+# We force download to ensure we have the Linux binary, not the Windows one
+echo "    -> Downloading Linux lpmake..."
+wget -q -O "$BIN_DIR/lpmake" "https://github.com/elfamigos/android-tools-bin/raw/main/linux/lpmake"
 
 chmod +x "$BIN_DIR/"*
 
-# TEST LPMAKE (Verbose)
+# TEST LPMAKE
 echo "🧪 Testing lpmake..."
 "$BIN_DIR/lpmake" --help > /dev/null 2>&1
 if [ $? -ne 0 ]; then
@@ -136,10 +142,10 @@ for part in $PARTITIONS; do
             cp -r "$GITHUB_WORKSPACE/mods/$part/"* "${part}_dump/"
         fi
         
-        # Using lowercase lz4 for compatibility
+        # Lowercase lz4 fix
         mkfs.erofs -zlz4 "${part}_mod.img" "${part}_dump"
         if [ $? -ne 0 ]; then
-            echo "❌ CRITICAL: Failed to compress $part! Check logs."
+            echo "❌ CRITICAL: Failed to compress $part!"
             exit 1
         fi
         
@@ -161,16 +167,12 @@ fi
 
 # 7. BUILD SUPER IMAGE
 echo "🔨  Building Super..."
-
-# We execute this openly to see any errors in the log
 "$BIN_DIR/lpmake" --metadata-size 65536 --super-name super --metadata-slots 2 \
        --device super:$SUPER_SIZE --group main:$SUPER_SIZE \
        $LPM_ARGS --output "$IMAGES_DIR/super.img"
 
-# Verify
 if [ ! -f "$IMAGES_DIR/super.img" ]; then
     echo "❌ CRITICAL: super.img was NOT created. lpmake failed."
-    # If it failed, we exit so we don't upload a broken zip
     exit 1
 fi
 
@@ -190,7 +192,6 @@ zip -r -q "$ZIP_NAME" .
 
 echo "☁️  Uploading to PixelDrain..."
 if [ -z "$PIXELDRAIN_KEY" ]; then
-    echo "⚠️  No API Key found. Attempting anonymous upload..."
     RESPONSE=$(curl -s -T "$ZIP_NAME" "https://pixeldrain.com/api/file/")
 else
     RESPONSE=$(curl -s -T "$ZIP_NAME" -u :$PIXELDRAIN_KEY "https://pixeldrain.com/api/file/")
