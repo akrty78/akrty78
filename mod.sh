@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - NUCLEAR OPTION (FORCE FIX)
+#  NEXDROID GOONER - COMPATIBILITY MODE (BULLETPROOF)
 # =========================================================
 
 ROM_URL="$1"
@@ -13,78 +13,82 @@ TOOLS_DIR="$OUTPUT_DIR/tools"
 TEMP_DIR="$GITHUB_WORKSPACE/temp"
 OTATOOLS_DIR="$GITHUB_WORKSPACE/otatools"
 
-# 1. SETUP
+# 1. SETUP & DEPENDENCIES
 echo "🛠️  Setting up Environment..."
 mkdir -p "$IMAGES_DIR" "$TOOLS_DIR" "$TEMP_DIR" "$OTATOOLS_DIR"
 chmod +x "$BIN_DIR"/*
 export PATH="$BIN_DIR:$PATH"
 
-# Install basics
+# Install standard tools
 sudo apt-get update -y
 sudo apt-get install -y python3 python3-pip erofs-utils erofsfuse jq aria2 zip unzip liblz4-tool
 
-# --- CRITICAL FIX: INSTALL LEGACY LIBSSL ---
-# This is what fixes the "Silent Crash"
-echo "💉 Injecting Legacy Libraries..."
+# --- STEP 1: FIX THE OS (Install Deleted Libraries) ---
+# Ubuntu 24.04 removed these, so we install them manually to stop Silent Crashes.
+echo "💉 Injecting Legacy System Libraries..."
+
+# Install libssl1.1
 wget -q http://nz2.archive.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2_amd64.deb
-sudo dpkg -i libssl1.1_1.1.1f-1ubuntu2_amd64.deb
-rm libssl1.1_1.1.1f-1ubuntu2_amd64.deb
+sudo dpkg -i libssl1.1_1.1.1f-1ubuntu2_amd64.deb || sudo apt-get install -f -y
 
-# 2. FORCE DOWNLOAD WORKING TOOLS
-echo "⬇️  Fetching Verified Tools..."
+# Install libncurses5 (Crucial for android tools)
+wget -q http://nz2.archive.ubuntu.com/ubuntu/pool/universe/n/ncurses/libtinfo5_6.4-2_amd64.deb
+wget -q http://nz2.archive.ubuntu.com/ubuntu/pool/universe/n/ncurses/libncurses5_6.4-2_amd64.deb
+sudo dpkg -i libtinfo5_6.4-2_amd64.deb libncurses5_6.4-2_amd64.deb
 
-# DELETE USER'S BROKEN UPLOADS
-if [ -f "$BIN_DIR/lpmake" ]; then
-    echo "🗑️  Removing local lpmake (It was crashing)..."
-    rm "$BIN_DIR/lpmake"
-fi
+rm *.deb
 
-# DOWNLOAD TRUSTED OTATOOLS (Includes libs)
+# 2. DOWNLOAD VERIFIED TOOLS (Ignore User Uploads)
+echo "⬇️  Fetching Verified Toolchain..."
+
+# Force delete any user uploaded lpmake to prevent conflicts
+rm -f "$BIN_DIR/lpmake" "$BIN_DIR/lpmake.exe"
+
+# Download complete OTATools package (Binary + Libs)
 wget -q -O "otatools.zip" "https://github.com/SebaUbuntu/otatools-build/releases/download/v0.0.1/otatools.zip"
 unzip -q "otatools.zip" -d "$OTATOOLS_DIR"
 rm "otatools.zip"
 
-# SETUP PATHS
+# Link the internal libraries
 export PATH="$OTATOOLS_DIR/bin:$PATH"
 export LD_LIBRARY_PATH="$OTATOOLS_DIR/lib64:$LD_LIBRARY_PATH"
 
-echo "🧪 Testing lpmake..."
+# 3. PRE-FLIGHT CHECK (Fail Early if Broken)
+echo "🧪 Pre-flight check: Testing lpmake..."
 lpmake --help > /dev/null 2>&1
 if [ $? -ne 0 ]; then
-    echo "❌ ERROR: lpmake failed to run. Debug info:"
+    echo "❌ CRITICAL ERROR: lpmake failed to start!"
+    echo "   Dumping dependency info:"
     ldd "$OTATOOLS_DIR/bin/lpmake"
     exit 1
 else
-    echo "    ✅ lpmake is healthy."
+    echo "   ✅ lpmake is healthy and running."
 fi
 
-# 3. DOWNLOAD PAYLOAD DUMPER
+# 4. DOWNLOAD PAYLOAD DUMPER
 if [ ! -f "$BIN_DIR/payload-dumper-go" ]; then
-    echo "⬇️  Fetching Payload Dumper..."
     wget -q https://github.com/ssut/payload-dumper-go/releases/download/1.2.2/payload-dumper-go_1.2.2_linux_amd64.tar.gz
     tar -xzf payload-dumper-go_1.2.2_linux_amd64.tar.gz
     find . -type f -name "payload-dumper-go" -not -path "*/bin/*" -exec mv {} "$BIN_DIR/" \;
     chmod +x "$BIN_DIR/payload-dumper-go"
 fi
 
-# 4. DOWNLOAD ROM
+# 5. DOWNLOAD ROM
 echo "⬇️  Downloading ROM..."
 cd "$TEMP_DIR"
 aria2c -x 16 -s 16 --file-allocation=none -o "rom.zip" "$ROM_URL"
 unzip -o "rom.zip" payload.bin
 rm "rom.zip"
 
-# 5. EXTRACT FIRMWARE
+# 6. EXTRACT FIRMWARE
 echo "🔍 Extracting Firmware..."
 payload-dumper-go -p boot,dtbo,vendor_boot,recovery,init_boot,vbmeta,vbmeta_system,vbmeta_vendor -o "$IMAGES_DIR" payload.bin > /dev/null 2>&1
 
-# 6. SMART DETECTION
+# 7. SMART DETECTION
 echo "🕵️  Detecting Device Identity..."
 payload-dumper-go -p mi_ext,system -o . payload.bin > /dev/null 2>&1
 
 DEVICE_CODE=""
-
-# Strategy A: Check mi_ext
 if [ -f "mi_ext.img" ]; then
     mkdir -p mnt_id
     erofsfuse mi_ext.img mnt_id
@@ -99,7 +103,6 @@ if [ -f "mi_ext.img" ]; then
     rm mi_ext.img
 fi
 
-# Strategy B: Check System
 if [ -f "system.img" ]; then
     mkdir -p mnt_id
     erofsfuse system.img mnt_id
@@ -122,7 +125,7 @@ echo "✅  Identity: $DEVICE_CODE | $OS_VER"
 SUPER_SIZE=$(jq -r --arg dev "$DEVICE_CODE" '.[$dev].super_size' "$GITHUB_WORKSPACE/devices.json")
 if [ "$SUPER_SIZE" == "null" ] || [ -z "$SUPER_SIZE" ]; then echo "❌  DEVICE UNKNOWN: '$DEVICE_CODE' - Add to devices.json"; exit 1; fi
 
-# 7. MODDING ENGINE
+# 8. MODDING ENGINE
 LPM_ARGS=""
 PARTITIONS="system system_dlkm vendor vendor_dlkm product odm mi_ext"
 FOUND_PARTITIONS=false
@@ -146,7 +149,6 @@ for part in $PARTITIONS; do
             cp -r "$GITHUB_WORKSPACE/mods/$part/"* "${part}_dump/"
         fi
         
-        # Lowercase lz4 compatibility
         mkfs.erofs -zlz4 "${part}_mod.img" "${part}_dump"
         if [ $? -ne 0 ]; then
             echo "❌ CRITICAL: Failed to compress $part!"
@@ -164,28 +166,25 @@ done
 
 rm payload.bin
 
-if [ "$FOUND_PARTITIONS" = false ]; then
-    echo "❌ CRITICAL: No partitions found!"
-    exit 1
-fi
+if [ "$FOUND_PARTITIONS" = false ]; then echo "❌ CRITICAL: No partitions found!"; exit 1; fi
 
-# 8. BUILD SUPER IMAGE
+# 9. BUILD SUPER IMAGE
 echo "🔨  Building Super..."
 echo "    Max Size: $SUPER_SIZE"
 
-# We run this WITHOUT redirection so errors print to screen
 lpmake --metadata-size 65536 --super-name super --metadata-slots 2 \
        --device super:$SUPER_SIZE --group main:$SUPER_SIZE \
-       $LPM_ARGS --output "$IMAGES_DIR/super.img"
+       $LPM_ARGS --output "$IMAGES_DIR/super.img" > lpmake_log.txt 2>&1
 
 if [ ! -f "$IMAGES_DIR/super.img" ]; then
-    echo "❌ CRITICAL: lpmake failed (See error above)."
+    echo "❌ CRITICAL: lpmake failed. LOGS:"
+    cat lpmake_log.txt
     exit 1
 fi
 
 echo "✅ Super Image Created!"
 
-# 9. FINALIZE & UPLOAD
+# 10. FINALIZE & UPLOAD
 cd "$OUTPUT_DIR"
 python3 "$GITHUB_WORKSPACE/gen_scripts.py" "$DEVICE_CODE" "images"
 
@@ -205,10 +204,7 @@ else
 fi
 
 FILE_ID=$(echo $RESPONSE | jq -r '.id')
-if [ "$FILE_ID" == "null" ] || [ -z "$FILE_ID" ]; then
-    echo "❌ Upload Failed: $RESPONSE"
-    exit 1
-fi
+if [ "$FILE_ID" == "null" ] || [ -z "$FILE_ID" ]; then echo "❌ Upload Failed: $RESPONSE"; exit 1; fi
 
 DOWNLOAD_LINK="https://pixeldrain.com/u/$FILE_ID"
 echo "✅ DONE! Link: $DOWNLOAD_LINK"
