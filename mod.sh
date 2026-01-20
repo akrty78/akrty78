@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - FINAL FACTORY EDITION
+#  NEXDROID GOONER - STRICT FACTORY EDITION
 # =========================================================
 
 ROM_URL="$1"
@@ -18,11 +18,11 @@ mkdir -p "$IMAGES_DIR" "$TOOLS_DIR" "$TEMP_DIR"
 chmod +x "$BIN_DIR"/*
 export PATH="$BIN_DIR:$PATH"
 
-# Install critical tools (erofsfuse for mounting, lz4 for repacking)
+# Install critical tools
 sudo apt-get update -y
 sudo apt-get install -y python3 python3-pip erofs-utils erofsfuse jq aria2 zip unzip liblz4-tool
 
-# 2. AUTO-HEAL TOOLS (Downloads them if missing)
+# 2. AUTO-HEAL TOOLS
 echo "⬇️  Checking Binary Tools..."
 
 # Payload Dumper
@@ -32,13 +32,24 @@ if [ ! -f "$BIN_DIR/payload-dumper-go" ]; then
     find . -type f -name "payload-dumper-go" -not -path "*/bin/*" -exec mv {} "$BIN_DIR/" \;
 fi
 
-# lpmake (The Super Image Builder)
+# lpmake (CRITICAL FOR SUPER IMG)
 if [ ! -f "$BIN_DIR/lpmake" ]; then
     echo "    -> Downloading lpmake..."
     wget -q -O "$BIN_DIR/lpmake" "https://github.com/elfamigos/android-tools-bin/raw/main/linux/lpmake"
 fi
 
 chmod +x "$BIN_DIR/"*
+
+# TEST LPMAKE
+echo "🧪 Testing lpmake..."
+"$BIN_DIR/lpmake" --help > /dev/null 2>&1
+if [ $? -ne 0 ]; then
+    echo "❌ ERROR: lpmake binary is broken or missing dependencies!"
+    # Try installing common libs that might be missing
+    sudo apt-get install -y libssl-dev
+else
+    echo "    ✅ lpmake is ready."
+fi
 
 # 3. DOWNLOAD ROM
 echo "⬇️  Downloading ROM..."
@@ -47,24 +58,24 @@ aria2c -x 16 -s 16 --file-allocation=none -o "rom.zip" "$ROM_URL"
 unzip -o "rom.zip" payload.bin
 rm "rom.zip"
 
-# 4. EXTRACT FIRMWARE (Boot files)
+# 4. EXTRACT FIRMWARE
 echo "🔍 Extracting Firmware..."
 payload-dumper-go -p boot,dtbo,vendor_boot,recovery,init_boot,vbmeta,vbmeta_system,vbmeta_vendor -o "$IMAGES_DIR" payload.bin > /dev/null 2>&1
 
-# 5. SMART DETECTION (mi_ext + System)
+# 5. SMART DETECTION
 echo "🕵️  Detecting Device Identity..."
 payload-dumper-go -p mi_ext,system -o . payload.bin > /dev/null 2>&1
 
 DEVICE_CODE=""
 
-# Strategy A: Check mi_ext (New HyperOS Standard)
+# Strategy A: Check mi_ext
 if [ -f "mi_ext.img" ]; then
     mkdir -p mnt_id
     erofsfuse mi_ext.img mnt_id
     if [ -f "mnt_id/etc/build.prop" ]; then
         RAW_CODE=$(grep "ro.product.mod_device=" "mnt_id/etc/build.prop" | head -1 | cut -d'=' -f2)
         if [ ! -z "$RAW_CODE" ]; then
-            DEVICE_CODE=$(echo "$RAW_CODE" | cut -d'_' -f1) # marble_global -> marble
+            DEVICE_CODE=$(echo "$RAW_CODE" | cut -d'_' -f1)
             echo "    ✅ Found mod_device in mi_ext: $RAW_CODE (Using: $DEVICE_CODE)"
         fi
     fi
@@ -72,7 +83,7 @@ if [ -f "mi_ext.img" ]; then
     rm mi_ext.img
 fi
 
-# Strategy B: Check System (Fallback)
+# Strategy B: Check System
 if [ -f "system.img" ]; then
     mkdir -p mnt_id
     erofsfuse system.img mnt_id
@@ -95,52 +106,66 @@ echo "✅  Identity: $DEVICE_CODE | $OS_VER"
 SUPER_SIZE=$(jq -r --arg dev "$DEVICE_CODE" '.[$dev].super_size' "$GITHUB_WORKSPACE/devices.json")
 if [ "$SUPER_SIZE" == "null" ] || [ -z "$SUPER_SIZE" ]; then echo "❌  DEVICE UNKNOWN: '$DEVICE_CODE'"; exit 1; fi
 
-# 6. MODDING ENGINE (Mount -> Copy -> Mod -> Repack)
+# 6. MODDING ENGINE
 LPM_ARGS=""
 PARTITIONS="system system_dlkm vendor vendor_dlkm product odm mi_ext"
+FOUND_PARTITIONS=false
 
 for part in $PARTITIONS; do
     echo "🔄 Processing: $part"
     payload-dumper-go -p "$part" -o . payload.bin > /dev/null 2>&1
     
     if [ -f "${part}.img" ]; then
+        FOUND_PARTITIONS=true
         mkdir -p "${part}_dump" "mnt_point"
         
-        # Mount EROFS
         erofsfuse "${part}.img" "mnt_point"
-        
-        # Copy files OUT (Preserving permissions)
         cp -a "mnt_point/." "${part}_dump/"
-        
-        # Unmount & Clean
         fusermount -u "mnt_point"
         rmdir "mnt_point"
         rm "${part}.img"
         
-        # Inject Mods
         if [ -d "$GITHUB_WORKSPACE/mods/$part" ]; then
             echo "    -> Injecting Mods..."
             cp -r "$GITHUB_WORKSPACE/mods/$part/"* "${part}_dump/"
         fi
         
-        # Repack (Using lowercase lz4 to fix error)
+        # FIXED: Use standard -zlz4 (Lowercase)
         mkfs.erofs -zlz4 "${part}_mod.img" "${part}_dump"
+        if [ $? -ne 0 ]; then
+            echo "❌ CRITICAL: Failed to compress $part! Check logs."
+            exit 1
+        fi
+        
         rm -rf "${part}_dump"
         
         IMG_SIZE=$(stat -c%s "${part}_mod.img")
         LPM_ARGS="$LPM_ARGS --partition ${part}:readonly:${IMG_SIZE}:main --image ${part}=${part}_mod.img"
     else
-        echo "    (Skipped)"
+        echo "    (Skipped - Not in ROM)"
     fi
 done
 
 rm payload.bin
 
+if [ "$FOUND_PARTITIONS" = false ]; then
+    echo "❌ CRITICAL: No partitions found to build Super!"
+    exit 1
+fi
+
 # 7. BUILD SUPER IMAGE
 echo "🔨  Building Super..."
-lpmake --metadata-size 65536 --super-name super --metadata-slots 2 \
+"$BIN_DIR/lpmake" --metadata-size 65536 --super-name super --metadata-slots 2 \
        --device super:$SUPER_SIZE --group main:$SUPER_SIZE \
        $LPM_ARGS --output "$IMAGES_DIR/super.img"
+
+# VERIFY SUPER
+if [ ! -f "$IMAGES_DIR/super.img" ]; then
+    echo "❌ CRITICAL: super.img was NOT created. lpmake failed."
+    exit 1
+fi
+
+echo "✅ Super Image Created Successfully!"
 
 # 8. FINALIZE & UPLOAD
 cd "$OUTPUT_DIR"
@@ -156,10 +181,9 @@ zip -r -q "$ZIP_NAME" .
 
 echo "☁️  Uploading to PixelDrain..."
 if [ -z "$PIXELDRAIN_KEY" ]; then
-    echo "⚠️  No API Key found. Attempting anonymous upload (Might fail)..."
+    echo "⚠️  No API Key found. Attempting anonymous upload..."
     RESPONSE=$(curl -s -T "$ZIP_NAME" "https://pixeldrain.com/api/file/")
 else
-    # Upload with Key
     RESPONSE=$(curl -s -T "$ZIP_NAME" -u :$PIXELDRAIN_KEY "https://pixeldrain.com/api/file/")
 fi
 
