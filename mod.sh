@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - LINUX COMPATIBILITY FIX
+#  NEXDROID GOONER - FULL OTATOOLS EDITION
 # =========================================================
 
 ROM_URL="$1"
@@ -11,70 +11,62 @@ OUTPUT_DIR="$GITHUB_WORKSPACE/NexMod_Output"
 IMAGES_DIR="$OUTPUT_DIR/images"
 TOOLS_DIR="$OUTPUT_DIR/tools"
 TEMP_DIR="$GITHUB_WORKSPACE/temp"
+OTATOOLS_DIR="$GITHUB_WORKSPACE/otatools"
 
-# 1. SETUP & DEPENDENCIES
+# 1. SETUP
 echo "🛠️  Setting up Environment..."
-mkdir -p "$IMAGES_DIR" "$TOOLS_DIR" "$TEMP_DIR"
+mkdir -p "$IMAGES_DIR" "$TOOLS_DIR" "$TEMP_DIR" "$OTATOOLS_DIR"
 chmod +x "$BIN_DIR"/*
 export PATH="$BIN_DIR:$PATH"
 
-# Install critical tools (erofsfuse for mounting, lz4 for repacking)
+# Install basics
 sudo apt-get update -y
 sudo apt-get install -y python3 python3-pip erofs-utils erofsfuse jq aria2 zip unzip liblz4-tool
 
-# --- CRITICAL FIX: INSTALL LEGACY LIBSSL FOR LPMAKE ---
-# lpmake needs an older library that isn't in Ubuntu 24.04 by default
-echo "💉 Injecting Legacy Libraries..."
-wget -q http://nz2.archive.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2_amd64.deb
-sudo dpkg -i libssl1.1_1.1.1f-1ubuntu2_amd64.deb
-rm libssl1.1_1.1.1f-1ubuntu2_amd64.deb
+# 2. DOWNLOAD FULL OTATOOLS (Binary + Libraries)
+echo "⬇️  Fetching OTATools (lpmake + libs)..."
 
-# 2. AUTO-HEAL TOOLS (Ensuring Linux Binaries)
-echo "⬇️  Checking Binary Tools..."
+# We use a trusted build of OTATools that includes the lib64 folder
+wget -q -O "otatools.zip" "https://github.com/SebaUbuntu/otatools-build/releases/download/v0.0.1/otatools.zip"
+unzip -q "otatools.zip" -d "$OTATOOLS_DIR"
+rm "otatools.zip"
 
-# Remove Windows .exe if present (It breaks Linux)
-if [ -f "$BIN_DIR/lpmake.exe" ]; then
-    echo "🗑️  Deleting incompatible Windows lpmake.exe..."
-    rm "$BIN_DIR/lpmake.exe"
+# SETUP PATHS FOR LPMAKE
+# This tells Linux to use the libraries included in the zip
+export PATH="$OTATOOLS_DIR/bin:$PATH"
+export LD_LIBRARY_PATH="$OTATOOLS_DIR/lib64:$LD_LIBRARY_PATH"
+
+echo "🧪 Testing lpmake..."
+lpmake --help > /dev/null 2>&1
+if [ $? -ne 0 ]; then
+    echo "❌ ERROR: lpmake still failing. Debug info:"
+    ldd "$OTATOOLS_DIR/bin/lpmake"
+    exit 1
+else
+    echo "    ✅ lpmake is ready and linked correctly."
 fi
 
-# Payload Dumper
+# 3. DOWNLOAD PAYLOAD DUMPER
 if [ ! -f "$BIN_DIR/payload-dumper-go" ]; then
+    echo "⬇️  Fetching Payload Dumper..."
     wget -q https://github.com/ssut/payload-dumper-go/releases/download/1.2.2/payload-dumper-go_1.2.2_linux_amd64.tar.gz
     tar -xzf payload-dumper-go_1.2.2_linux_amd64.tar.gz
     find . -type f -name "payload-dumper-go" -not -path "*/bin/*" -exec mv {} "$BIN_DIR/" \;
+    chmod +x "$BIN_DIR/payload-dumper-go"
 fi
 
-# lpmake (Download LINUX version)
-# We force download to ensure we have the Linux binary, not the Windows one
-echo "    -> Downloading Linux lpmake..."
-wget -q -O "$BIN_DIR/lpmake" "https://github.com/elfamigos/android-tools-bin/raw/main/linux/lpmake"
-
-chmod +x "$BIN_DIR/"*
-
-# TEST LPMAKE
-echo "🧪 Testing lpmake..."
-"$BIN_DIR/lpmake" --help > /dev/null 2>&1
-if [ $? -ne 0 ]; then
-    echo "❌ ERROR: lpmake failed to run! Checking dependencies..."
-    ldd "$BIN_DIR/lpmake"
-    exit 1
-else
-    echo "    ✅ lpmake is healthy."
-fi
-
-# 3. DOWNLOAD ROM
+# 4. DOWNLOAD ROM
 echo "⬇️  Downloading ROM..."
 cd "$TEMP_DIR"
 aria2c -x 16 -s 16 --file-allocation=none -o "rom.zip" "$ROM_URL"
 unzip -o "rom.zip" payload.bin
 rm "rom.zip"
 
-# 4. EXTRACT FIRMWARE
+# 5. EXTRACT FIRMWARE
 echo "🔍 Extracting Firmware..."
 payload-dumper-go -p boot,dtbo,vendor_boot,recovery,init_boot,vbmeta,vbmeta_system,vbmeta_vendor -o "$IMAGES_DIR" payload.bin > /dev/null 2>&1
 
-# 5. SMART DETECTION
+# 6. SMART DETECTION
 echo "🕵️  Detecting Device Identity..."
 payload-dumper-go -p mi_ext,system -o . payload.bin > /dev/null 2>&1
 
@@ -116,9 +108,9 @@ if [ -z "$DEVICE_CODE" ]; then echo "❌ CRITICAL: Detection Failed!"; exit 1; f
 echo "✅  Identity: $DEVICE_CODE | $OS_VER"
 
 SUPER_SIZE=$(jq -r --arg dev "$DEVICE_CODE" '.[$dev].super_size' "$GITHUB_WORKSPACE/devices.json")
-if [ "$SUPER_SIZE" == "null" ] || [ -z "$SUPER_SIZE" ]; then echo "❌  DEVICE UNKNOWN: '$DEVICE_CODE'"; exit 1; fi
+if [ "$SUPER_SIZE" == "null" ] || [ -z "$SUPER_SIZE" ]; then echo "❌  DEVICE UNKNOWN: '$DEVICE_CODE' - Add to devices.json"; exit 1; fi
 
-# 6. MODDING ENGINE
+# 7. MODDING ENGINE
 LPM_ARGS=""
 PARTITIONS="system system_dlkm vendor vendor_dlkm product odm mi_ext"
 FOUND_PARTITIONS=false
@@ -142,7 +134,7 @@ for part in $PARTITIONS; do
             cp -r "$GITHUB_WORKSPACE/mods/$part/"* "${part}_dump/"
         fi
         
-        # Lowercase lz4 fix
+        # Using lowercase lz4 for compatibility
         mkfs.erofs -zlz4 "${part}_mod.img" "${part}_dump"
         if [ $? -ne 0 ]; then
             echo "❌ CRITICAL: Failed to compress $part!"
@@ -161,24 +153,28 @@ done
 rm payload.bin
 
 if [ "$FOUND_PARTITIONS" = false ]; then
-    echo "❌ CRITICAL: No partitions found to build Super!"
+    echo "❌ CRITICAL: No partitions found!"
     exit 1
 fi
 
-# 7. BUILD SUPER IMAGE
+# 8. BUILD SUPER IMAGE (With Error Capture)
 echo "🔨  Building Super..."
-"$BIN_DIR/lpmake" --metadata-size 65536 --super-name super --metadata-slots 2 \
+echo "    Max Size: $SUPER_SIZE"
+
+# Run lpmake and capture output
+lpmake --metadata-size 65536 --super-name super --metadata-slots 2 \
        --device super:$SUPER_SIZE --group main:$SUPER_SIZE \
-       $LPM_ARGS --output "$IMAGES_DIR/super.img"
+       $LPM_ARGS --output "$IMAGES_DIR/super.img" > lpmake_log.txt 2>&1
 
 if [ ! -f "$IMAGES_DIR/super.img" ]; then
-    echo "❌ CRITICAL: super.img was NOT created. lpmake failed."
+    echo "❌ CRITICAL: lpmake failed. LOGS:"
+    cat lpmake_log.txt
     exit 1
 fi
 
-echo "✅ Super Image Created Successfully!"
+echo "✅ Super Image Created!"
 
-# 8. FINALIZE & UPLOAD
+# 9. FINALIZE & UPLOAD
 cd "$OUTPUT_DIR"
 python3 "$GITHUB_WORKSPACE/gen_scripts.py" "$DEVICE_CODE" "images"
 
