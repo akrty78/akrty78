@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - STANDALONE BINARY EDITION
+#  NEXDROID GOONER - NUCLEAR OPTION (FORCE FIX)
 # =========================================================
 
 ROM_URL="$1"
@@ -11,43 +11,54 @@ OUTPUT_DIR="$GITHUB_WORKSPACE/NexMod_Output"
 IMAGES_DIR="$OUTPUT_DIR/images"
 TOOLS_DIR="$OUTPUT_DIR/tools"
 TEMP_DIR="$GITHUB_WORKSPACE/temp"
+OTATOOLS_DIR="$GITHUB_WORKSPACE/otatools"
 
 # 1. SETUP
 echo "🛠️  Setting up Environment..."
-mkdir -p "$IMAGES_DIR" "$TOOLS_DIR" "$TEMP_DIR"
-# Force permissions on your uploaded file
-chmod -R +x "$BIN_DIR"
+mkdir -p "$IMAGES_DIR" "$TOOLS_DIR" "$TEMP_DIR" "$OTATOOLS_DIR"
+chmod +x "$BIN_DIR"/*
 export PATH="$BIN_DIR:$PATH"
 
 # Install basics
 sudo apt-get update -y
 sudo apt-get install -y python3 python3-pip erofs-utils erofsfuse jq aria2 zip unzip liblz4-tool
 
-# 2. CHECK YOUR UPLOADED LPMAKE
-echo "⬇️  Checking lpmake..."
+# --- CRITICAL FIX: INSTALL LEGACY LIBSSL ---
+# This is what fixes the "Silent Crash"
+echo "💉 Injecting Legacy Libraries..."
+wget -q http://nz2.archive.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2_amd64.deb
+sudo dpkg -i libssl1.1_1.1.1f-1ubuntu2_amd64.deb
+rm libssl1.1_1.1.1f-1ubuntu2_amd64.deb
 
+# 2. FORCE DOWNLOAD WORKING TOOLS
+echo "⬇️  Fetching Verified Tools..."
+
+# DELETE USER'S BROKEN UPLOADS
 if [ -f "$BIN_DIR/lpmake" ]; then
-    echo "📦 FOUND LOCAL LPMAKE. Using your MIO Kitchen file."
-else
-    # Fallback if you forgot to upload it
-    echo "⚠️  lpmake not found in bin/. Downloading fallback..."
-    wget -q -O "$BIN_DIR/lpmake" "https://github.com/elfamigos/android-tools-bin/raw/main/linux/lpmake"
-    chmod +x "$BIN_DIR/lpmake"
+    echo "🗑️  Removing local lpmake (It was crashing)..."
+    rm "$BIN_DIR/lpmake"
 fi
 
-# TEST IT (The Moment of Truth)
+# DOWNLOAD TRUSTED OTATOOLS (Includes libs)
+wget -q -O "otatools.zip" "https://github.com/SebaUbuntu/otatools-build/releases/download/v0.0.1/otatools.zip"
+unzip -q "otatools.zip" -d "$OTATOOLS_DIR"
+rm "otatools.zip"
+
+# SETUP PATHS
+export PATH="$OTATOOLS_DIR/bin:$PATH"
+export LD_LIBRARY_PATH="$OTATOOLS_DIR/lib64:$LD_LIBRARY_PATH"
+
 echo "🧪 Testing lpmake..."
 lpmake --help > /dev/null 2>&1
 if [ $? -ne 0 ]; then
-    echo "❌ ERROR: Your lpmake file failed to run."
-    echo "    Debug Info (What is missing?):"
-    ldd "$BIN_DIR/lpmake"
+    echo "❌ ERROR: lpmake failed to run. Debug info:"
+    ldd "$OTATOOLS_DIR/bin/lpmake"
     exit 1
 else
-    echo "    ✅ IT WORKS! This binary is standalone."
+    echo "    ✅ lpmake is healthy."
 fi
 
-# 3. DOWNLOAD PAYLOAD DUMPER (If missing)
+# 3. DOWNLOAD PAYLOAD DUMPER
 if [ ! -f "$BIN_DIR/payload-dumper-go" ]; then
     echo "⬇️  Fetching Payload Dumper..."
     wget -q https://github.com/ssut/payload-dumper-go/releases/download/1.2.2/payload-dumper-go_1.2.2_linux_amd64.tar.gz
@@ -135,6 +146,7 @@ for part in $PARTITIONS; do
             cp -r "$GITHUB_WORKSPACE/mods/$part/"* "${part}_dump/"
         fi
         
+        # Lowercase lz4 compatibility
         mkfs.erofs -zlz4 "${part}_mod.img" "${part}_dump"
         if [ $? -ne 0 ]; then
             echo "❌ CRITICAL: Failed to compress $part!"
@@ -161,13 +173,13 @@ fi
 echo "🔨  Building Super..."
 echo "    Max Size: $SUPER_SIZE"
 
+# We run this WITHOUT redirection so errors print to screen
 lpmake --metadata-size 65536 --super-name super --metadata-slots 2 \
        --device super:$SUPER_SIZE --group main:$SUPER_SIZE \
-       $LPM_ARGS --output "$IMAGES_DIR/super.img" > lpmake_log.txt 2>&1
+       $LPM_ARGS --output "$IMAGES_DIR/super.img"
 
 if [ ! -f "$IMAGES_DIR/super.img" ]; then
-    echo "❌ CRITICAL: lpmake failed. LOGS:"
-    cat lpmake_log.txt
+    echo "❌ CRITICAL: lpmake failed (See error above)."
     exit 1
 fi
 
