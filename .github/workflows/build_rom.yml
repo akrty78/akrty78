@@ -15,7 +15,7 @@ jobs:
       - name: ⬇️ Checkout Repo
         uses: actions/checkout@v4
 
-      # 👇 THIS STEP IS CRITICAL - IT FREES 30GB+ SPACE 👇
+      # 1. CRITICAL: Frees up ~30GB of space so the build doesn't crash
       - name: 🗑️ Free Disk Space (Ubuntu)
         uses: jlumbroso/free-disk-space@main
         with:
@@ -35,11 +35,14 @@ jobs:
 
       - name: 🚀 Run Modder Engine
         id: build
+        env:
+          # Passes your secrets to the script
+          PIXELDRAIN_KEY: ${{ secrets.PIXELDRAIN_KEY }}
         run: |
-          # Run the script and save output to build.log
+          # Run script and save logs
           bash mod.sh "${{ github.event.client_payload.rom_url }}" > build.log 2>&1
           
-          # Check if the PixelDrain link exists in the log
+          # Check for PixelDrain link in logs
           LINK=$(grep "https://pixeldrain.com" build.log | tail -n 1)
           
           if [ -z "$LINK" ]; then
@@ -57,8 +60,7 @@ jobs:
           -d parse_mode=Markdown \
           -d text="✅ *Build Complete!* %0A%0A📦 [Download Here](${{ env.DOWNLOAD_LINK }})"
 
-      # --- DEBUGGING SECTION ---
-      
+      # --- DEBUGGING ---
       - name: 🔍 Show Error Logs
         if: failure()
         run: |
@@ -70,4 +72,4 @@ jobs:
         run: |
           curl -s -X POST https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage \
           -d chat_id=${{ secrets.CHAT_ID }} \
-          -d text="❌ Build Failed! Check GitHub Actions logs for details."
+          -d text="❌ Build Failed! Check GitHub Actions logs."
