@@ -61,3 +61,22 @@ jobs:
           curl -s -X POST https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage \
           -d chat_id=${{ secrets.CHAT_ID }} \
           -d text="❌ Build Failed! I have printed the logs in the GitHub Actions tab. Go check them!"
+
+          - name: ⬇️ Checkout Repo
+        uses: actions/checkout@v4
+
+      # 👇 ADD THIS NEW STEP HERE 👇
+      - name: 🗑️ Free Disk Space (Ubuntu)
+        uses: jlumbroso/free-disk-space@main
+        with:
+          # This cleans up huge pre-installed apps to give us ~15GB extra space
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: 🛠️ Setup Environment
+        # ... (rest of your file)
