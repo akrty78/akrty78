@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - ROM MODDER ENGINE (FIXED)
+#  NEXDROID GOONER - ROM MODDER ENGINE (OPTIMIZED)
 # =========================================================
 
 ROM_URL="$1"
@@ -18,30 +18,32 @@ mkdir -p "$IMAGES_DIR" "$TOOLS_DIR" "$TEMP_DIR"
 chmod +x "$BIN_DIR"/*
 export PATH="$BIN_DIR:$PATH"
 
-# Install System Tools (Includes erofs-utils!)
+# Install System Tools
 sudo apt-get update -y
 sudo apt-get install -y python3 python3-pip erofs-utils jq aria2 zip unzip
 
-# AUTO-DOWNLOAD PAYLOAD DUMPER (Robust Method)
+# AUTO-DOWNLOAD PAYLOAD DUMPER (Smart Check)
 echo "⬇️  Fetching Tools..."
-wget -q https://github.com/ssut/payload-dumper-go/releases/download/1.2.2/payload-dumper-go_1.2.2_linux_amd64.tar.gz
-# Extract to current directory
-tar -xzf payload-dumper-go_1.2.2_linux_amd64.tar.gz
-# Find the binary wherever it ended up and move it to BIN_DIR
-find . -type f -name "payload-dumper-go" -exec mv {} "$BIN_DIR/" \;
+if [ ! -f "$BIN_DIR/payload-dumper-go" ]; then
+    wget -q https://github.com/ssut/payload-dumper-go/releases/download/1.2.2/payload-dumper-go_1.2.2_linux_amd64.tar.gz
+    tar -xzf payload-dumper-go_1.2.2_linux_amd64.tar.gz
+    # Only move the file if found outside bin folder
+    find . -type f -name "payload-dumper-go" -not -path "*/bin/*" -exec mv {} "$BIN_DIR/" \;
+fi
 chmod +x "$BIN_DIR/payload-dumper-go"
 
-# 2. DOWNLOAD ROM
+# 2. DOWNLOAD ROM (With Free Space Check)
 echo "⬇️  Downloading ROM..."
 cd "$TEMP_DIR"
-aria2c -x 16 -s 16 -o "rom.zip" "$ROM_URL"
+# Use aria2c with file allocation none to save time/space issues initially
+aria2c -x 16 -s 16 --file-allocation=none -o "rom.zip" "$ROM_URL"
 unzip -o "rom.zip" payload.bin
-rm "rom.zip"
+rm "rom.zip" # Delete immediately to save space
 
 # 3. DUMP FIRMWARE
 echo "🔍 Dumping Images..."
 payload-dumper-go -o raw_images payload.bin
-rm payload.bin
+rm payload.bin # Delete immediately to save space
 
 # Move firmware to Output
 cd raw_images
@@ -50,16 +52,14 @@ mv vbmeta.img vbmeta_system.img vbmeta_vendor.img "$IMAGES_DIR/" 2>/dev/null
 
 # 4. DETECT DEVICE (Smarter Logic)
 echo "🕵️  Detecting Device Identity..."
-# Use system mkfs.erofs
 extract.erofs -i system.img -x -o extracted_system
 
-# Logic to find build.prop in various locations
+# Logic to find build.prop
 if [ -f "extracted_system/system/build.prop" ]; then
     BUILD_PROP="extracted_system/system/build.prop"
 elif [ -f "extracted_system/build.prop" ]; then
     BUILD_PROP="extracted_system/build.prop"
 else
-    # Last resort: find it anywhere inside
     BUILD_PROP=$(find extracted_system -name "build.prop" | head -n 1)
 fi
 
@@ -81,32 +81,26 @@ SUPER_SIZE=$(jq -r --arg dev "$DEVICE_CODE" '.[$dev].super_size' "$GITHUB_WORKSP
 
 if [ "$SUPER_SIZE" == "null" ] || [ -z "$SUPER_SIZE" ]; then
     echo "❌  DEVICE UNKNOWN! Device '$DEVICE_CODE' is not in devices.json."
-    echo "    Please add it to prevent bricking."
     exit 1
 fi
 
 # 5. MOD & REPACK LOOP
 LPM_ARGS=""
-# Detect ALL dynamic partitions
 for part in system system_dlkm vendor vendor_dlkm product odm mi_ext; do
     if [ -f "${part}.img" ]; then
         echo "⚙️  Modding: $part"
         
-        # A. Unpack
         extract.erofs -i "${part}.img" -x -o "${part}_dump"
-        rm "${part}.img"
+        rm "${part}.img" # Delete raw image immediately
         
-        # B. Inject Mods (If folder exists)
         if [ -d "$GITHUB_WORKSPACE/mods/$part" ]; then
             echo "    -> Injecting custom files..."
             cp -r "$GITHUB_WORKSPACE/mods/$part/"* "${part}_dump/"
         fi
         
-        # C. Repack (Using system mkfs.erofs)
         mkfs.erofs -zLZ4HC "${part}_mod.img" "${part}_dump"
-        rm -rf "${part}_dump"
+        rm -rf "${part}_dump" # Delete dump immediately
         
-        # D. Add to Super Map
         IMG_SIZE=$(stat -c%s "${part}_mod.img")
         LPM_ARGS="$LPM_ARGS --partition ${part}:readonly:${IMG_SIZE}:main --image ${part}=${part}_mod.img"
     fi
@@ -114,7 +108,6 @@ done
 
 # 6. BUILD SUPER IMAGE
 echo "🔨  Building Super ($SUPER_SIZE bytes)..."
-# Check if lpmake exists before running
 if [ ! -f "$BIN_DIR/lpmake" ]; then
     echo "❌ ERROR: lpmake binary is missing in bin/ folder!"
     exit 1
