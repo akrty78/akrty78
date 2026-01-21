@@ -1,8 +1,7 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - DUAL ZIP EDITION
-#  (Zip 1: Firmware | Zip 2: Super Images)
+#  NEXDROID GOONER - MODULAR EDITION
 # =========================================================
 
 set +e 
@@ -89,66 +88,66 @@ EOF
 [ -f "$IMAGES_DIR/vbmeta_system.img" ] && python3 patch_vbmeta.py "$IMAGES_DIR/vbmeta_system.img"
 rm patch_vbmeta.py
 
-# 7. MOD & PREPARE SUPER
-echo "🔄 Modding Partitions..."
+# 7. PROCESS PARTITIONS
+echo "🔄 Modding, Debloating & Injecting..."
 LOGICALS="system system_ext product mi_ext vendor odm system_dlkm vendor_dlkm"
 
 for part in $LOGICALS; do
     if [ -f "$IMAGES_DIR/${part}.img" ]; then
         echo "   -> Processing $part..."
         mkdir -p "${part}_dump" "mnt_point"
+        
         erofsfuse "$IMAGES_DIR/${part}.img" "mnt_point"
         cp -a "mnt_point/." "${part}_dump/"
         fusermount -uz "mnt_point"
         rmdir "mnt_point"
         rm "$IMAGES_DIR/${part}.img"
         
+        # --- CALL PYTHON INJECTOR ---
+        # We pass the dump directory to the python script
+        # Check if python script exists in workspace
+        if [ -f "$GITHUB_WORKSPACE/inject_gapps.py" ]; then
+             python3 "$GITHUB_WORKSPACE/inject_gapps.py" "${part}_dump"
+        else
+             echo "⚠️  inject_gapps.py NOT FOUND! Skipping mods."
+        fi
+
+        # --- MANUAL MODS ---
         if [ -d "$GITHUB_WORKSPACE/mods/$part" ]; then
-            echo "      💉 Injecting mods..."
+            echo "      💉 Injecting Manual Mods..."
             cp -r "$GITHUB_WORKSPACE/mods/$part/"* "${part}_dump/"
         fi
         
+        # REPACK
         mkfs.erofs -zlz4 "$SUPER_DIR/${part}.img" "${part}_dump" > /dev/null
         rm -rf "${part}_dump"
     fi
 done
 
-# 8. CREATE ZIP 1: SUPER IMAGES
-echo "📦  Creating Zip 1: Super Images..."
+# 8. CREATE ZIPS
+echo "📦  Creating Zips..."
 cd "$SUPER_DIR"
 SUPER_ZIP="Super_Images_${DEVICE_CODE}_${OS_VER}.zip"
-
-# Zip all images inside 'super' folder
 7z a -tzip -mx3 -mmt=$(nproc) "$SUPER_ZIP" *.img > /dev/null
 mv "$SUPER_ZIP" "$OUTPUT_DIR/"
-rm *.img # Clean up to save space
+rm *.img
 
-# 9. CREATE ZIP 2: FIRMWARE
-echo "📦  Creating Zip 2: Firmware & Scripts..."
 cd "$OUTPUT_DIR"
-# Move firmware from images folder to here
 find "$IMAGES_DIR" -maxdepth 1 -type f -name "*.img" -exec mv {} . \;
-
-# Generate Scripts if available
 if [ -f "$GITHUB_WORKSPACE/gen_scripts.py" ]; then
     python3 "$GITHUB_WORKSPACE/gen_scripts.py" "$DEVICE_CODE" "images"
 fi
-
 FIRMWARE_ZIP="Firmware_Flasher_${DEVICE_CODE}_${OS_VER}.zip"
-# Zip everything EXCEPT the Super Zip
 zip -q "$FIRMWARE_ZIP" *.img *.bat *.sh bin/
 
-# 10. UPLOAD LOOP
-echo "☁️  Uploading Zips..."
+# 9. UPLOAD
+echo "☁️  Uploading..."
 LINKS=""
 UPLOAD_COUNT=0
 
-# We upload both zips
 for FILE in "$SUPER_ZIP" "$FIRMWARE_ZIP"; do
     if [ -f "$FILE" ]; then
         echo "   ⬆️ Uploading $FILE..."
-        
-        # Try PixelDrain
         if [ -z "$PIXELDRAIN_KEY" ]; then
             RESPONSE=$(curl -s -T "$FILE" "https://pixeldrain.com/api/file/")
         else
@@ -156,18 +155,13 @@ for FILE in "$SUPER_ZIP" "$FIRMWARE_ZIP"; do
         fi
         
         FILE_ID=$(echo "$RESPONSE" | jq -r '.id')
-        
         if [ ! -z "$FILE_ID" ] && [ "$FILE_ID" != "null" ]; then
             LINK="https://pixeldrain.com/u/$FILE_ID"
-            echo "      ✅ Success: $LINK"
             LINKS="${LINKS}\n📂 [${FILE}](${LINK})"
             UPLOAD_COUNT=$((UPLOAD_COUNT+1))
         else
-            # Backup Mirror for big file failure
-            echo "      ⚠️ PixelDrain failed. Trying Backup..."
             LINK=$(curl -s --upload-file "$FILE" "https://transfer.sh/$(basename "$FILE")")
             if [[ "$LINK" == *"transfer.sh"* ]]; then
-                 echo "      ✅ Success (Backup): $LINK"
                  LINKS="${LINKS}\n📂 [${FILE}](${LINK})"
                  UPLOAD_COUNT=$((UPLOAD_COUNT+1))
             fi
@@ -175,20 +169,19 @@ for FILE in "$SUPER_ZIP" "$FIRMWARE_ZIP"; do
     fi
 done
 
-# 11. NOTIFY
+# 10. NOTIFY
 if [ ! -z "$TELEGRAM_TOKEN" ] && [ ! -z "$CHAT_ID" ]; then
     if [ "$UPLOAD_COUNT" -gt 0 ]; then
         MSG="✅ *Build Complete!*
         
 📱 *Device:* \`${DEVICE_CODE}\`
-💿 *Version:* \`${OS_VER}\`
+✨ *Mods:* Debloat + GApps + Props
         
 *Download Links:*
 ${LINKS}"
     else
-        MSG="❌ *Upload Failed!* Zips created but upload rejected."
+        MSG="❌ *Upload Failed!*"
     fi
-    
     curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
         -d chat_id="$CHAT_ID" \
         -d parse_mode="Markdown" \
