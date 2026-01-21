@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - MODULAR EDITION
-#  (Refined for speed and modularity)
+#  NEXDROID GOONER - COMPLETE EDITION
+#  (Modular + Auto-Patcher + NexPackage)
 # =========================================================
 
 set +e 
@@ -25,8 +25,19 @@ mkdir -p "$IMAGES_DIR" "$SUPER_DIR" "$TEMP_DIR" "$BIN_DIR"
 export PATH="$BIN_DIR:$PATH"
 
 sudo apt-get update -y
-sudo apt-get install -y python3 python3-pip erofs-utils erofsfuse jq aria2 zip unzip liblz4-tool p7zip-full
+# ADDED: apktool, apksigner, openjdk for patching/signing
+sudo apt-get install -y python3 python3-pip erofs-utils erofsfuse jq aria2 zip unzip liblz4-tool p7zip-full apktool apksigner openjdk-17-jdk
 pip3 install gdown --break-system-packages
+
+# --- KEY GENERATION (Required for Auto-Patcher) ---
+if [ ! -f "testkey.pk8" ]; then
+    echo "🔑 Generating Signing Keys..."
+    openssl genrsa -out key.pem 2048
+    openssl req -new -key key.pem -out request.pem -subj "/C=US/ST=CA/L=Mountain View/O=Android/OU=Android/CN=Android/emailAddress=android@android.com"
+    openssl x509 -req -days 9999 -in request.pem -signkey key.pem -out testkey.x509.pem
+    openssl pkcs8 -topk8 -outform DER -in key.pem -inform PEM -out testkey.pk8 -nocrypt
+    rm key.pem request.pem
+fi
 
 # 2. DOWNLOAD LATEST LAUNCHER (Handles Zips & APKs)
 echo "⬇️  Fetching HyperOS Launcher..."
@@ -151,6 +162,12 @@ for part in $LOGICALS; do
              "$GITHUB_WORKSPACE/nexpackage.sh" "${part}_dump" "$part" "$TEMP_DIR"
         else
              echo "⚠️  nexpackage.sh not found in repo!"
+        fi
+
+        # C. AUTO-PATCHER (NEW: Modify APKs)
+        # This runs after everything else to ensure we patch the final version of the APK
+        if [ -f "$GITHUB_WORKSPACE/auto_patcher.py" ]; then
+             python3 "$GITHUB_WORKSPACE/auto_patcher.py" "${part}_dump"
         fi
         
         # REPACK
