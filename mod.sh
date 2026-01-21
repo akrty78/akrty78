@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - PRECISION DOCKER MOUNT
+#  NEXDROID GOONER - RELIABLE DOWNLOAD EDITION
 # =========================================================
 
 ROM_URL="$1"
@@ -22,29 +22,47 @@ export PATH="$BIN_DIR:$PATH"
 sudo apt-get update -y
 sudo apt-get install -y python3 python3-pip erofs-utils erofsfuse jq aria2 zip unzip liblz4-tool
 
-# 2. PREPARE TOOLS (NO FLATTENING)
+# 2. PREPARE TOOLS (ROBUST DOWNLOADER)
 echo "⬇️  Fetching Build Tools..."
 rm -rf "$OTATOOLS_DIR"
 mkdir -p "$OTATOOLS_DIR"
 
-# Download
-curl -L -o "otatools.zip" "https://github.com/SebaUbuntu/otatools-build/releases/download/v0.0.1/otatools.zip"
+# Try Primary Source (GitHub)
+echo "    -> Attempting Source 1..."
+wget -q -O "otatools.zip" "https://github.com/SebaUbuntu/otatools-build/releases/download/v0.0.1/otatools.zip"
+
+# Check size (Must be > 1MB)
+FILE_SIZE=$(stat -c%s "otatools.zip")
+if [ "$FILE_SIZE" -lt 1000000 ]; then
+    echo "⚠️  Source 1 failed (File too small: $FILE_SIZE bytes). Trying Backup..."
+    rm otatools.zip
+    
+    # Try Backup Source (SourceForge - Direct Link)
+    # This is a known working mirror for Xiaomi.eu tools
+    wget -q -O "otatools.zip" "https://sourceforge.net/projects/xiaomi-eu-multilang-miui-roms/files/xiaomi.eu/MIUI-14/TOOLS/lpmake_linux.zip/download"
+fi
+
+# Verify again
+if [ ! -f "otatools.zip" ]; then
+    echo "❌ CRITICAL: Failed to download tools from both sources!"
+    exit 1
+fi
+
 unzip -q "otatools.zip" -d "$OTATOOLS_DIR"
 rm "otatools.zip"
 
 # FIND LPMAKE (Precision Search)
-# We find exactly where 'bin/lpmake' ended up
 LPMAKE_BINARY=$(find "$OTATOOLS_DIR" -type f -name "lpmake" | head -n 1)
 
 if [ -z "$LPMAKE_BINARY" ]; then
     echo "❌ CRITICAL: lpmake binary is MISSING from download!"
+    # Debug: List what we actually got
+    ls -R "$OTATOOLS_DIR"
     exit 1
 fi
 
-# Get the directory containing 'bin' and 'lib64'
-# Usually: otatools/ (which contains bin/ and lib64/)
-LPMAKE_BIN_DIR=$(dirname "$LPMAKE_BINARY")   # .../bin
-TOOL_ROOT=$(dirname "$LPMAKE_BIN_DIR")       # .../otatools (root)
+LPMAKE_BIN_DIR=$(dirname "$LPMAKE_BINARY")
+TOOL_ROOT=$(dirname "$LPMAKE_BIN_DIR")
 
 echo "    ✅ Found lpmake at: $LPMAKE_BINARY"
 echo "    ✅ Tool Root: $TOOL_ROOT"
@@ -89,7 +107,6 @@ if [ -z "$DEVICE_CODE" ]; then
 fi
 echo "✅  Device Code: $DEVICE_CODE"
 
-# GET SUPER SIZE
 SUPER_SIZE=$(jq -r --arg dev "$DEVICE_CODE" '.[$dev].super_size' "$GITHUB_WORKSPACE/devices.json")
 if [ "$SUPER_SIZE" == "null" ] || [ -z "$SUPER_SIZE" ]; then 
     echo "⚠️  Size unknown. Using Default: 9126805504"
@@ -124,8 +141,6 @@ for part in $LOGICALS; do
 done
 
 # DOCKER EXECUTION
-# We mount the HOST's tools folder ($TOOL_ROOT) to /tools inside Docker.
-# This ensures the structure (bin/ and lib64/) is preserved perfectly.
 docker run --rm \
     -v "$GITHUB_WORKSPACE":/work \
     -v "$TOOL_ROOT":/tools \
@@ -137,9 +152,6 @@ docker run --rm \
         echo '    -> Docker: Setting paths...' &&
         export PATH=/tools/bin:\$PATH &&
         export LD_LIBRARY_PATH=/tools/lib64:\$LD_LIBRARY_PATH &&
-        
-        echo '    -> Docker: Verifying lpmake...' &&
-        ls -l /tools/bin/lpmake &&
         
         echo '    -> Docker: Building...' &&
         lpmake --metadata-size 65536 --super-name super --metadata-slots 2 \
