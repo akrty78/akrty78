@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - RELIABLE DOWNLOAD EDITION
+#  NEXDROID GOONER - FAIL-SAFE EDITION
 # =========================================================
 
 ROM_URL="$1"
@@ -22,51 +22,36 @@ export PATH="$BIN_DIR:$PATH"
 sudo apt-get update -y
 sudo apt-get install -y python3 python3-pip erofs-utils erofsfuse jq aria2 zip unzip liblz4-tool
 
-# 2. PREPARE TOOLS (ROBUST DOWNLOADER)
+# 2. PREPARE TOOLS (Soft-Fail Mode)
 echo "⬇️  Fetching Build Tools..."
+SKIP_SUPER=false
+
+# Cleanup
 rm -rf "$OTATOOLS_DIR"
 mkdir -p "$OTATOOLS_DIR"
 
-# Try Primary Source (GitHub)
-echo "    -> Attempting Source 1..."
-wget -q -O "otatools.zip" "https://github.com/SebaUbuntu/otatools-build/releases/download/v0.0.1/otatools.zip"
+# Attempt Download with Aria2 (Handles redirects/errors better)
+echo "    -> Downloading OTATools..."
+aria2c -x 16 -s 16 -o "otatools.zip" "https://github.com/SebaUbuntu/otatools-build/releases/download/v0.0.1/otatools.zip" || true
 
-# Check size (Must be > 1MB)
-FILE_SIZE=$(stat -c%s "otatools.zip")
-if [ "$FILE_SIZE" -lt 1000000 ]; then
-    echo "⚠️  Source 1 failed (File too small: $FILE_SIZE bytes). Trying Backup..."
-    rm otatools.zip
+# Verify Download
+if [ -f "otatools.zip" ]; then
+    unzip -q "otatools.zip" -d "$OTATOOLS_DIR"
+    rm "otatools.zip"
     
-    # Try Backup Source (SourceForge - Direct Link)
-    # This is a known working mirror for Xiaomi.eu tools
-    wget -q -O "otatools.zip" "https://sourceforge.net/projects/xiaomi-eu-multilang-miui-roms/files/xiaomi.eu/MIUI-14/TOOLS/lpmake_linux.zip/download"
+    # Check for lpmake
+    if [ -f "$OTATOOLS_DIR/bin/lpmake" ]; then
+        echo "    ✅ Tools acquired successfully."
+        TOOL_ROOT="$OTATOOLS_DIR"
+        chmod -R 777 "$TOOL_ROOT"
+    else
+        echo "⚠️  WARNING: Downloaded zip was empty or invalid."
+        SKIP_SUPER=true
+    fi
+else
+    echo "⚠️  WARNING: Tool download failed completely."
+    SKIP_SUPER=true
 fi
-
-# Verify again
-if [ ! -f "otatools.zip" ]; then
-    echo "❌ CRITICAL: Failed to download tools from both sources!"
-    exit 1
-fi
-
-unzip -q "otatools.zip" -d "$OTATOOLS_DIR"
-rm "otatools.zip"
-
-# FIND LPMAKE (Precision Search)
-LPMAKE_BINARY=$(find "$OTATOOLS_DIR" -type f -name "lpmake" | head -n 1)
-
-if [ -z "$LPMAKE_BINARY" ]; then
-    echo "❌ CRITICAL: lpmake binary is MISSING from download!"
-    # Debug: List what we actually got
-    ls -R "$OTATOOLS_DIR"
-    exit 1
-fi
-
-LPMAKE_BIN_DIR=$(dirname "$LPMAKE_BINARY")
-TOOL_ROOT=$(dirname "$LPMAKE_BIN_DIR")
-
-echo "    ✅ Found lpmake at: $LPMAKE_BINARY"
-echo "    ✅ Tool Root: $TOOL_ROOT"
-chmod -R 777 "$TOOL_ROOT"
 
 # 3. DOWNLOAD PAYLOAD DUMPER
 if [ ! -f "$BIN_DIR/payload-dumper-go" ]; then
@@ -83,9 +68,11 @@ aria2c -x 16 -s 16 --file-allocation=none -o "rom.zip" "$ROM_URL"
 unzip -o "rom.zip" payload.bin
 rm "rom.zip"
 
-# 5. EXTRACT EVERYTHING
-echo "🔍 Extracting Full Suite..."
+# 5. EXTRACT FIRMWARE
+echo "🔍 Extracting Partition Suite..."
 PARTITIONS="abl,bluetooth,countrycode,devcfg,dsp,dtbo,featenabler,hyp,imagefv,keymaster,modem,qupfw,rpm,tz,uefisecapp,vbmeta,vbmeta_system,vbmeta_vendor,xbl,xbl_config,boot,init_boot,vendor_boot,recovery,cust,logo,splash,system,system_dlkm,vendor,vendor_dlkm,product,odm,mi_ext"
+
+# We dump everything possible
 payload-dumper-go -p $PARTITIONS -o "$IMAGES_DIR" payload.bin > /dev/null 2>&1
 
 # 6. DETECT DEVICE
@@ -107,65 +94,67 @@ if [ -z "$DEVICE_CODE" ]; then
 fi
 echo "✅  Device Code: $DEVICE_CODE"
 
-SUPER_SIZE=$(jq -r --arg dev "$DEVICE_CODE" '.[$dev].super_size' "$GITHUB_WORKSPACE/devices.json")
-if [ "$SUPER_SIZE" == "null" ] || [ -z "$SUPER_SIZE" ]; then 
-    echo "⚠️  Size unknown. Using Default: 9126805504"
-    SUPER_SIZE="9126805504"
-fi
-
-# 7. BUILD SUPER IMG (Docker with Exact Mount)
-echo "🔨  Building Super (Size: $SUPER_SIZE)..."
-LPM_ARGS=""
-LOGICALS="system system_dlkm vendor vendor_dlkm product odm mi_ext"
-
-# Compress Logicals
-for part in $LOGICALS; do
-    if [ -f "$IMAGES_DIR/${part}.img" ]; then
-        mkdir -p "${part}_dump" "mnt_point"
-        erofsfuse "$IMAGES_DIR/${part}.img" "mnt_point"
-        cp -a "mnt_point/." "${part}_dump/"
-        fusermount -u "mnt_point"
-        rmdir "mnt_point"
-        rm "$IMAGES_DIR/${part}.img"
-        
-        if [ -d "$GITHUB_WORKSPACE/mods/$part" ]; then
-            cp -r "$GITHUB_WORKSPACE/mods/$part/"* "${part}_dump/"
-        fi
-        
-        mkfs.erofs -zlz4 "$IMAGES_DIR/${part}.img" "${part}_dump"
-        rm -rf "${part}_dump"
-        
-        IMG_SIZE=$(stat -c%s "$IMAGES_DIR/${part}.img")
-        LPM_ARGS="$LPM_ARGS --partition ${part}:readonly:${IMG_SIZE}:main --image ${part}=/work/NexMod_Output/images/${part}.img"
+# 7. BUILD SUPER IMG (Conditional)
+if [ "$SKIP_SUPER" = true ]; then
+    echo "⚠️  SKIPPING SUPER BUILD (Missing Tools)."
+else
+    SUPER_SIZE=$(jq -r --arg dev "$DEVICE_CODE" '.[$dev].super_size' "$GITHUB_WORKSPACE/devices.json")
+    if [ "$SUPER_SIZE" == "null" ] || [ -z "$SUPER_SIZE" ]; then 
+        echo "⚠️  Size unknown. Using Default: 9126805504"
+        SUPER_SIZE="9126805504"
     fi
-done
 
-# DOCKER EXECUTION
-docker run --rm \
-    -v "$GITHUB_WORKSPACE":/work \
-    -v "$TOOL_ROOT":/tools \
-    -w /work \
-    ubuntu:20.04 bash -c "
-        echo '    -> Docker: Installing libs...' &&
-        apt-get update -qq && apt-get install -y libssl1.1 libncurses5 > /dev/null 2>&1 &&
-        
-        echo '    -> Docker: Setting paths...' &&
-        export PATH=/tools/bin:\$PATH &&
-        export LD_LIBRARY_PATH=/tools/lib64:\$LD_LIBRARY_PATH &&
-        
-        echo '    -> Docker: Building...' &&
-        lpmake --metadata-size 65536 --super-name super --metadata-slots 2 \
-        --device super:$SUPER_SIZE --group main:$SUPER_SIZE \
-        $LPM_ARGS --output /work/NexMod_Output/images/super.img
-"
+    echo "🔨  Building Super (Size: $SUPER_SIZE)..."
+    LPM_ARGS=""
+    LOGICALS="system system_dlkm vendor vendor_dlkm product odm mi_ext"
 
-if [ ! -f "$IMAGES_DIR/super.img" ]; then
-    echo "❌ CRITICAL: Super image FAILED to build!"
-    exit 1
+    # Compress
+    for part in $LOGICALS; do
+        if [ -f "$IMAGES_DIR/${part}.img" ]; then
+            mkdir -p "${part}_dump" "mnt_point"
+            erofsfuse "$IMAGES_DIR/${part}.img" "mnt_point"
+            cp -a "mnt_point/." "${part}_dump/"
+            fusermount -u "mnt_point"
+            rmdir "mnt_point"
+            rm "$IMAGES_DIR/${part}.img"
+            
+            # Inject Mods
+            if [ -d "$GITHUB_WORKSPACE/mods/$part" ]; then
+                cp -r "$GITHUB_WORKSPACE/mods/$part/"* "${part}_dump/"
+            fi
+            
+            mkfs.erofs -zlz4 "$IMAGES_DIR/${part}.img" "${part}_dump"
+            rm -rf "${part}_dump"
+            
+            IMG_SIZE=$(stat -c%s "$IMAGES_DIR/${part}.img")
+            LPM_ARGS="$LPM_ARGS --partition ${part}:readonly:${IMG_SIZE}:main --image ${part}=/work/NexMod_Output/images/${part}.img"
+        fi
+    done
+
+    # Run Docker
+    docker run --rm \
+        -v "$GITHUB_WORKSPACE":/work \
+        -v "$TOOL_ROOT":/tools \
+        -w /work \
+        ubuntu:20.04 bash -c "
+            apt-get update -qq && apt-get install -y libssl1.1 libncurses5 > /dev/null 2>&1 &&
+            export PATH=/tools/bin:\$PATH &&
+            export LD_LIBRARY_PATH=/tools/lib64:\$LD_LIBRARY_PATH &&
+            lpmake --metadata-size 65536 --super-name super --metadata-slots 2 \
+            --device super:$SUPER_SIZE --group main:$SUPER_SIZE \
+            $LPM_ARGS --output /work/NexMod_Output/images/super.img
+    "
+
+    # Verify
+    if [ ! -f "$IMAGES_DIR/super.img" ]; then
+        echo "❌ Super Build Failed. Continuing with Firmware Only..."
+    else
+        echo "✅ Super Image Success!"
+    fi
+    
+    # Cleanup logicals
+    for part in $LOGICALS; do rm -f "$IMAGES_DIR/${part}.img"; done
 fi
-
-echo "✅ Super Image Success!"
-for part in $LOGICALS; do rm -f "$IMAGES_DIR/${part}.img"; done
 
 # 8. BUNDLE PLATFORM TOOLS
 echo "📥  Bundling Platform Tools..."
@@ -182,7 +171,7 @@ unzip -q tools.zip && mkdir -p bin/macos && mv platform-tools/* bin/macos/ && rm
 # 9. GENERATE SCRIPTS & UPLOAD
 python3 "$GITHUB_WORKSPACE/gen_scripts.py" "$DEVICE_CODE" "images"
 
-ZIP_NAME="NexDroid_${DEVICE_CODE}_FullROM.zip"
+ZIP_NAME="NexDroid_${DEVICE_CODE}_Pack.zip"
 echo "📦  Zipping..."
 zip -r -q "$ZIP_NAME" .
 
@@ -194,6 +183,9 @@ else
 fi
 
 FILE_ID=$(echo $RESPONSE | jq -r '.id')
-if [ "$FILE_ID" == "null" ] || [ -z "$FILE_ID" ]; then echo "❌ Upload Failed"; exit 1; fi
+if [ "$FILE_ID" == "null" ] || [ -z "$FILE_ID" ]; then 
+    echo "❌ Upload Failed"
+    exit 1
+fi
 
 echo "✅ DONE! https://pixeldrain.com/u/$FILE_ID"
