@@ -1,10 +1,10 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - NUCLEAR OPTION (AUTO-FIND BINARIES)
+#  NEXDROID GOONER - PORTABLE MODE (NO INSTALLS)
 # =========================================================
 
-# Disable exit on error (we handle them manually)
+# Disable exit on error to handle things manually
 set +e 
 
 ROM_URL="$1"
@@ -12,80 +12,93 @@ GITHUB_WORKSPACE=$(pwd)
 BIN_DIR="$GITHUB_WORKSPACE/bin"
 OUTPUT_DIR="$GITHUB_WORKSPACE/NexMod_Output"
 IMAGES_DIR="$OUTPUT_DIR/images"
-TOOLS_DIR="$OUTPUT_DIR/tools"
+TOOLS_DIR="$GITHUB_WORKSPACE/tools_portable"
 TEMP_DIR="$GITHUB_WORKSPACE/temp"
 OTATOOLS_DIR="$GITHUB_WORKSPACE/otatools"
 
-# 1. SETUP ENVIRONMENT
+# 1. CLEANUP BAD STATE
+# If a previous run left a bad zip, delete it.
+if [ -f "otatools.zip" ]; then
+    FILE_SIZE=$(stat -c%s "otatools.zip")
+    if [ "$FILE_SIZE" -lt 1000000 ]; then
+        echo "🗑️  Deleting corrupt otatools.zip ($FILE_SIZE bytes)..."
+        rm "otatools.zip"
+    fi
+fi
+
+# 2. SETUP ENVIRONMENT
 echo "🛠️  Setting up Environment..."
 mkdir -p "$IMAGES_DIR" "$TOOLS_DIR" "$TEMP_DIR" "$OTATOOLS_DIR" "$BIN_DIR"
 export PATH="$BIN_DIR:$PATH"
 
-# Install Native Dependencies
+# Install only safe tools
 sudo apt-get update -y
 sudo apt-get install -y python3 python3-pip erofs-utils erofsfuse jq aria2 zip unzip liblz4-tool
 
-# --- FIX LIBRARY HELL ---
-echo "💉 Injecting Legacy Libraries..."
-# We use --force-all to stop the script from crashing if packages conflict
+# 3. PORTABLE LIBRARY SETUP (THE FIX)
+# We do NOT use dpkg -i. We extract the libs to a folder and point LD_LIBRARY_PATH there.
+echo "💉 Setting up Portable Libraries..."
+mkdir -p "$TOOLS_DIR/lib64"
+
+# Download the libs
 wget -q -O libssl.deb "http://security.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2.23_amd64.deb"
 wget -q -O libtinfo.deb "http://security.ubuntu.com/ubuntu/pool/universe/n/ncurses/libtinfo5_6.3-2ubuntu0.1_amd64.deb"
 wget -q -O libncurses.deb "http://security.ubuntu.com/ubuntu/pool/universe/n/ncurses/libncurses5_6.3-2ubuntu0.1_amd64.deb"
-sudo dpkg -i --force-all libssl.deb libtinfo.deb libncurses.deb || true
+
+# Extract them safely (dpkg -x extracts without installing)
+dpkg -x libssl.deb "$TOOLS_DIR"
+dpkg -x libtinfo.deb "$TOOLS_DIR"
+dpkg -x libncurses.deb "$TOOLS_DIR"
+
+# Move libs to our single lib64 folder
+# The structure inside .deb is usually usr/lib/x86_64-linux-gnu or lib/x86_64-linux-gnu
+cp -r "$TOOLS_DIR"/usr/lib/x86_64-linux-gnu/* "$TOOLS_DIR/lib64/" 2>/dev/null
+cp -r "$TOOLS_DIR"/lib/x86_64-linux-gnu/* "$TOOLS_DIR/lib64/" 2>/dev/null
+
 rm *.deb
 
-# 2. TOOLCHAIN SETUP (SMART MODE)
-echo "⬇️  Setting up OTATools..."
+# 4. DOWNLOAD OTA TOOLS
+echo "⬇️  Fetching OTATools..."
 
-# Copy only if source and dest are different
-if [ -f "$GITHUB_WORKSPACE/otatools.zip" ] && [ ! -f "./otatools.zip" ]; then
-    echo "   ✅ Found local otatools.zip in repo."
-    cp "$GITHUB_WORKSPACE/otatools.zip" .
-elif [ -f "./otatools.zip" ]; then
-    echo "   ✅ otatools.zip is already here."
-else
-    echo "   ⚠️ Local file missing. Downloading..."
-    wget -U "Mozilla/5.0" -q -O "otatools.zip" "https://github.com/SebaUbuntu/otatools-build/releases/download/v0.0.1/otatools.zip"
+if [ ! -f "otatools.zip" ]; then
+    # Use a solid mirror
+    wget -q -O "otatools.zip" "https://sourceforge.net/projects/xiaomi-mt6768/files/tmp/otatools.zip/download"
 fi
 
-# EXTRACT
+# Unzip
 unzip -q -o "otatools.zip" -d "$OTATOOLS_DIR"
 
-# --- THE FIX: FIND BINARY ANYWHERE ---
-echo "🔍 Hunting for lpmake binary..."
+# FIND LPMAKE (Nuclear Search)
+echo "🔍 Locating lpmake..."
 FOUND_BIN=$(find "$OTATOOLS_DIR" -type f -name "lpmake" | head -n 1)
 
 if [ -z "$FOUND_BIN" ]; then
-    echo "❌ CRITICAL: lpmake binary vanished! The zip might be empty or corrupt."
+    echo "❌ CRITICAL: lpmake binary not found! The zip is likely garbage."
+    ls -R "$OTATOOLS_DIR"
     exit 1
 fi
 
-# Calculate actual paths dynamically
 REAL_BIN_DIR=$(dirname "$FOUND_BIN")
-REAL_ROOT_DIR=$(dirname "$REAL_BIN_DIR")
 
-echo "   📍 Found binary at: $FOUND_BIN"
-echo "   📍 Setting PATH to: $REAL_BIN_DIR"
-
-# Export the correct paths
+# 5. ACTIVATE PORTABLE MODE
+# We point the system to use our extracted libs instead of the missing system ones
 export PATH="$REAL_BIN_DIR:$PATH"
-# Try lib64 first, then lib
-if [ -d "$REAL_ROOT_DIR/lib64" ]; then
-    export LD_LIBRARY_PATH="$REAL_ROOT_DIR/lib64:$LD_LIBRARY_PATH"
-else
-    export LD_LIBRARY_PATH="$REAL_ROOT_DIR/lib:$LD_LIBRARY_PATH"
-fi
+export LD_LIBRARY_PATH="$TOOLS_DIR/lib64:$REAL_BIN_DIR/../lib64:$LD_LIBRARY_PATH"
 
-# Verify lpmake
+echo "   📍 Binary: $FOUND_BIN"
+echo "   📍 Lib Path: $LD_LIBRARY_PATH"
+
+# Verify
 lpmake --help > /dev/null 2>&1
 if [ $? -ne 0 ]; then
     echo "❌ CRITICAL: lpmake failed to start."
+    # Use the portable linker to check what's missing
     ldd "$FOUND_BIN"
     exit 1
 fi
-echo "   ✅ lpmake is alive."
+echo "   ✅ lpmake is healthy (Portable Mode)."
 
-# Download Payload Dumper
+# 6. DOWNLOAD PAYLOAD DUMPER
 if [ ! -f "$BIN_DIR/payload-dumper-go" ]; then
     wget -q -O pd.tar.gz https://github.com/ssut/payload-dumper-go/releases/download/1.2.2/payload-dumper-go_1.2.2_linux_amd64.tar.gz
     tar -xzf pd.tar.gz
@@ -94,7 +107,7 @@ if [ ! -f "$BIN_DIR/payload-dumper-go" ]; then
     rm pd.tar.gz
 fi
 
-# 3. ROM PROCESSING
+# 7. PROCESS ROM
 echo "⬇️  Downloading ROM..."
 cd "$TEMP_DIR"
 aria2c -x 16 -s 16 --file-allocation=none -o "rom.zip" "$ROM_URL"
@@ -106,7 +119,7 @@ rm "rom.zip"
 echo "🔍 Extracting All Partitions..."
 payload-dumper-go -o "$IMAGES_DIR" payload.bin > /dev/null 2>&1
 
-# 4. DEVICE DETECTION
+# 8. DETECT DEVICE
 echo "🕵️  Detecting Device..."
 DEVICE_CODE=""
 if [ -f "$IMAGES_DIR/mi_ext.img" ]; then
@@ -131,16 +144,14 @@ if [ "$SUPER_SIZE" == "null" ] || [ -z "$SUPER_SIZE" ]; then
     SUPER_SIZE="9126805504"
 fi
 
-# 5. REPACKING FOR VAB
-echo "🔄 Repacking Logical Partitions..."
+# 9. REPACK & BUILD SUPER (VAB)
+echo "🔄 Repacking & Building VAB Super..."
 LPM_ARGS=""
 LOGICALS="system system_dlkm vendor vendor_dlkm product odm mi_ext"
 
 for part in $LOGICALS; do
     if [ -f "$IMAGES_DIR/${part}.img" ]; then
-        echo "   -> Processing $part..."
         mkdir -p "${part}_dump" "mnt_point"
-        
         erofsfuse "$IMAGES_DIR/${part}.img" "mnt_point"
         cp -a "mnt_point/." "${part}_dump/"
         fusermount -uz "mnt_point"
@@ -149,7 +160,6 @@ for part in $LOGICALS; do
         
         # INJECT MODS
         if [ -d "$GITHUB_WORKSPACE/mods/$part" ]; then
-            echo "      💉 Injecting mods..."
             cp -r "$GITHUB_WORKSPACE/mods/$part/"* "${part}_dump/"
         fi
         
@@ -161,8 +171,6 @@ for part in $LOGICALS; do
     fi
 done
 
-# 6. BUILD SUPER (VAB)
-echo "🔨  Building VAB Super Image..."
 lpmake --metadata-size 65536 \
        --super-name super \
        --metadata-slots 3 \
@@ -181,10 +189,9 @@ else
     exit 1
 fi
 
-# 7. PACKAGING
-echo "📦  Zipping Final ROM..."
+# 10. PACK & UPLOAD
+echo "📦  Zipping..."
 cd "$OUTPUT_DIR"
-
 curl -L -o tools.zip https://dl.google.com/android/repository/platform-tools-latest-windows.zip
 unzip -q tools.zip && mkdir -p bin/windows && mv platform-tools/* bin/windows/ && rm -rf platform-tools tools.zip
 
@@ -195,7 +202,6 @@ fi
 ZIP_NAME="NexDroid_${DEVICE_CODE}_VAB_Pack.zip"
 zip -r -q "$ZIP_NAME" .
 
-# 8. UPLOAD
 echo "☁️  Uploading to PixelDrain..."
 if [ -z "$PIXELDRAIN_KEY" ]; then
     RESPONSE=$(curl -s -T "$ZIP_NAME" "https://pixeldrain.com/api/file/")
@@ -213,7 +219,6 @@ else
     UPLOAD_SUCCESS=true
 fi
 
-# 9. NOTIFY
 if [ ! -z "$TELEGRAM_TOKEN" ] && [ ! -z "$CHAT_ID" ]; then
     if [ "$UPLOAD_SUCCESS" = true ]; then
         MSG="✅ *VAB Build Complete!*
@@ -223,7 +228,6 @@ if [ ! -z "$TELEGRAM_TOKEN" ] && [ ! -z "$CHAT_ID" ]; then
     else
         MSG="❌ *Upload Failed!* Check GitHub Logs."
     fi
-
     curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
         -d chat_id="$CHAT_ID" \
         -d parse_mode="Markdown" \
