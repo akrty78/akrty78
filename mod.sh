@@ -267,85 +267,104 @@ cd FirmwarePack
 FIRMWARE_ZIP="Firmware_Flasher_${DEVICE_CODE}_${OS_VER}.zip"
 zip -r -q "../$FIRMWARE_ZIP" .
 
-# 9. UPLOAD & NOTIFY (Linear Method)
+# 9. UPLOAD (Debug Mode)
 echo "☁️  Uploading..."
 cd "$OUTPUT_DIR"
 
-# --- 1. UPLOAD FIRMWARE (Small File) ---
-echo "   ⬆️ Uploading Firmware Pack: $FIRMWARE_ZIP"
+# Variables
 FW_LINK=""
-
-# Try PixelDrain
-if [ -z "$PIXELDRAIN_KEY" ]; then
-    RESP=$(curl -s -T "$FIRMWARE_ZIP" "https://pixeldrain.com/api/file/")
-else
-    RESP=$(curl -s -T "$FIRMWARE_ZIP" -u :$PIXELDRAIN_KEY "https://pixeldrain.com/api/file/")
-fi
-ID=$(echo "$RESP" | jq -r '.id')
-
-if [ ! -z "$ID" ] && [ "$ID" != "null" ]; then
-    FW_LINK="https://pixeldrain.com/u/$ID"
-else
-    # Backup Mirror (Transfer.sh)
-    echo "      ⚠️ PixelDrain failed for Firmware. Trying Backup..."
-    FW_LINK=$(curl -s --upload-file "$FIRMWARE_ZIP" "https://transfer.sh/$(basename "$FIRMWARE_ZIP")")
-fi
-echo "      -> Firmware Link: $FW_LINK"
-
-
-# --- 2. UPLOAD SUPER IMAGES (Big File) ---
-echo "   ⬆️ Uploading Super Images: $SUPER_ZIP"
 SUPER_LINK=""
 
-# Try PixelDrain
-if [ -z "$PIXELDRAIN_KEY" ]; then
-    RESP=$(curl -s -T "$SUPER_ZIP" "https://pixeldrain.com/api/file/")
+# --- A. UPLOAD FIRMWARE ---
+if [ -f "$FIRMWARE_ZIP" ]; then
+    echo "   ⬆️ Uploading Firmware: $FIRMWARE_ZIP ($(du -h "$FIRMWARE_ZIP" | cut -f1))"
+    
+    # Try PixelDrain
+    if [ -z "$PIXELDRAIN_KEY" ]; then
+        RESP=$(curl -s -T "$FIRMWARE_ZIP" "https://pixeldrain.com/api/file/")
+    else
+        RESP=$(curl -s -T "$FIRMWARE_ZIP" -u :$PIXELDRAIN_KEY "https://pixeldrain.com/api/file/")
+    fi
+    
+    # Extract ID
+    ID=$(echo "$RESP" | jq -r '.id')
+    
+    if [ ! -z "$ID" ] && [ "$ID" != "null" ]; then
+        FW_LINK="https://pixeldrain.com/u/$ID"
+        echo "      ✅ Firmware URL: $FW_LINK"
+    else
+        echo "      ⚠️ PixelDrain Failed. Resp: $RESP"
+        # Backup Mirror
+        FW_LINK=$(curl -s --upload-file "$FIRMWARE_ZIP" "https://transfer.sh/$(basename "$FIRMWARE_ZIP")")
+        echo "      ✅ Backup URL: $FW_LINK"
+    fi
 else
-    RESP=$(curl -s -T "$SUPER_ZIP" -u :$PIXELDRAIN_KEY "https://pixeldrain.com/api/file/")
+    echo "   ❌ Error: Firmware Zip ($FIRMWARE_ZIP) not found!"
 fi
-ID=$(echo "$RESP" | jq -r '.id')
 
-if [ ! -z "$ID" ] && [ "$ID" != "null" ]; then
-    SUPER_LINK="https://pixeldrain.com/u/$ID"
+# --- B. UPLOAD SUPER IMAGES ---
+if [ -f "$SUPER_ZIP" ]; then
+    echo "   ⬆️ Uploading Super Zip: $SUPER_ZIP ($(du -h "$SUPER_ZIP" | cut -f1))"
+    
+    # Try PixelDrain
+    if [ -z "$PIXELDRAIN_KEY" ]; then
+        RESP=$(curl -s -T "$SUPER_ZIP" "https://pixeldrain.com/api/file/")
+    else
+        RESP=$(curl -s -T "$SUPER_ZIP" -u :$PIXELDRAIN_KEY "https://pixeldrain.com/api/file/")
+    fi
+    
+    ID=$(echo "$RESP" | jq -r '.id')
+    
+    if [ ! -z "$ID" ] && [ "$ID" != "null" ]; then
+        SUPER_LINK="https://pixeldrain.com/u/$ID"
+        echo "      ✅ Super URL: $SUPER_LINK"
+    else
+        echo "      ⚠️ PixelDrain Failed. Resp: $RESP"
+        # Backup Mirror
+        SUPER_LINK=$(curl -s --upload-file "$SUPER_ZIP" "https://transfer.sh/$(basename "$SUPER_ZIP")")
+        echo "      ✅ Backup URL: $SUPER_LINK"
+    fi
 else
-    # Backup Mirror (Transfer.sh)
-    echo "      ⚠️ PixelDrain failed for Super. Trying Backup..."
-    SUPER_LINK=$(curl -s --upload-file "$SUPER_ZIP" "https://transfer.sh/$(basename "$SUPER_ZIP")")
+    echo "   ❌ Error: Super Zip ($SUPER_ZIP) not found!"
 fi
-echo "      -> Super Link: $SUPER_LINK"
 
-
-# --- 3. SEND TELEGRAM NOTIFICATION ---
+# 10. NOTIFY (Safe Mode)
 if [ ! -z "$TELEGRAM_TOKEN" ] && [ ! -z "$CHAT_ID" ]; then
+    echo "   🔔 Sending Telegram Notification..."
+    
+    # Build Message Line by Line
     MSG="✅ *Build Complete!*
     
 📱 *Device:* \`${DEVICE_CODE}\`
-🤖 *Version:* \`${OS_VER}\`
-"
+🤖 *Version:* \`${OS_VER}\`"
 
-    # Add Firmware Link Section
+    # Append Firmware Link
     if [[ "$FW_LINK" == http* ]]; then
         MSG="${MSG}
-⬇️ [Download Firmware](${FW_LINK})"
+
+📦 [Download Firmware](${FW_LINK})"
     else
         MSG="${MSG}
+
 ❌ Firmware Upload Failed"
     fi
 
-    # Add Super Link Section
+    # Append Super Link
     if [[ "$SUPER_LINK" == http* ]]; then
         MSG="${MSG}
-⬇️ [Download Super Images](${SUPER_LINK})"
+
+📦 [Download Super Images](${SUPER_LINK})"
     else
         MSG="${MSG}
-❌ Super Upload Failed (File too large?)"
+
+❌ Super Upload Failed"
     fi
 
-    # Send Message
+    # Send
     curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
         -d chat_id="$CHAT_ID" \
         -d parse_mode="Markdown" \
         -d text="$MSG" > /dev/null
-        
-    echo "🔔 Notification sent."
+    
+    echo "   ✅ Notification Sent."
 fi
