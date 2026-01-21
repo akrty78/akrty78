@@ -1,10 +1,10 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - FINAL PRODUCTION BUILD (VAB ENABLED)
+#  NEXDROID GOONER - FINAL PRODUCTION BUILD (SELF-HOSTED)
 # =========================================================
 
-# Disable immediate exit on error so we can handle errors manually and log them
+# Disable immediate exit so we can log errors manually
 set +e 
 
 ROM_URL="$1"
@@ -36,12 +36,31 @@ sudo dpkg -i libssl.deb libtinfo.deb libncurses.deb
 rm *.deb
 
 # ---------------------------------------------------------
-# 2. TOOLCHAIN SETUP
+# 2. TOOLCHAIN SETUP (ROBUST)
 # ---------------------------------------------------------
-echo "⬇️  Fetching OTATools..."
-wget -q -O "otatools.zip" "https://github.com/SebaUbuntu/otatools-build/releases/download/v0.0.1/otatools.zip"
-unzip -q "otatools.zip" -d "$OTATOOLS_DIR"
-rm "otatools.zip"
+echo "⬇️  Setting up OTATools..."
+
+# STRATEGY 1: Check for local file (Best Practice)
+if [ -f "$GITHUB_WORKSPACE/otatools.zip" ]; then
+    echo "   ✅ Found local otatools.zip in repo."
+    cp "$GITHUB_WORKSPACE/otatools.zip" .
+else
+    # STRATEGY 2: Download with User-Agent (Fallback)
+    echo "   ⚠️ Local file missing. Downloading from backup..."
+    wget -U "Mozilla/5.0" -q -O "otatools.zip" "https://github.com/SebaUbuntu/otatools-build/releases/download/v0.0.1/otatools.zip"
+fi
+
+# VERIFY ZIP INTEGRITY
+if unzip -tq otatools.zip > /dev/null 2>&1; then
+    unzip -q "otatools.zip" -d "$OTATOOLS_DIR"
+    rm "otatools.zip"
+else
+    echo "❌ CRITICAL: otatools.zip is corrupt!"
+    echo "   (The download likely failed or was blocked. Upload otatools.zip to your repo manually.)"
+    # Debug: Print first few lines to see if it's an HTML error page
+    head -n 10 otatools.zip
+    exit 1
+fi
 
 # Link Tools & Libs
 export PATH="$OTATOOLS_DIR/bin:$PATH"
