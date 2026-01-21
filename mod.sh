@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - STRUCTURED EDITION
-#  (Organized Binaries + Firmware Folder + Script Gen)
+#  NEXDROID GOONER - STANDARD FLASHER EDITION
+#  (Manual Super.img + Format Data Script)
 # =========================================================
 
 set +e 
@@ -22,7 +22,6 @@ export PATH="$BIN_DIR:$PATH"
 
 sudo apt-get update -y
 sudo apt-get install -y python3 python3-pip erofs-utils erofsfuse jq aria2 zip unzip liblz4-tool p7zip-full
-# Install gdown for Drive downloads
 pip3 install gdown --break-system-packages
 
 # 2. PAYLOAD DUMPER
@@ -106,12 +105,12 @@ for part in $LOGICALS; do
         rmdir "mnt_point"
         rm "$IMAGES_DIR/${part}.img"
         
-        # --- CALL PYTHON INJECTOR ---
+        # CALL INJECTOR
         if [ -f "$GITHUB_WORKSPACE/inject_gapps.py" ]; then
              python3 "$GITHUB_WORKSPACE/inject_gapps.py" "${part}_dump"
         fi
 
-        # --- MANUAL MODS ---
+        # MANUAL MODS
         if [ -d "$GITHUB_WORKSPACE/mods/$part" ]; then
             echo "      💉 Injecting Manual Mods..."
             cp -r "$GITHUB_WORKSPACE/mods/$part/"* "${part}_dump/"
@@ -123,17 +122,17 @@ for part in $LOGICALS; do
     fi
 done
 
-# 8. CREATE ZIPS (STRUCTURED)
+# 8. CREATE ORGANIZED ZIPS
 echo "📦  Creating Organized Zips..."
 
-# --- ZIP 1: SUPER IMAGES ---
+# --- ZIP 1: SUPER IMAGES (Raw Images for you to build super.img) ---
 cd "$SUPER_DIR"
 SUPER_ZIP="Super_Images_${DEVICE_CODE}_${OS_VER}.zip"
 7z a -tzip -mx3 -mmt=$(nproc) "$SUPER_ZIP" *.img > /dev/null
 mv "$SUPER_ZIP" "$OUTPUT_DIR/"
 rm *.img
 
-# --- ZIP 2: FIRMWARE + TOOLS ---
+# --- ZIP 2: FIRMWARE + NORMAL SCRIPT ---
 cd "$OUTPUT_DIR"
 mkdir -p FirmwarePack/bin/windows
 mkdir -p FirmwarePack/bin/linux
@@ -154,113 +153,77 @@ unzip -q tools-mac.zip -d mac_tmp && mv mac_tmp/platform-tools/* FirmwarePack/bi
 echo "   📂 Moving Firmware..."
 find "$IMAGES_DIR" -maxdepth 1 -type f -name "*.img" -exec mv {} FirmwarePack/images/ \;
 
-# C. Generate Scripts (Matching Folder Structure)
-echo "   📝 Generating Flash Scripts..."
+# C. GENERATE THE "NORMAL" SCRIPT (Your Request)
+echo "   📝 Generating Standard Script..."
 cat <<EOF > FirmwarePack/flash_rom_windows.bat
 @echo off
-title NexDroid Flasher - %DEVICE_CODE%
-color 0b
-set "PATH=%~dp0bin\windows;%PATH%"
+cd %~dp0
+set fastboot=bin\windows\fastboot.exe
+if not exist %fastboot% echo %fastboot% not found. & pause & exit /B 1
 
-echo ==============================================
-echo      NEXDROID FLASHER (%DEVICE_CODE%)
-echo ==============================================
+echo ==================================================
+echo       NEXDROID FLASHER (%DEVICE_CODE%)
+echo ==================================================
 echo.
-echo 1. Connect phone in FASTBOOT mode (Vol Down + Power)
-echo 2. Make sure Super_Images zip is extracted here if you have it.
+echo 1. Connect device in FASTBOOT mode (Vol Down + Power).
+echo 2. Make sure you have placed 'super.img' inside the 'images' folder.
 echo.
-pause
 
-fastboot devices
-if errorlevel 1 (
-    echo [ERROR] Device not found! Check drivers.
-    pause
-    exit
-)
+echo Waiting for device...
+%fastboot% wait-for-device
+echo Device detected.
 
 echo.
-echo [1/3] Flashing Firmware...
+echo --------------------------------------------------
+echo Your device will be flashed and DATA will be formatted.
+echo You will lose all apps and files.
+echo --------------------------------------------------
+set /p choice=Do you want to continue? [y/N] 
+if /i "%choice%" neq "y" exit /B 0
+
+echo.
+echo [1/3] Setting Active Slot A...
+%fastboot% set_active a
+
+echo [2/3] Flashing Firmware...
+rem Loop through all images except super/cust/userdata
 for %%f in (images\*.img) do (
-    echo     - Flashing %%~nf...
-    fastboot flash %%~nf "%%f"
+    if /i "%%~nf" neq "super" (
+        if /i "%%~nf" neq "cust" (
+            if /i "%%~nf" neq "userdata" (
+                echo     - Flashing %%~nf...
+                %fastboot% flash %%~nf "%%f"
+            )
+        )
+    )
 )
 
-echo.
-echo [2/3] Flashing Super Images...
-if exist super_pack.zip (
-    echo     - Found super_pack.zip, treating as raw images...
-    rem Add logic here if you repack super, but usually manual mode implies raw files
+echo [3/3] Flashing Super & Cust...
+if exist images\cust.img (
+    echo     - Flashing cust...
+    %fastboot% flash cust images\cust.img
 )
 
-if exist system.img (
-    echo     - Flashing System... & fastboot flash system system.img
-    echo     - Flashing Product... & fastboot flash product product.img
-    echo     - Flashing Vendor... & fastboot flash vendor vendor.img
-    echo     - Flashing ODM... & fastboot flash odm odm.img
-    if exist system_ext.img fastboot flash system_ext system_ext.img
-    if exist mi_ext.img fastboot flash mi_ext mi_ext.img
-    if exist system_dlkm.img fastboot flash system_dlkm system_dlkm.img
-    if exist vendor_dlkm.img fastboot flash vendor_dlkm vendor_dlkm.img
+if exist images\super.img (
+    echo     - Flashing super...
+    %fastboot% flash super images\super.img
 ) else (
-    echo [INFO] Super images not found in root. 
-    echo Please extract 'Super_Images_...' zip contents to this folder.
+    echo [ERROR] super.img NOT FOUND in images folder!
+    echo Please build super.img and put it there.
+    pause
+    exit /B 1
 )
 
 echo.
-echo [3/3] Rebooting...
-fastboot reboot
+echo [4/4] Formatting Data...
+%fastboot% erase metadata
+%fastboot% erase userdata
+
+echo.
+echo [DONE] Rebooting...
+%fastboot% reboot
 pause
 EOF
-
-cat <<EOF > FirmwarePack/flash_rom_linux_mac.sh
-#!/bin/bash
-# NexDroid Flasher for Linux/Mac
-
-UNAME=\$(uname)
-if [ "\$UNAME" == "Darwin" ]; then
-    export PATH="\$PWD/bin/macos:\$PATH"
-else
-    export PATH="\$PWD/bin/linux:\$PATH"
-fi
-
-chmod +x bin/macos/fastboot bin/linux/fastboot 2>/dev/null
-
-echo "=============================================="
-echo "     NEXDROID FLASHER ($DEVICE_CODE)"
-echo "=============================================="
-
-fastboot devices
-if [ \$? -ne 0 ]; then
-   echo "❌ Device not found!"
-   exit 1
-fi
-
-echo "🔥 Flashing Firmware..."
-for img in images/*.img; do
-    [ -f "\$img" ] || continue
-    part_name=\$(basename "\$img" .img)
-    echo "   -> \$part_name"
-    fastboot flash "\$part_name" "\$img"
-done
-
-echo "🔥 Flashing Super..."
-if [ -f "system.img" ]; then
-    fastboot flash system system.img
-    fastboot flash product product.img
-    fastboot flash vendor vendor.img
-    fastboot flash odm odm.img
-    [ -f "system_ext.img" ] && fastboot flash system_ext system_ext.img
-    [ -f "mi_ext.img" ] && fastboot flash mi_ext mi_ext.img
-else
-    echo "⚠️  Super images (system.img etc) not found in root!"
-    echo "   Did you extract the Super_Images zip?"
-fi
-
-echo "✅ Done. Rebooting..."
-fastboot reboot
-EOF
-
-chmod +x FirmwarePack/flash_rom_linux_mac.sh
 
 # D. Zip Firmware Pack
 cd FirmwarePack
@@ -277,68 +240,54 @@ SUPER_LINK=""
 
 # --- A. UPLOAD FIRMWARE ---
 if [ -f "$FIRMWARE_ZIP" ]; then
-    echo "   ⬆️ Uploading Firmware: $FIRMWARE_ZIP ($(du -h "$FIRMWARE_ZIP" | cut -f1))"
-    
-    # Try PixelDrain
+    echo "   ⬆️ Uploading Firmware: $FIRMWARE_ZIP"
     if [ -z "$PIXELDRAIN_KEY" ]; then
         RESP=$(curl -s -T "$FIRMWARE_ZIP" "https://pixeldrain.com/api/file/")
     else
         RESP=$(curl -s -T "$FIRMWARE_ZIP" -u :$PIXELDRAIN_KEY "https://pixeldrain.com/api/file/")
     fi
-    
-    # Extract ID
     ID=$(echo "$RESP" | jq -r '.id')
     
     if [ ! -z "$ID" ] && [ "$ID" != "null" ]; then
         FW_LINK="https://pixeldrain.com/u/$ID"
-        echo "      ✅ Firmware URL: $FW_LINK"
+        echo "      ✅ Firmware: $FW_LINK"
     else
-        echo "      ⚠️ PixelDrain Failed. Resp: $RESP"
-        # Backup Mirror
         FW_LINK=$(curl -s --upload-file "$FIRMWARE_ZIP" "https://transfer.sh/$(basename "$FIRMWARE_ZIP")")
-        echo "      ✅ Backup URL: $FW_LINK"
+        echo "      ✅ Backup FW: $FW_LINK"
     fi
 else
-    echo "   ❌ Error: Firmware Zip ($FIRMWARE_ZIP) not found!"
+    echo "   ❌ Firmware Zip Missing!"
 fi
 
 # --- B. UPLOAD SUPER IMAGES ---
 if [ -f "$SUPER_ZIP" ]; then
-    echo "   ⬆️ Uploading Super Zip: $SUPER_ZIP ($(du -h "$SUPER_ZIP" | cut -f1))"
-    
-    # Try PixelDrain
+    echo "   ⬆️ Uploading Super Zip: $SUPER_ZIP"
     if [ -z "$PIXELDRAIN_KEY" ]; then
         RESP=$(curl -s -T "$SUPER_ZIP" "https://pixeldrain.com/api/file/")
     else
         RESP=$(curl -s -T "$SUPER_ZIP" -u :$PIXELDRAIN_KEY "https://pixeldrain.com/api/file/")
     fi
-    
     ID=$(echo "$RESP" | jq -r '.id')
     
     if [ ! -z "$ID" ] && [ "$ID" != "null" ]; then
         SUPER_LINK="https://pixeldrain.com/u/$ID"
-        echo "      ✅ Super URL: $SUPER_LINK"
+        echo "      ✅ Super: $SUPER_LINK"
     else
-        echo "      ⚠️ PixelDrain Failed. Resp: $RESP"
-        # Backup Mirror
         SUPER_LINK=$(curl -s --upload-file "$SUPER_ZIP" "https://transfer.sh/$(basename "$SUPER_ZIP")")
-        echo "      ✅ Backup URL: $SUPER_LINK"
+        echo "      ✅ Backup Super: $SUPER_LINK"
     fi
 else
-    echo "   ❌ Error: Super Zip ($SUPER_ZIP) not found!"
+    echo "   ❌ Super Zip Missing!"
 fi
 
-# 10. NOTIFY (Safe Mode)
+# 10. NOTIFY
 if [ ! -z "$TELEGRAM_TOKEN" ] && [ ! -z "$CHAT_ID" ]; then
-    echo "   🔔 Sending Telegram Notification..."
-    
-    # Build Message Line by Line
+    echo "   🔔 Notifying Telegram..."
     MSG="✅ *Build Complete!*
     
 📱 *Device:* \`${DEVICE_CODE}\`
 🤖 *Version:* \`${OS_VER}\`"
 
-    # Append Firmware Link
     if [[ "$FW_LINK" == http* ]]; then
         MSG="${MSG}
 
@@ -349,7 +298,6 @@ if [ ! -z "$TELEGRAM_TOKEN" ] && [ ! -z "$CHAT_ID" ]; then
 ❌ Firmware Upload Failed"
     fi
 
-    # Append Super Link
     if [[ "$SUPER_LINK" == http* ]]; then
         MSG="${MSG}
 
@@ -360,11 +308,8 @@ if [ ! -z "$TELEGRAM_TOKEN" ] && [ ! -z "$CHAT_ID" ]; then
 ❌ Super Upload Failed"
     fi
 
-    # Send
     curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
         -d chat_id="$CHAT_ID" \
         -d parse_mode="Markdown" \
         -d text="$MSG" > /dev/null
-    
-    echo "   ✅ Notification Sent."
 fi
