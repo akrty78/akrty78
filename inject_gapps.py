@@ -1,22 +1,33 @@
 import os
 import shutil
 import sys
+import zipfile
 
-# === CONFIGURATION ===
-GAPPS_SRC = "gapps"
+# =========================================================
+# ⚙️ CONFIGURATION
+# =========================================================
+
+# YOUR LINK
+GDRIVE_ZIP_LINK = "https://drive.google.com/file/d/1soDPsc9dhdXbuHLSx4t2L3u7x0fOlx_8/view?usp=drive_link"
+
+# FILE PATHS
+GAPPS_SRC = "gapps" 
 PERM_SRC = "permissions"
 NUKE_FILE = "nuke.txt"
 
-# APPS TO INJECT
-PRODUCT_APP_APKS = ["GoogleTTS.apk", "SoundPickerGoogle.apk", "LatinImeGoogle.apk", "MiuiBiometric.apk", "GeminiShell.apk"]
+# APPS TO INSTALL (Must match names inside your zip)
+PRODUCT_APP_APKS = [
+    "GoogleTTS.apk", "SoundPickerGoogle.apk", "LatinImeGoogle.apk", 
+    "MiuiBiometric.apk", "GeminiShell.apk", "Wizard.apk"
+]
+
 PRODUCT_PRIV_APP_APKS = [
     "AndroidAutoStub.apk", "GoogleRestore.apk", "GooglePartnerSetup.apk",
     "Assistant.apk", "HotwordEnrollmentYGoogleRISCV_WIDEBAND.apk",
     "Velvet.apk", "Phonesky.apk", "MIUIPackageInstaller.apk"
 ]
-EXT_APP_APKS = ["Wizard.apk"]
 
-# PERMISSIONS MAPPING
+# PERMISSIONS MAP
 PERMISSIONS_MAP = {
     "default-permissions-google.xml": "product/etc/default-permissions",
     "split-permissions-google.xml": "product/etc/permissions",
@@ -46,7 +57,7 @@ PERMISSIONS_MAP = {
     "cross_device_services.xml": "product/etc/sysconfig",
 }
 
-# CUSTOM PROPS TO INJECT
+# CUSTOM PROPS
 CUSTOM_PROPS = """
 # === NEXDROID CUSTOM PROPS ===
 ro.miui.support_super_clipboard=1
@@ -84,6 +95,26 @@ ro.miui.has_gmscore=1
 ro.control.privapp_permissions=
 """
 
+def download_gdrive_bundle():
+    """Downloads Zip from Google Drive"""
+    print("      ⬇️ Downloading GApps Bundle from Google Drive...")
+    try:
+        import gdown
+        output = "gapps_bundle.zip"
+        # Download (fuzzy=True handles file/d/ format)
+        gdown.download(GDRIVE_ZIP_LINK, output, quiet=False, fuzzy=True)
+        
+        if os.path.exists(output):
+            print("      📦 Extracting Bundle...")
+            os.makedirs(GAPPS_SRC, exist_ok=True)
+            with zipfile.ZipFile(output, 'r') as zip_ref:
+                zip_ref.extractall(GAPPS_SRC)
+            print("      ✅ Bundle Extracted!")
+        else:
+            print("      ❌ Download failed (File not found).")
+    except Exception as e:
+        print(f"      ❌ GDrive Download Error: {e}")
+
 def nuke_bloat(partition_root):
     if not os.path.exists(NUKE_FILE): return
     print("      🗑️  Running Debloater...")
@@ -97,28 +128,34 @@ def nuke_bloat(partition_root):
                 shutil.rmtree(os.path.join(root, app))
                 print(f"         - Nuked: {app}")
                 found = True
-        if not found:
-            pass # Silent skip
+        if not found: pass
 
 def inject_apks(partition_root):
     print("      📦 Injecting GApps...")
     
     def install(apk, folder_type):
         src = os.path.join(GAPPS_SRC, apk)
-        if not os.path.exists(src): return
+        # Search recursive if zip structure is nested
+        if not os.path.exists(src):
+            for root, dirs, files in os.walk(GAPPS_SRC):
+                if apk in files:
+                    src = os.path.join(root, apk)
+                    break
         
-        # Determine path
+        if not os.path.exists(src):
+            print(f"         ⚠️  Skipping {apk} (Not found in Bundle)")
+            return
+
         if folder_type == "priv": base = os.path.join(partition_root, "product/priv-app")
         else: base = os.path.join(partition_root, "product/app")
         
-        dest = os.path.join(base, apk.replace(".apk", ""))
-        os.makedirs(dest, exist_ok=True)
-        shutil.copy(src, os.path.join(dest, apk))
+        dest_folder = os.path.join(base, apk.replace(".apk", ""))
+        os.makedirs(dest_folder, exist_ok=True)
+        shutil.copy(src, os.path.join(dest_folder, apk))
         print(f"         + Installed: {apk}")
 
     for apk in PRODUCT_APP_APKS: install(apk, "app")
     for apk in PRODUCT_PRIV_APP_APKS: install(apk, "priv")
-    for apk in EXT_APP_APKS: install(apk, "app") # Fallback to app
 
 def inject_perms(partition_root):
     print("      🔑 Injecting Permissions...")
@@ -139,11 +176,13 @@ def inject_props(partition_root):
             print(f"         + Patched: {prop_path}")
 
 def main(partition_root):
+    # Only download the bundle once
+    if not os.path.exists(GAPPS_SRC) or not os.listdir(GAPPS_SRC):
+        download_gdrive_bundle()
+
     nuke_bloat(partition_root)
     inject_props(partition_root)
     
-    # Only inject GApps into the Product partition
-    # (Check if product folder exists in root)
     if os.path.exists(os.path.join(partition_root, "product")):
         inject_apks(partition_root)
         inject_perms(partition_root)
