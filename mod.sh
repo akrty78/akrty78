@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - NEX-PACKAGE EDITION
-#  (Bootanim + Walls + Modded APKs + GApps)
+#  NEXDROID GOONER - MODULAR EDITION
+#  (Refined for speed and modularity)
 # =========================================================
 
 set +e 
@@ -15,9 +15,9 @@ IMAGES_DIR="$OUTPUT_DIR/images"
 SUPER_DIR="$OUTPUT_DIR/super"
 TEMP_DIR="$GITHUB_WORKSPACE/temp"
 
-# 🔴 CONFIGURATION: YOUR NEX-PACKAGE LINK (Zip file)
-# If you don't have a link yet, put "local" and upload the folder to GitHub manually.
+# 🔴 CONFIGURATION
 NEX_PACKAGE_LINK="https://drive.google.com/file/d/YOUR_NEX_PACKAGE_LINK/view?usp=sharing"
+LAUNCHER_REPO="Mods-Center/HyperOS-Launcher"
 
 # 1. SETUP
 echo "🛠️  Setting up Environment..."
@@ -28,65 +28,28 @@ sudo apt-get update -y
 sudo apt-get install -y python3 python3-pip erofs-utils erofsfuse jq aria2 zip unzip liblz4-tool p7zip-full
 pip3 install gdown --break-system-packages
 
-# 2. GENERATE NEXPACKAGE.SH
-cat <<'EOF' > nexpackage.sh
-#!/bin/bash
-PARTITION_ROOT="$1"
-PARTITION_NAME="$2"
-NEX_DIR="nex-package"
+# 2. DOWNLOAD LATEST LAUNCHER (Handles Zips & APKs)
+echo "⬇️  Fetching HyperOS Launcher..."
+LAUNCHER_URL=$(curl -s "https://api.github.com/repos/$LAUNCHER_REPO/releases/latest" | jq -r '.assets[] | select(.name | endswith(".zip")) | .browser_download_url' | head -n 1)
 
-if [ ! -d "$NEX_DIR" ]; then exit 0; fi
-
-# --- PRODUCT SPECIFIC ---
-if [ "$PARTITION_NAME" == "product" ]; then
-    echo "      📦 Applying Nex-Package (Media/Overlay)..."
+if [ ! -z "$LAUNCHER_URL" ] && [ "$LAUNCHER_URL" != "null" ]; then
+    echo "   ⬇️ Downloading Zip: $LAUNCHER_URL"
+    wget -q -O "$TEMP_DIR/Launcher_Release.zip" "$LAUNCHER_URL"
     
-    # Paths
-    MEDIA_DIR=""
-    [ -d "$PARTITION_ROOT/media" ] && MEDIA_DIR="$PARTITION_ROOT/media"
-    [ -d "$PARTITION_ROOT/product/media" ] && MEDIA_DIR="$PARTITION_ROOT/product/media"
+    # Extract and Find MiuiHome.apk inside nested folders
+    unzip -q "$TEMP_DIR/Launcher_Release.zip" -d "$TEMP_DIR/Launcher_Extracted"
+    FOUND_APK=$(find "$TEMP_DIR/Launcher_Extracted" -name "MiuiHome.apk" -type f | head -n 1)
     
-    OVERLAY_DIR=""
-    [ -d "$PARTITION_ROOT/overlay" ] && OVERLAY_DIR="$PARTITION_ROOT/overlay"
-    [ -d "$PARTITION_ROOT/product/overlay" ] && OVERLAY_DIR="$PARTITION_ROOT/product/overlay"
-
-    # Bootanimation
-    if [ -f "$NEX_DIR/bootanimation.zip" ] && [ ! -z "$MEDIA_DIR" ]; then
-        echo "         - Replacing Bootanimation..."
-        cp "$NEX_DIR/bootanimation.zip" "$MEDIA_DIR/bootanimation.zip"
-        chmod 644 "$MEDIA_DIR/bootanimation.zip"
+    if [ ! -z "$FOUND_APK" ]; then
+        mv "$FOUND_APK" "$TEMP_DIR/MiuiHome_Latest.apk"
+        echo "   ✅ Extracted: MiuiHome_Latest.apk"
+    else
+        echo "   ⚠️  MiuiHome.apk not found inside the release zip!"
     fi
-
-    # Wallpapers
-    if [ -d "$NEX_DIR/walls" ] && [ ! -z "$MEDIA_DIR" ]; then
-        echo "         - Adding Wallpapers..."
-        mkdir -p "$MEDIA_DIR/wallpaper/wallpaper_group"
-        cp -r "$NEX_DIR/walls/"* "$MEDIA_DIR/wallpaper/wallpaper_group/" 2>/dev/null
-    fi
-
-    # Overlays
-    if [ -d "$NEX_DIR/overlays" ] && [ ! -z "$OVERLAY_DIR" ]; then
-        echo "         - Injecting Overlays..."
-        cp -r "$NEX_DIR/overlays/"* "$OVERLAY_DIR/"
-    fi
+    rm -rf "$TEMP_DIR/Launcher_Extracted" "$TEMP_DIR/Launcher_Release.zip"
+else
+    echo "   ⚠️  No Zip found in $LAUNCHER_REPO releases."
 fi
-
-# --- MODDED APKS (GLOBAL) ---
-if [ -d "$NEX_DIR/mods" ]; then
-    for MOD_APK in "$NEX_DIR/mods/"*.apk; do
-        [ -e "$MOD_APK" ] || continue
-        APK_NAME=$(basename "$MOD_APK")
-        # Smart Replace: Find where the APK lives and overwrite it
-        FOUND_PATH=$(find "$PARTITION_ROOT" -name "$APK_NAME" -type f 2>/dev/null | head -n 1)
-        if [ ! -z "$FOUND_PATH" ]; then
-            echo "         - Modding: $APK_NAME"
-            cp "$MOD_APK" "$FOUND_PATH"
-            chmod 644 "$FOUND_PATH"
-        fi
-    done
-fi
-EOF
-chmod +x nexpackage.sh
 
 # 3. DOWNLOAD TOOLS & NEX-PACKAGE
 if [ ! -f "$BIN_DIR/payload-dumper-go" ]; then
@@ -97,7 +60,6 @@ if [ ! -f "$BIN_DIR/payload-dumper-go" ]; then
     rm pd.tar.gz
 fi
 
-# Download Nex-Package if link provided
 if [[ "$NEX_PACKAGE_LINK" == *"drive.google.com"* ]]; then
     echo "⬇️  Downloading Nex-Package..."
     gdown "$NEX_PACKAGE_LINK" -O nex_pkg.zip --fuzzy
@@ -105,6 +67,11 @@ if [[ "$NEX_PACKAGE_LINK" == *"drive.google.com"* ]]; then
         unzip -q nex_pkg.zip -d nex-package
         rm nex_pkg.zip
     fi
+fi
+
+# Ensure nexpackage.sh is executable
+if [ -f "$GITHUB_WORKSPACE/nexpackage.sh" ]; then
+    chmod +x "$GITHUB_WORKSPACE/nexpackage.sh"
 fi
 
 # 4. DOWNLOAD ROM
@@ -179,8 +146,12 @@ for part in $LOGICALS; do
              python3 "$GITHUB_WORKSPACE/inject_gapps.py" "${part}_dump"
         fi
 
-        # B. NEX-PACKAGE HANDLER (BOOTANIM, WALLS, MODS)
-        ./nexpackage.sh "${part}_dump" "$part"
+        # B. RUN NEX-PACKAGE HANDLER (STANDALONE FILE)
+        if [ -f "$GITHUB_WORKSPACE/nexpackage.sh" ]; then
+             "$GITHUB_WORKSPACE/nexpackage.sh" "${part}_dump" "$part" "$TEMP_DIR"
+        else
+             echo "⚠️  nexpackage.sh not found in repo!"
+        fi
         
         # REPACK
         mkfs.erofs -zlz4 "$SUPER_DIR/${part}.img" "${part}_dump" > /dev/null
@@ -198,7 +169,7 @@ SUPER_ZIP="Super_Images_${DEVICE_CODE}_${OS_VER}.zip"
 mv "$SUPER_ZIP" "$OUTPUT_DIR/"
 rm *.img
 
-# Zip 2: Firmware + Standard Script
+# Zip 2: Firmware
 cd "$OUTPUT_DIR"
 mkdir -p FirmwarePack/bin/windows FirmwarePack/bin/linux FirmwarePack/bin/macos FirmwarePack/images
 
@@ -246,17 +217,16 @@ echo Formatting Data...
 %fastboot% reboot
 EOF
 
-# Zip Firmware
 cd FirmwarePack
 FIRMWARE_ZIP="Firmware_Flasher_${DEVICE_CODE}_${OS_VER}.zip"
 zip -r -q "../$FIRMWARE_ZIP" .
 
-# 10. UPLOAD
+# 10. UPLOAD (Debug Mode)
 echo "☁️  Uploading..."
 cd "$OUTPUT_DIR"
 FW_LINK=""; SUPER_LINK=""
 
-# Upload Firmware
+# Firmware
 if [ -f "$FIRMWARE_ZIP" ]; then
     echo "   ⬆️ Uploading Firmware..."
     [ -z "$PIXELDRAIN_KEY" ] && RESP=$(curl -s -T "$FIRMWARE_ZIP" "https://pixeldrain.com/api/file/") || RESP=$(curl -s -T "$FIRMWARE_ZIP" -u :$PIXELDRAIN_KEY "https://pixeldrain.com/api/file/")
@@ -265,7 +235,7 @@ if [ -f "$FIRMWARE_ZIP" ]; then
     echo "      -> FW: $FW_LINK"
 fi
 
-# Upload Super
+# Super
 if [ -f "$SUPER_ZIP" ]; then
     echo "   ⬆️ Uploading Super..."
     [ -z "$PIXELDRAIN_KEY" ] && RESP=$(curl -s -T "$SUPER_ZIP" "https://pixeldrain.com/api/file/") || RESP=$(curl -s -T "$SUPER_ZIP" -u :$PIXELDRAIN_KEY "https://pixeldrain.com/api/file/")
