@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - DOCKER GOD MODE
+#  NEXDROID GOONER - DOCKER V2 (VERBOSE & FIXED)
 # =========================================================
 
 ROM_URL="$1"
@@ -12,18 +12,20 @@ IMAGES_DIR="$OUTPUT_DIR/images"
 TOOLS_DIR="$OUTPUT_DIR/tools"
 TEMP_DIR="$GITHUB_WORKSPACE/temp"
 
-# 1. SETUP
+# 1. SETUP ENVIRONMENT
 echo "🛠️  Setting up Environment..."
 mkdir -p "$IMAGES_DIR" "$TOOLS_DIR" "$TEMP_DIR"
 chmod +x "$BIN_DIR"/*
 export PATH="$BIN_DIR:$PATH"
 
-# Install basics
+# Install host tools
 sudo apt-get update -y
 sudo apt-get install -y python3 python3-pip erofs-utils erofsfuse jq aria2 zip unzip liblz4-tool
 
-# 2. GET TOOLS (Standard Download)
+# 2. DOWNLOAD TOOLS
 echo "⬇️  Fetching Tools..."
+
+# Payload Dumper
 if [ ! -f "$BIN_DIR/payload-dumper-go" ]; then
     wget -q https://github.com/ssut/payload-dumper-go/releases/download/1.2.2/payload-dumper-go_1.2.2_linux_amd64.tar.gz
     tar -xzf payload-dumper-go_1.2.2_linux_amd64.tar.gz
@@ -31,11 +33,12 @@ if [ ! -f "$BIN_DIR/payload-dumper-go" ]; then
     chmod +x "$BIN_DIR/payload-dumper-go"
 fi
 
-# We download lpmake, but we will run it inside Docker later
+# lpmake (We download the Linux binary, just in case yours is the .exe)
 if [ ! -f "$BIN_DIR/lpmake" ]; then
     wget -q -O "$BIN_DIR/lpmake" "https://github.com/elfamigos/android-tools-bin/raw/main/linux/lpmake"
-    chmod +x "$BIN_DIR/lpmake"
 fi
+# Ensure it is executable on host
+chmod +x "$BIN_DIR/lpmake"
 
 # 3. DOWNLOAD ROM
 echo "⬇️  Downloading ROM..."
@@ -48,11 +51,12 @@ rm "rom.zip"
 echo "🔍 Extracting Firmware..."
 payload-dumper-go -p boot,dtbo,vendor_boot,recovery,init_boot,vbmeta,vbmeta_system,vbmeta_vendor -o "$IMAGES_DIR" payload.bin > /dev/null 2>&1
 
-# 5. SMART DETECTION
+# 5. DETECT DEVICE
 echo "🕵️  Detecting Device Identity..."
 payload-dumper-go -p mi_ext,system -o . payload.bin > /dev/null 2>&1
 
 DEVICE_CODE=""
+# Check mi_ext
 if [ -f "mi_ext.img" ]; then
     mkdir -p mnt_id
     erofsfuse mi_ext.img mnt_id
@@ -67,6 +71,7 @@ if [ -f "mi_ext.img" ]; then
     rm mi_ext.img
 fi
 
+# Check System
 if [ -f "system.img" ]; then
     mkdir -p mnt_id
     erofsfuse system.img mnt_id
@@ -113,6 +118,7 @@ for part in $PARTITIONS; do
             cp -r "$GITHUB_WORKSPACE/mods/$part/"* "${part}_dump/"
         fi
         
+        # Standard compression
         mkfs.erofs -zlz4 "${part}_mod.img" "${part}_dump"
         if [ $? -ne 0 ]; then
             echo "❌ CRITICAL: Failed to compress $part!"
@@ -132,21 +138,29 @@ rm payload.bin
 
 if [ "$FOUND_PARTITIONS" = false ]; then echo "❌ CRITICAL: No partitions found!"; exit 1; fi
 
-# 7. BUILD SUPER IMAGE (VIA DOCKER)
-echo "🔨  Building Super (Using Docker Container)..."
+# 7. BUILD SUPER IMAGE (VIA DOCKER V2)
+echo "🔨  Building Super (Docker V2)..."
 echo "    Max Size: $SUPER_SIZE"
 
-# We use Docker to run an older Ubuntu (20.04) where lpmake works perfectly.
-# This bypasses all library errors on the host.
+# We run Docker with explicit permissions fixes
+# If lpmake fails, we will see the error now because we removed the redirections
 docker run --rm -v "$GITHUB_WORKSPACE":/work -w /work ubuntu:20.04 bash -c "
-    apt-get update && apt-get install -y libssl1.1 libncurses5 && 
-    ./bin/lpmake --metadata-size 65536 --super-name super --metadata-slots 2 \
+    echo '    -> Docker: Installing libs...'
+    apt-get update -qq && apt-get install -y -qq libssl1.1 libncurses5 > /dev/null
+    
+    echo '    -> Docker: Fixing permissions...'
+    chmod +x /work/bin/lpmake
+    
+    echo '    -> Docker: Running lpmake...'
+    /work/bin/lpmake --metadata-size 65536 --super-name super --metadata-slots 2 \
     --device super:$SUPER_SIZE --group main:$SUPER_SIZE \
     $LPM_ARGS --output /work/NexMod_Output/images/super.img
 "
 
+# Check result
 if [ ! -f "$IMAGES_DIR/super.img" ]; then
     echo "❌ CRITICAL: Docker build failed."
+    echo "   If you see 'Not enough space', your partitions are too big for the super partition."
     exit 1
 fi
 
@@ -176,3 +190,4 @@ if [ "$FILE_ID" == "null" ] || [ -z "$FILE_ID" ]; then echo "❌ Upload Failed: 
 
 DOWNLOAD_LINK="https://pixeldrain.com/u/$FILE_ID"
 echo "✅ DONE! Link: $DOWNLOAD_LINK"
+
