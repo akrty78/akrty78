@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - FAIL-SAFE EDITION
+#  NEXDROID GOONER - FAIL-SAFE EDITION (With Notification)
 # =========================================================
 
 ROM_URL="$1"
@@ -30,7 +30,7 @@ SKIP_SUPER=false
 rm -rf "$OTATOOLS_DIR"
 mkdir -p "$OTATOOLS_DIR"
 
-# Attempt Download with Aria2 (Handles redirects/errors better)
+# Attempt Download with Aria2
 echo "    -> Downloading OTATools..."
 aria2c -x 16 -s 16 -o "otatools.zip" "https://github.com/SebaUbuntu/otatools-build/releases/download/v0.0.1/otatools.zip" || true
 
@@ -185,7 +185,35 @@ fi
 FILE_ID=$(echo $RESPONSE | jq -r '.id')
 if [ "$FILE_ID" == "null" ] || [ -z "$FILE_ID" ]; then 
     echo "❌ Upload Failed"
+    # We exit here to avoid sending a broken notification
     exit 1
 fi
 
-echo "✅ DONE! https://pixeldrain.com/u/$FILE_ID"
+DOWNLOAD_LINK="https://pixeldrain.com/u/$FILE_ID"
+echo "✅ DONE! $DOWNLOAD_LINK"
+
+# 10. TELEGRAM NOTIFICATION (NEW)
+# Only runs if tokens are present
+if [ ! -z "$TELEGRAM_TOKEN" ] && [ ! -z "$CHAT_ID" ]; then
+    echo "🔔 Sending Telegram Notification..."
+    
+    # Calculate file size for the message
+    FILE_SIZE=$(du -h "$ZIP_NAME" | cut -f1)
+    
+    MSG_TEXT="✅ *Build Complete!*
+    
+📱 *Device:* \`${DEVICE_CODE}\`
+📦 *Size:* ${FILE_SIZE}
+    
+⬇️ [Download ROM](${DOWNLOAD_LINK})"
+
+    # Send POST request to Telegram API
+    curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
+        -d chat_id="$CHAT_ID" \
+        -d parse_mode="Markdown" \
+        -d text="$MSG_TEXT" > /dev/null
+        
+    echo "✅ Notification Sent to $CHAT_ID"
+else
+    echo "⚠️  Skipping Notification: Missing TELEGRAM_TOKEN or CHAT_ID"
+fi
