@@ -1,0 +1,40 @@
+{
+    "title": "Xiaomi 17 Ultra",
+    "titleResId": "wallpaper_xiaomi17series_title",
+    "cardType": 2,
+    "count": 6,
+    "slideCount": 6,
+    "randomOrder": false,
+    "wallpapers": [
+        {
+            "thumbPath": "./xiaomi01.jpg",
+            "originPath": "./xiaomi01.jpg",
+            "type": "wallpaper"
+        },
+        {
+            "thumbPath": "./xiaomi02.jpg",
+            "originPath": "./xiaomi02.jpg",
+            "type": "wallpaper"
+        },
+        {
+            "thumbPath": "./xiaomi03.jpg",
+            "originPath": "./xiaomi03.jpg",
+            "type": "wallpaper"
+        },
+        {
+            "thumbPath": "./xiaomi04.jpg",
+            "originPath": "./xiaomi04.jpg",
+            "type": "wallpaper"
+        },
+        {
+            "thumbPath": "./xiaomi05.jpg",
+            "originPath": "./xiaomi05.jpg",
+            "type": "wallpaper"
+        },
+        {
+            "thumbPath": "./xiaomi06.jpg",
+            "originPath": "./xiaomi06.jpg",
+            "type": "wallpaper"
+        }
+    ]
+}

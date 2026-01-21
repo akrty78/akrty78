@@ -1,0 +1,50 @@
+{
+    "title": "NexDroid Geo",
+    "titleResId": "wallpaper_nexdroid_excl_title",
+    "cardType": 1,
+    "count": 8,
+    "slideCount": 8,
+    "randomOrder": false,
+    "wallpapers": [
+        {
+            "thumbPath": "./01.jpg",
+            "originPath": "./01.jpg",
+            "type": "wallpaper"
+        },
+        {
+            "thumbPath": "./02.jpg",
+            "originPath": "./02.jpg",
+            "type": "wallpaper"
+        },
+        {
+            "thumbPath": "./03.jpg",
+            "originPath": "./03.jpg",
+            "type": "wallpaper"
+        },
+        {
+            "thumbPath": "./04.jpg",
+            "originPath": "./04.jpg",
+            "type": "wallpaper"
+        },
+        {
+            "thumbPath": "./05.jpg",
+            "originPath": "./05.jpg",
+            "type": "wallpaper"
+        },
+        {
+            "thumbPath": "./06.jpg",
+            "originPath": "./06.jpg",
+            "type": "wallpaper"
+        },
+        {
+            "thumbPath": "./07.jpg",
+            "originPath": "./07.jpg",
+            "type": "wallpaper"
+        },
+        {
+            "thumbPath": "./08.jpg",
+            "originPath": "./08.jpg",
+            "type": "wallpaper"
+        }
+    ]
+}
