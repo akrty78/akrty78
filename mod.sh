@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - STANDARD FLASHER EDITION
-#  (Manual Super.img + Format Data Script)
+#  NEXDROID GOONER - NEX-PACKAGE EDITION
+#  (Bootanim + Walls + Modded APKs + GApps)
 # =========================================================
 
 set +e 
@@ -15,6 +15,10 @@ IMAGES_DIR="$OUTPUT_DIR/images"
 SUPER_DIR="$OUTPUT_DIR/super"
 TEMP_DIR="$GITHUB_WORKSPACE/temp"
 
+# 🔴 CONFIGURATION: YOUR NEX-PACKAGE LINK (Zip file)
+# If you don't have a link yet, put "local" and upload the folder to GitHub manually.
+NEX_PACKAGE_LINK="https://drive.google.com/file/d/YOUR_NEX_PACKAGE_LINK/view?usp=sharing"
+
 # 1. SETUP
 echo "🛠️  Setting up Environment..."
 mkdir -p "$IMAGES_DIR" "$SUPER_DIR" "$TEMP_DIR" "$BIN_DIR"
@@ -24,7 +28,67 @@ sudo apt-get update -y
 sudo apt-get install -y python3 python3-pip erofs-utils erofsfuse jq aria2 zip unzip liblz4-tool p7zip-full
 pip3 install gdown --break-system-packages
 
-# 2. PAYLOAD DUMPER
+# 2. GENERATE NEXPACKAGE.SH
+cat <<'EOF' > nexpackage.sh
+#!/bin/bash
+PARTITION_ROOT="$1"
+PARTITION_NAME="$2"
+NEX_DIR="nex-package"
+
+if [ ! -d "$NEX_DIR" ]; then exit 0; fi
+
+# --- PRODUCT SPECIFIC ---
+if [ "$PARTITION_NAME" == "product" ]; then
+    echo "      📦 Applying Nex-Package (Media/Overlay)..."
+    
+    # Paths
+    MEDIA_DIR=""
+    [ -d "$PARTITION_ROOT/media" ] && MEDIA_DIR="$PARTITION_ROOT/media"
+    [ -d "$PARTITION_ROOT/product/media" ] && MEDIA_DIR="$PARTITION_ROOT/product/media"
+    
+    OVERLAY_DIR=""
+    [ -d "$PARTITION_ROOT/overlay" ] && OVERLAY_DIR="$PARTITION_ROOT/overlay"
+    [ -d "$PARTITION_ROOT/product/overlay" ] && OVERLAY_DIR="$PARTITION_ROOT/product/overlay"
+
+    # Bootanimation
+    if [ -f "$NEX_DIR/bootanimation.zip" ] && [ ! -z "$MEDIA_DIR" ]; then
+        echo "         - Replacing Bootanimation..."
+        cp "$NEX_DIR/bootanimation.zip" "$MEDIA_DIR/bootanimation.zip"
+        chmod 644 "$MEDIA_DIR/bootanimation.zip"
+    fi
+
+    # Wallpapers
+    if [ -d "$NEX_DIR/walls" ] && [ ! -z "$MEDIA_DIR" ]; then
+        echo "         - Adding Wallpapers..."
+        mkdir -p "$MEDIA_DIR/wallpaper/wallpaper_group"
+        cp -r "$NEX_DIR/walls/"* "$MEDIA_DIR/wallpaper/wallpaper_group/" 2>/dev/null
+    fi
+
+    # Overlays
+    if [ -d "$NEX_DIR/overlays" ] && [ ! -z "$OVERLAY_DIR" ]; then
+        echo "         - Injecting Overlays..."
+        cp -r "$NEX_DIR/overlays/"* "$OVERLAY_DIR/"
+    fi
+fi
+
+# --- MODDED APKS (GLOBAL) ---
+if [ -d "$NEX_DIR/mods" ]; then
+    for MOD_APK in "$NEX_DIR/mods/"*.apk; do
+        [ -e "$MOD_APK" ] || continue
+        APK_NAME=$(basename "$MOD_APK")
+        # Smart Replace: Find where the APK lives and overwrite it
+        FOUND_PATH=$(find "$PARTITION_ROOT" -name "$APK_NAME" -type f 2>/dev/null | head -n 1)
+        if [ ! -z "$FOUND_PATH" ]; then
+            echo "         - Modding: $APK_NAME"
+            cp "$MOD_APK" "$FOUND_PATH"
+            chmod 644 "$FOUND_PATH"
+        fi
+    done
+fi
+EOF
+chmod +x nexpackage.sh
+
+# 3. DOWNLOAD TOOLS & NEX-PACKAGE
 if [ ! -f "$BIN_DIR/payload-dumper-go" ]; then
     wget -q -O pd.tar.gz https://github.com/ssut/payload-dumper-go/releases/download/1.2.2/payload-dumper-go_1.2.2_linux_amd64.tar.gz
     tar -xzf pd.tar.gz
@@ -33,24 +97,30 @@ if [ ! -f "$BIN_DIR/payload-dumper-go" ]; then
     rm pd.tar.gz
 fi
 
-# 3. DOWNLOAD ROM
+# Download Nex-Package if link provided
+if [[ "$NEX_PACKAGE_LINK" == *"drive.google.com"* ]]; then
+    echo "⬇️  Downloading Nex-Package..."
+    gdown "$NEX_PACKAGE_LINK" -O nex_pkg.zip --fuzzy
+    if [ -f "nex_pkg.zip" ]; then
+        unzip -q nex_pkg.zip -d nex-package
+        rm nex_pkg.zip
+    fi
+fi
+
+# 4. DOWNLOAD ROM
 echo "⬇️  Downloading ROM..."
 cd "$TEMP_DIR"
 aria2c -x 16 -s 16 --file-allocation=none -o "rom.zip" "$ROM_URL"
 if [ ! -f "rom.zip" ]; then echo "❌ Download Failed"; exit 1; fi
+unzip -o "rom.zip" payload.bin && rm "rom.zip"
 
-unzip -o "rom.zip" payload.bin
-rm "rom.zip"
-
-# 4. EXTRACT
+# 5. EXTRACT
 echo "🔍 Extracting..."
 payload-dumper-go -o "$IMAGES_DIR" payload.bin > /dev/null 2>&1
 
-# 5. DETECT INFO
+# 6. DETECT INFO
 echo "🕵️  Detecting Info..."
-DEVICE_CODE="unknown"
-OS_VER="1.0.0"
-
+DEVICE_CODE="unknown"; OS_VER="1.0.0"
 if [ -f "$IMAGES_DIR/mi_ext.img" ]; then
     mkdir -p mnt_detect
     erofsfuse "$IMAGES_DIR/mi_ext.img" mnt_detect
@@ -74,7 +144,7 @@ if [ -f "$IMAGES_DIR/system.img" ]; then
 fi
 echo "   -> Device: $DEVICE_CODE | Ver: $OS_VER"
 
-# 6. PATCH VBMETA
+# 7. PATCH VBMETA
 echo "🛡️  Patching VBMETA..."
 cat <<EOF > patch_vbmeta.py
 import sys
@@ -90,31 +160,27 @@ EOF
 [ -f "$IMAGES_DIR/vbmeta_system.img" ] && python3 patch_vbmeta.py "$IMAGES_DIR/vbmeta_system.img"
 rm patch_vbmeta.py
 
-# 7. PROCESS PARTITIONS
-echo "🔄 Modding, Debloating & Injecting..."
+# 8. PROCESS PARTITIONS
+echo "🔄 Processing Partitions..."
 LOGICALS="system system_ext product mi_ext vendor odm system_dlkm vendor_dlkm"
 
 for part in $LOGICALS; do
     if [ -f "$IMAGES_DIR/${part}.img" ]; then
         echo "   -> Processing $part..."
         mkdir -p "${part}_dump" "mnt_point"
-        
         erofsfuse "$IMAGES_DIR/${part}.img" "mnt_point"
         cp -a "mnt_point/." "${part}_dump/"
         fusermount -uz "mnt_point"
         rmdir "mnt_point"
         rm "$IMAGES_DIR/${part}.img"
         
-        # CALL INJECTOR
+        # A. PYTHON INJECTOR (GAPPS/PROPS)
         if [ -f "$GITHUB_WORKSPACE/inject_gapps.py" ]; then
              python3 "$GITHUB_WORKSPACE/inject_gapps.py" "${part}_dump"
         fi
 
-        # MANUAL MODS
-        if [ -d "$GITHUB_WORKSPACE/mods/$part" ]; then
-            echo "      💉 Injecting Manual Mods..."
-            cp -r "$GITHUB_WORKSPACE/mods/$part/"* "${part}_dump/"
-        fi
+        # B. NEX-PACKAGE HANDLER (BOOTANIM, WALLS, MODS)
+        ./nexpackage.sh "${part}_dump" "$part"
         
         # REPACK
         mkfs.erofs -zlz4 "$SUPER_DIR/${part}.img" "${part}_dump" > /dev/null
@@ -122,194 +188,102 @@ for part in $LOGICALS; do
     fi
 done
 
-# 8. CREATE ORGANIZED ZIPS
-echo "📦  Creating Organized Zips..."
+# 9. CREATE ZIPS
+echo "📦  Creating Zips..."
 
-# --- ZIP 1: SUPER IMAGES (Raw Images for you to build super.img) ---
+# Zip 1: Super
 cd "$SUPER_DIR"
 SUPER_ZIP="Super_Images_${DEVICE_CODE}_${OS_VER}.zip"
 7z a -tzip -mx3 -mmt=$(nproc) "$SUPER_ZIP" *.img > /dev/null
 mv "$SUPER_ZIP" "$OUTPUT_DIR/"
 rm *.img
 
-# --- ZIP 2: FIRMWARE + NORMAL SCRIPT ---
+# Zip 2: Firmware + Standard Script
 cd "$OUTPUT_DIR"
-mkdir -p FirmwarePack/bin/windows
-mkdir -p FirmwarePack/bin/linux
-mkdir -p FirmwarePack/bin/macos
-mkdir -p FirmwarePack/images
+mkdir -p FirmwarePack/bin/windows FirmwarePack/bin/linux FirmwarePack/bin/macos FirmwarePack/images
 
-# A. Download Tools
-echo "   ⬇️  Fetching Platform Tools..."
-wget -q -O tools-win.zip https://dl.google.com/android/repository/platform-tools-latest-windows.zip
-wget -q -O tools-lin.zip https://dl.google.com/android/repository/platform-tools-latest-linux.zip
-wget -q -O tools-mac.zip https://dl.google.com/android/repository/platform-tools-latest-darwin.zip
+# Tools Download
+wget -q -O t-win.zip https://dl.google.com/android/repository/platform-tools-latest-windows.zip && unzip -q t-win.zip -d w && mv w/platform-tools/* FirmwarePack/bin/windows/ && rm -rf w t-win.zip
+wget -q -O t-lin.zip https://dl.google.com/android/repository/platform-tools-latest-linux.zip && unzip -q t-lin.zip -d l && mv l/platform-tools/* FirmwarePack/bin/linux/ && rm -rf l t-lin.zip
+wget -q -O t-mac.zip https://dl.google.com/android/repository/platform-tools-latest-darwin.zip && unzip -q t-mac.zip -d m && mv m/platform-tools/* FirmwarePack/bin/macos/ && rm -rf m t-mac.zip
 
-unzip -q tools-win.zip -d win_tmp && mv win_tmp/platform-tools/* FirmwarePack/bin/windows/ && rm -rf win_tmp tools-win.zip
-unzip -q tools-lin.zip -d lin_tmp && mv lin_tmp/platform-tools/* FirmwarePack/bin/linux/ && rm -rf lin_tmp tools-lin.zip
-unzip -q tools-mac.zip -d mac_tmp && mv mac_tmp/platform-tools/* FirmwarePack/bin/macos/ && rm -rf mac_tmp tools-mac.zip
-
-# B. Move Firmware Images
-echo "   📂 Moving Firmware..."
+# Move Images
 find "$IMAGES_DIR" -maxdepth 1 -type f -name "*.img" -exec mv {} FirmwarePack/images/ \;
 
-# C. GENERATE THE "NORMAL" SCRIPT (Your Request)
-echo "   📝 Generating Standard Script..."
+# Generate Flash Script
 cat <<EOF > FirmwarePack/flash_rom_windows.bat
 @echo off
 cd %~dp0
 set fastboot=bin\windows\fastboot.exe
 if not exist %fastboot% echo %fastboot% not found. & pause & exit /B 1
-
 echo ==================================================
 echo       NEXDROID FLASHER (%DEVICE_CODE%)
 echo ==================================================
 echo.
-echo 1. Connect device in FASTBOOT mode (Vol Down + Power).
-echo 2. Make sure you have placed 'super.img' inside the 'images' folder.
+echo 1. Connect device in FASTBOOT.
+echo 2. Place 'super.img' in the 'images' folder.
 echo.
-
-echo Waiting for device...
 %fastboot% wait-for-device
 echo Device detected.
-
-echo.
-echo --------------------------------------------------
-echo Your device will be flashed and DATA will be formatted.
-echo You will lose all apps and files.
-echo --------------------------------------------------
-set /p choice=Do you want to continue? [y/N] 
+set /p choice=Flash and Format Data? [y/N] 
 if /i "%choice%" neq "y" exit /B 0
-
-echo.
-echo [1/3] Setting Active Slot A...
 %fastboot% set_active a
-
-echo [2/3] Flashing Firmware...
-rem Loop through all images except super/cust/userdata
+echo Flashing Firmware...
 for %%f in (images\*.img) do (
-    if /i "%%~nf" neq "super" (
-        if /i "%%~nf" neq "cust" (
-            if /i "%%~nf" neq "userdata" (
-                echo     - Flashing %%~nf...
-                %fastboot% flash %%~nf "%%f"
-            )
-        )
-    )
+    if /i "%%~nf" neq "super" if /i "%%~nf" neq "cust" if /i "%%~nf" neq "userdata" %fastboot% flash %%~nf "%%f"
 )
-
-echo [3/3] Flashing Super & Cust...
-if exist images\cust.img (
-    echo     - Flashing cust...
-    %fastboot% flash cust images\cust.img
-)
-
+if exist images\cust.img %fastboot% flash cust images\cust.img
 if exist images\super.img (
-    echo     - Flashing super...
+    echo Flashing Super...
     %fastboot% flash super images\super.img
 ) else (
-    echo [ERROR] super.img NOT FOUND in images folder!
-    echo Please build super.img and put it there.
-    pause
-    exit /B 1
+    echo [ERROR] super.img MISSING!
+    pause & exit /B 1
 )
-
-echo.
-echo [4/4] Formatting Data...
+echo Formatting Data...
 %fastboot% erase metadata
 %fastboot% erase userdata
-
-echo.
-echo [DONE] Rebooting...
 %fastboot% reboot
-pause
 EOF
 
-# D. Zip Firmware Pack
+# Zip Firmware
 cd FirmwarePack
 FIRMWARE_ZIP="Firmware_Flasher_${DEVICE_CODE}_${OS_VER}.zip"
 zip -r -q "../$FIRMWARE_ZIP" .
 
-# 9. UPLOAD (Debug Mode)
+# 10. UPLOAD
 echo "☁️  Uploading..."
 cd "$OUTPUT_DIR"
+FW_LINK=""; SUPER_LINK=""
 
-# Variables
-FW_LINK=""
-SUPER_LINK=""
-
-# --- A. UPLOAD FIRMWARE ---
+# Upload Firmware
 if [ -f "$FIRMWARE_ZIP" ]; then
-    echo "   ⬆️ Uploading Firmware: $FIRMWARE_ZIP"
-    if [ -z "$PIXELDRAIN_KEY" ]; then
-        RESP=$(curl -s -T "$FIRMWARE_ZIP" "https://pixeldrain.com/api/file/")
-    else
-        RESP=$(curl -s -T "$FIRMWARE_ZIP" -u :$PIXELDRAIN_KEY "https://pixeldrain.com/api/file/")
-    fi
+    echo "   ⬆️ Uploading Firmware..."
+    [ -z "$PIXELDRAIN_KEY" ] && RESP=$(curl -s -T "$FIRMWARE_ZIP" "https://pixeldrain.com/api/file/") || RESP=$(curl -s -T "$FIRMWARE_ZIP" -u :$PIXELDRAIN_KEY "https://pixeldrain.com/api/file/")
     ID=$(echo "$RESP" | jq -r '.id')
-    
-    if [ ! -z "$ID" ] && [ "$ID" != "null" ]; then
-        FW_LINK="https://pixeldrain.com/u/$ID"
-        echo "      ✅ Firmware: $FW_LINK"
-    else
-        FW_LINK=$(curl -s --upload-file "$FIRMWARE_ZIP" "https://transfer.sh/$(basename "$FIRMWARE_ZIP")")
-        echo "      ✅ Backup FW: $FW_LINK"
-    fi
-else
-    echo "   ❌ Firmware Zip Missing!"
+    if [ ! -z "$ID" ] && [ "$ID" != "null" ]; then FW_LINK="https://pixeldrain.com/u/$ID"; else FW_LINK=$(curl -s --upload-file "$FIRMWARE_ZIP" "https://transfer.sh/$(basename "$FIRMWARE_ZIP")"); fi
+    echo "      -> FW: $FW_LINK"
 fi
 
-# --- B. UPLOAD SUPER IMAGES ---
+# Upload Super
 if [ -f "$SUPER_ZIP" ]; then
-    echo "   ⬆️ Uploading Super Zip: $SUPER_ZIP"
-    if [ -z "$PIXELDRAIN_KEY" ]; then
-        RESP=$(curl -s -T "$SUPER_ZIP" "https://pixeldrain.com/api/file/")
-    else
-        RESP=$(curl -s -T "$SUPER_ZIP" -u :$PIXELDRAIN_KEY "https://pixeldrain.com/api/file/")
-    fi
+    echo "   ⬆️ Uploading Super..."
+    [ -z "$PIXELDRAIN_KEY" ] && RESP=$(curl -s -T "$SUPER_ZIP" "https://pixeldrain.com/api/file/") || RESP=$(curl -s -T "$SUPER_ZIP" -u :$PIXELDRAIN_KEY "https://pixeldrain.com/api/file/")
     ID=$(echo "$RESP" | jq -r '.id')
-    
-    if [ ! -z "$ID" ] && [ "$ID" != "null" ]; then
-        SUPER_LINK="https://pixeldrain.com/u/$ID"
-        echo "      ✅ Super: $SUPER_LINK"
-    else
-        SUPER_LINK=$(curl -s --upload-file "$SUPER_ZIP" "https://transfer.sh/$(basename "$SUPER_ZIP")")
-        echo "      ✅ Backup Super: $SUPER_LINK"
-    fi
-else
-    echo "   ❌ Super Zip Missing!"
+    if [ ! -z "$ID" ] && [ "$ID" != "null" ]; then SUPER_LINK="https://pixeldrain.com/u/$ID"; else SUPER_LINK=$(curl -s --upload-file "$SUPER_ZIP" "https://transfer.sh/$(basename "$SUPER_ZIP")"); fi
+    echo "      -> Super: $SUPER_LINK"
 fi
 
-# 10. NOTIFY
+# 11. NOTIFY
 if [ ! -z "$TELEGRAM_TOKEN" ] && [ ! -z "$CHAT_ID" ]; then
-    echo "   🔔 Notifying Telegram..."
     MSG="✅ *Build Complete!*
-    
 📱 *Device:* \`${DEVICE_CODE}\`
 🤖 *Version:* \`${OS_VER}\`"
-
-    if [[ "$FW_LINK" == http* ]]; then
-        MSG="${MSG}
-
-📦 [Download Firmware](${FW_LINK})"
-    else
-        MSG="${MSG}
-
-❌ Firmware Upload Failed"
-    fi
-
-    if [[ "$SUPER_LINK" == http* ]]; then
-        MSG="${MSG}
-
-📦 [Download Super Images](${SUPER_LINK})"
-    else
-        MSG="${MSG}
-
-❌ Super Upload Failed"
-    fi
-
-    curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
-        -d chat_id="$CHAT_ID" \
-        -d parse_mode="Markdown" \
-        -d text="$MSG" > /dev/null
+    [[ "$FW_LINK" == http* ]] && MSG="${MSG}
+📦 [Download Firmware](${FW_LINK})" || MSG="${MSG}
+❌ Firmware Failed"
+    [[ "$SUPER_LINK" == http* ]] && MSG="${MSG}
+📦 [Download Super](${SUPER_LINK})" || MSG="${MSG}
+❌ Super Failed"
+    curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" -d chat_id="$CHAT_ID" -d parse_mode="Markdown" -d text="$MSG" > /dev/null
 fi
