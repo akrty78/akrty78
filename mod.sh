@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - XZ COMPRESSION (MAX SAVINGS)
+#  NEXDROID GOONER - SPEED ZIP EDITION
 # =========================================================
 
 set +e 
@@ -19,9 +19,9 @@ echo "🛠️  Setting up Environment..."
 mkdir -p "$IMAGES_DIR" "$SUPER_DIR" "$TEMP_DIR" "$BIN_DIR"
 export PATH="$BIN_DIR:$PATH"
 
-# Install compression tools
+# Install 7zip for fast multithreaded zipping
 sudo apt-get update -y
-sudo apt-get install -y python3 python3-pip erofs-utils erofsfuse jq aria2 zip unzip liblz4-tool xz-utils
+sudo apt-get install -y python3 python3-pip erofs-utils erofsfuse jq aria2 zip unzip liblz4-tool p7zip-full
 
 # 2. PAYLOAD DUMPER
 if [ ! -f "$BIN_DIR/payload-dumper-go" ]; then
@@ -60,7 +60,6 @@ if [ -f "$IMAGES_DIR/mi_ext.img" ]; then
     fi
     fusermount -uz mnt_detect
 fi
-# Fallback/OS Check
 if [ -f "$IMAGES_DIR/system.img" ]; then
     mkdir -p mnt_detect
     erofsfuse "$IMAGES_DIR/system.img" mnt_detect
@@ -74,7 +73,7 @@ if [ -f "$IMAGES_DIR/system.img" ]; then
 fi
 echo "   -> Device: $DEVICE_CODE | Ver: $OS_VER"
 
-# 6. PATCH VBMETA (Disable Verify)
+# 6. PATCH VBMETA
 echo "🛡️  Patching VBMETA..."
 cat <<EOF > patch_vbmeta.py
 import sys
@@ -90,9 +89,8 @@ EOF
 [ -f "$IMAGES_DIR/vbmeta_system.img" ] && python3 patch_vbmeta.py "$IMAGES_DIR/vbmeta_system.img"
 rm patch_vbmeta.py
 
-# 7. MOD & COMPRESS (XZ)
-echo "🔄 Modding & Compressing..."
-# YOUR SPECIFIC LIST
+# 7. MOD & PREPARE FOR ZIP
+echo "🔄 Modding Partitions..."
 LOGICALS="system system_ext product mi_ext vendor odm system_dlkm vendor_dlkm"
 
 for part in $LOGICALS; do
@@ -100,12 +98,11 @@ for part in $LOGICALS; do
         echo "   -> Processing $part..."
         mkdir -p "${part}_dump" "mnt_point"
         
-        # Mount & Dump (Removes Padding)
         erofsfuse "$IMAGES_DIR/${part}.img" "mnt_point"
         cp -a "mnt_point/." "${part}_dump/"
         fusermount -uz "mnt_point"
         rmdir "mnt_point"
-        rm "$IMAGES_DIR/${part}.img" # Delete original
+        rm "$IMAGES_DIR/${part}.img"
         
         # INJECT MODS
         if [ -d "$GITHUB_WORKSPACE/mods/$part" ]; then
@@ -113,35 +110,49 @@ for part in $LOGICALS; do
             cp -r "$GITHUB_WORKSPACE/mods/$part/"* "${part}_dump/"
         fi
         
-        # REPACK (EROFS)
+        # REPACK to SUPER_DIR
         mkfs.erofs -zlz4 "$SUPER_DIR/${part}.img" "${part}_dump" > /dev/null
         rm -rf "${part}_dump"
-        
-        # COMPRESS (XZ -9)
-        # This replaces .img with .img.xz
-        echo "      🗜️ Compressing (XZ)..."
-        xz -9 -T 0 "$SUPER_DIR/${part}.img"
     fi
 done
 
-# 8. ORGANIZE
-echo "📦  Organizing..."
-# Move remaining firmware (boot, dtbo, etc) to root output
-find "$IMAGES_DIR" -maxdepth 1 -type f -name "*.img" -exec mv {} "$OUTPUT_DIR/" \;
+# 8. CREATE INNER ZIP (Super Pack)
+echo "⚡ Zipping Super Images (Multithreaded)..."
+cd "$SUPER_DIR"
 
-# 9. ZIP
+# Zip all .img files into super_pack.zip
+# -tzip = Create Zip format
+# -mx3 = Fast compression (Good balance of speed/size)
+# -mmt = Use all CPU cores (FAST)
+7z a -tzip -mx3 -mmt=$(nproc) "super_pack.zip" *.img > /dev/null
+
+if [ -f "super_pack.zip" ]; then
+    echo "   ✅ Inner Zip Created"
+    rm *.img # Delete raw images
+    mv "super_pack.zip" "$OUTPUT_DIR/"
+else
+    echo "   ❌ Inner Zip Failed"
+    exit 1
+fi
+
+# 9. CREATE FINAL ZIP
+echo "📦  Creating Final Bundle..."
 cd "$OUTPUT_DIR"
+
+# Move firmware here
+find "$IMAGES_DIR" -maxdepth 1 -type f -name "*.img" -exec mv {} . \;
+
 ZIP_NAME="ota_[NexDroid]_${DEVICE_CODE}_${OS_VER}.zip"
 
-# Zip Firmware + the 'super' folder (which now contains .img.xz files)
+# Zip Firmware + super_pack.zip
 zip -r -q "$ZIP_NAME" .
 
-# 10. UPLOAD (Robust)
+# 10. UPLOAD
 echo "☁️  Uploading..."
 FILE_SIZE=$(du -h "$ZIP_NAME" | cut -f1)
 echo "    Size: $FILE_SIZE"
 
-# Mirror 1
+# Mirror 1 (PixelDrain)
 if [ -z "$PIXELDRAIN_KEY" ]; then
     PD_R=$(curl -s -T "$ZIP_NAME" "https://pixeldrain.com/api/file/")
 else
@@ -153,8 +164,8 @@ if [ ! -z "$PD_ID" ] && [ "$PD_ID" != "null" ]; then
     LINK="https://pixeldrain.com/u/$PD_ID"
     SUCCESS=true
 else
-    # Mirror 2
-    echo "    ⚠️ Switching to backup mirror..."
+    # Mirror 2 (Transfer.sh)
+    echo "    ⚠️ Backup Mirror..."
     LINK=$(curl -s --upload-file "$ZIP_NAME" "https://transfer.sh/$(basename "$ZIP_NAME")")
     if [[ "$LINK" == *"transfer.sh"* ]]; then SUCCESS=true; else SUCCESS=false; fi
 fi
@@ -164,14 +175,12 @@ if [ ! -z "$TELEGRAM_TOKEN" ] && [ ! -z "$CHAT_ID" ]; then
     if [ "$SUCCESS" = true ]; then
         MSG="✅ *Build Complete!*
         
-📱 *Device:* \`${DEVICE_CODE}\`
-💿 *Version:* \`${OS_VER}\`
-📦 *Size:* ${FILE_SIZE}
-        
-ℹ️ _Images are XZ compressed in 'super' folder._
-⬇️ [Download Pack](${LINK})"
+📱 Device: \`${DEVICE_CODE}\`
+📦 Size: ${FILE_SIZE}
+ℹ️ _Structure: super_pack.zip (Inside) + Firmware_
+⬇️ [Download](${LINK})"
     else
-        MSG="❌ *Upload Failed!* File size: ${FILE_SIZE}"
+        MSG="❌ *Upload Failed!* Size: ${FILE_SIZE}"
     fi
     curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
         -d chat_id="$CHAT_ID" \
