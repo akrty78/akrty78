@@ -1,7 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - MODULAR EDITION
+#  NEXDROID GOONER - STRUCTURED EDITION
+#  (Organized Binaries + Firmware Folder + Script Gen)
 # =========================================================
 
 set +e 
@@ -21,6 +22,8 @@ export PATH="$BIN_DIR:$PATH"
 
 sudo apt-get update -y
 sudo apt-get install -y python3 python3-pip erofs-utils erofsfuse jq aria2 zip unzip liblz4-tool p7zip-full
+# Install gdown for Drive downloads
+pip3 install gdown --break-system-packages
 
 # 2. PAYLOAD DUMPER
 if [ ! -f "$BIN_DIR/payload-dumper-go" ]; then
@@ -31,7 +34,7 @@ if [ ! -f "$BIN_DIR/payload-dumper-go" ]; then
     rm pd.tar.gz
 fi
 
-# 3. DOWNLOAD
+# 3. DOWNLOAD ROM
 echo "⬇️  Downloading ROM..."
 cd "$TEMP_DIR"
 aria2c -x 16 -s 16 --file-allocation=none -o "rom.zip" "$ROM_URL"
@@ -104,12 +107,8 @@ for part in $LOGICALS; do
         rm "$IMAGES_DIR/${part}.img"
         
         # --- CALL PYTHON INJECTOR ---
-        # We pass the dump directory to the python script
-        # Check if python script exists in workspace
         if [ -f "$GITHUB_WORKSPACE/inject_gapps.py" ]; then
              python3 "$GITHUB_WORKSPACE/inject_gapps.py" "${part}_dump"
-        else
-             echo "⚠️  inject_gapps.py NOT FOUND! Skipping mods."
         fi
 
         # --- MANUAL MODS ---
@@ -124,24 +123,153 @@ for part in $LOGICALS; do
     fi
 done
 
-# 8. CREATE ZIPS
-echo "📦  Creating Zips..."
+# 8. CREATE ZIPS (STRUCTURED)
+echo "📦  Creating Organized Zips..."
+
+# --- ZIP 1: SUPER IMAGES ---
 cd "$SUPER_DIR"
 SUPER_ZIP="Super_Images_${DEVICE_CODE}_${OS_VER}.zip"
 7z a -tzip -mx3 -mmt=$(nproc) "$SUPER_ZIP" *.img > /dev/null
 mv "$SUPER_ZIP" "$OUTPUT_DIR/"
 rm *.img
 
+# --- ZIP 2: FIRMWARE + TOOLS ---
 cd "$OUTPUT_DIR"
-find "$IMAGES_DIR" -maxdepth 1 -type f -name "*.img" -exec mv {} . \;
-if [ -f "$GITHUB_WORKSPACE/gen_scripts.py" ]; then
-    python3 "$GITHUB_WORKSPACE/gen_scripts.py" "$DEVICE_CODE" "images"
+mkdir -p FirmwarePack/bin/windows
+mkdir -p FirmwarePack/bin/linux
+mkdir -p FirmwarePack/bin/macos
+mkdir -p FirmwarePack/images
+
+# A. Download Tools
+echo "   ⬇️  Fetching Platform Tools..."
+wget -q -O tools-win.zip https://dl.google.com/android/repository/platform-tools-latest-windows.zip
+wget -q -O tools-lin.zip https://dl.google.com/android/repository/platform-tools-latest-linux.zip
+wget -q -O tools-mac.zip https://dl.google.com/android/repository/platform-tools-latest-darwin.zip
+
+unzip -q tools-win.zip -d win_tmp && mv win_tmp/platform-tools/* FirmwarePack/bin/windows/ && rm -rf win_tmp tools-win.zip
+unzip -q tools-lin.zip -d lin_tmp && mv lin_tmp/platform-tools/* FirmwarePack/bin/linux/ && rm -rf lin_tmp tools-lin.zip
+unzip -q tools-mac.zip -d mac_tmp && mv mac_tmp/platform-tools/* FirmwarePack/bin/macos/ && rm -rf mac_tmp tools-mac.zip
+
+# B. Move Firmware Images
+echo "   📂 Moving Firmware..."
+find "$IMAGES_DIR" -maxdepth 1 -type f -name "*.img" -exec mv {} FirmwarePack/images/ \;
+
+# C. Generate Scripts (Matching Folder Structure)
+echo "   📝 Generating Flash Scripts..."
+cat <<EOF > FirmwarePack/flash_rom_windows.bat
+@echo off
+title NexDroid Flasher - %DEVICE_CODE%
+color 0b
+set "PATH=%~dp0bin\windows;%PATH%"
+
+echo ==============================================
+echo      NEXDROID FLASHER (%DEVICE_CODE%)
+echo ==============================================
+echo.
+echo 1. Connect phone in FASTBOOT mode (Vol Down + Power)
+echo 2. Make sure Super_Images zip is extracted here if you have it.
+echo.
+pause
+
+fastboot devices
+if errorlevel 1 (
+    echo [ERROR] Device not found! Check drivers.
+    pause
+    exit
+)
+
+echo.
+echo [1/3] Flashing Firmware...
+for %%f in (images\*.img) do (
+    echo     - Flashing %%~nf...
+    fastboot flash %%~nf "%%f"
+)
+
+echo.
+echo [2/3] Flashing Super Images...
+if exist super_pack.zip (
+    echo     - Found super_pack.zip, treating as raw images...
+    rem Add logic here if you repack super, but usually manual mode implies raw files
+)
+
+if exist system.img (
+    echo     - Flashing System... & fastboot flash system system.img
+    echo     - Flashing Product... & fastboot flash product product.img
+    echo     - Flashing Vendor... & fastboot flash vendor vendor.img
+    echo     - Flashing ODM... & fastboot flash odm odm.img
+    if exist system_ext.img fastboot flash system_ext system_ext.img
+    if exist mi_ext.img fastboot flash mi_ext mi_ext.img
+    if exist system_dlkm.img fastboot flash system_dlkm system_dlkm.img
+    if exist vendor_dlkm.img fastboot flash vendor_dlkm vendor_dlkm.img
+) else (
+    echo [INFO] Super images not found in root. 
+    echo Please extract 'Super_Images_...' zip contents to this folder.
+)
+
+echo.
+echo [3/3] Rebooting...
+fastboot reboot
+pause
+EOF
+
+cat <<EOF > FirmwarePack/flash_rom_linux_mac.sh
+#!/bin/bash
+# NexDroid Flasher for Linux/Mac
+
+UNAME=\$(uname)
+if [ "\$UNAME" == "Darwin" ]; then
+    export PATH="\$PWD/bin/macos:\$PATH"
+else
+    export PATH="\$PWD/bin/linux:\$PATH"
 fi
+
+chmod +x bin/macos/fastboot bin/linux/fastboot 2>/dev/null
+
+echo "=============================================="
+echo "     NEXDROID FLASHER ($DEVICE_CODE)"
+echo "=============================================="
+
+fastboot devices
+if [ \$? -ne 0 ]; then
+   echo "❌ Device not found!"
+   exit 1
+fi
+
+echo "🔥 Flashing Firmware..."
+for img in images/*.img; do
+    [ -f "\$img" ] || continue
+    part_name=\$(basename "\$img" .img)
+    echo "   -> \$part_name"
+    fastboot flash "\$part_name" "\$img"
+done
+
+echo "🔥 Flashing Super..."
+if [ -f "system.img" ]; then
+    fastboot flash system system.img
+    fastboot flash product product.img
+    fastboot flash vendor vendor.img
+    fastboot flash odm odm.img
+    [ -f "system_ext.img" ] && fastboot flash system_ext system_ext.img
+    [ -f "mi_ext.img" ] && fastboot flash mi_ext mi_ext.img
+else
+    echo "⚠️  Super images (system.img etc) not found in root!"
+    echo "   Did you extract the Super_Images zip?"
+fi
+
+echo "✅ Done. Rebooting..."
+fastboot reboot
+EOF
+
+chmod +x FirmwarePack/flash_rom_linux_mac.sh
+
+# D. Zip Firmware Pack
+cd FirmwarePack
 FIRMWARE_ZIP="Firmware_Flasher_${DEVICE_CODE}_${OS_VER}.zip"
-zip -q "$FIRMWARE_ZIP" *.img *.bat *.sh bin/
+zip -r -q "../$FIRMWARE_ZIP" .
 
 # 9. UPLOAD
 echo "☁️  Uploading..."
+cd "$OUTPUT_DIR"
 LINKS=""
 UPLOAD_COUNT=0
 
@@ -175,7 +303,7 @@ if [ ! -z "$TELEGRAM_TOKEN" ] && [ ! -z "$CHAT_ID" ]; then
         MSG="✅ *Build Complete!*
         
 📱 *Device:* \`${DEVICE_CODE}\`
-✨ *Mods:* Debloat + GApps + Props
+📁 *Structure:* Organized (Bin/Images)
         
 *Download Links:*
 ${LINKS}"
