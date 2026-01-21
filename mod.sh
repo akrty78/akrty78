@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - UNIVERSAL DOCKER EDITION
+#  NEXDROID GOONER - PATH FINDER EDITION
 # =========================================================
 
 ROM_URL="$1"
@@ -12,31 +12,44 @@ IMAGES_DIR="$OUTPUT_DIR/images"
 TOOLS_DIR="$OUTPUT_DIR/tools"
 TEMP_DIR="$GITHUB_WORKSPACE/temp"
 OTATOOLS_DIR="$GITHUB_WORKSPACE/otatools"
+FINAL_TOOLS_DIR="$GITHUB_WORKSPACE/flat_tools" # New Clean Dir
 
 # 1. SETUP
 echo "🛠️  Setting up Environment..."
-mkdir -p "$IMAGES_DIR" "$TOOLS_DIR" "$TEMP_DIR" "$OTATOOLS_DIR"
+mkdir -p "$IMAGES_DIR" "$TOOLS_DIR" "$TEMP_DIR" "$OTATOOLS_DIR" "$FINAL_TOOLS_DIR"
 chmod +x "$BIN_DIR"/*
 export PATH="$BIN_DIR:$PATH"
 
-# Install basics on HOST (for extraction)
+# Install basics
 sudo apt-get update -y
 sudo apt-get install -y python3 python3-pip erofs-utils erofsfuse jq aria2 zip unzip liblz4-tool
 
-# 2. PREPARE TOOLS (Download Full Package)
-echo "⬇️  Fetching Portable Toolchain..."
+# 2. PREPARE TOOLS (With flattening logic)
+echo "⬇️  Fetching & Flattening Toolchain..."
 
-# Always clean up old tools to avoid conflicts
-rm -rf "$OTATOOLS_DIR"
-mkdir -p "$OTATOOLS_DIR"
-
-# Download SebaUbuntu's verified OTATools (Includes lib64 folder)
+# Download SebaUbuntu's verified OTATools
 wget -q -O "otatools.zip" "https://github.com/SebaUbuntu/otatools-build/releases/download/v0.0.1/otatools.zip"
 unzip -q "otatools.zip" -d "$OTATOOLS_DIR"
 rm "otatools.zip"
 
-# Fix permissions
-chmod -R +x "$OTATOOLS_DIR"
+# FIND LPMAKE AND MOVE PARENT FOLDER
+# This finds 'lpmake' anywhere inside otatools/ and saves its directory path
+LPMAKE_PATH=$(find "$OTATOOLS_DIR" -name "lpmake" -type f | head -n 1)
+
+if [ -z "$LPMAKE_PATH" ]; then
+    echo "❌ CRITICAL: lpmake binary not found in downloaded zip!"
+    find "$OTATOOLS_DIR" -maxdepth 3 # Debug print
+    exit 1
+fi
+
+echo "    Found lpmake at: $LPMAKE_PATH"
+SOURCE_BIN_DIR=$(dirname "$LPMAKE_PATH")   # e.g., .../bin
+SOURCE_ROOT_DIR=$(dirname "$SOURCE_BIN_DIR") # e.g., .../otatools
+
+# Move contents to clean folder to avoid nested paths
+echo "    Moving tools to: $FINAL_TOOLS_DIR"
+cp -r "$SOURCE_ROOT_DIR/"* "$FINAL_TOOLS_DIR/"
+chmod -R 777 "$FINAL_TOOLS_DIR"
 
 # 3. DOWNLOAD PAYLOAD DUMPER
 if [ ! -f "$BIN_DIR/payload-dumper-go" ]; then
@@ -141,27 +154,25 @@ rm payload.bin
 
 if [ "$FOUND_PARTITIONS" = false ]; then echo "❌ CRITICAL: No partitions found!"; exit 1; fi
 
-# 8. BUILD SUPER IMAGE (VIA LEGACY DOCKER)
-echo "🔨  Building Super (Docker 18.04 + Portable Tools)..."
+# 8. BUILD SUPER IMAGE (Docker 18.04 + Flatted Path)
+echo "🔨  Building Super..."
 echo "    Max Size: $SUPER_SIZE"
 
-# 1. Use Ubuntu 18.04 (Maximum compatibility)
-# 2. Use the DOWNLOADED OTATOOLS (in /work/otatools)
-# 3. Explicitly link the downloaded lib64 folder
-# 4. Use verbose output
+# We map /work to GITHUB_WORKSPACE.
+# We expect tools in /work/flat_tools/bin/lpmake
 docker run --rm -v "$GITHUB_WORKSPACE":/work -w /work ubuntu:18.04 bash -c "
     echo '    -> Docker: Installing basics...' &&
     apt-get update -qq && apt-get install -y libssl1.0.0 libncurses5 > /dev/null 2>&1 || true &&
     
-    echo '    -> Docker: Linking libraries...' &&
-    export PATH=/work/otatools/bin:\$PATH &&
-    export LD_LIBRARY_PATH=/work/otatools/lib64:\$LD_LIBRARY_PATH &&
+    echo '    -> Docker: Setting up paths...' &&
+    export PATH=/work/flat_tools/bin:\$PATH &&
+    export LD_LIBRARY_PATH=/work/flat_tools/lib64:\$LD_LIBRARY_PATH &&
     
-    echo '    -> Docker: Checking lpmake...' &&
-    ldd /work/otatools/bin/lpmake && 
+    echo '    -> Docker: Verifying binary...' &&
+    ls -l /work/flat_tools/bin/lpmake && 
     
     echo '    -> Docker: Running Build...' &&
-    /work/otatools/bin/lpmake --metadata-size 65536 --super-name super --metadata-slots 2 \
+    /work/flat_tools/bin/lpmake --metadata-size 65536 --super-name super --metadata-slots 2 \
     --device super:$SUPER_SIZE --group main:$SUPER_SIZE \
     $LPM_ARGS --output /work/NexMod_Output/images/super.img
 "
