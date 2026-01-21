@@ -270,12 +270,17 @@ zip -r -q "../$FIRMWARE_ZIP" .
 # 9. UPLOAD
 echo "☁️  Uploading..."
 cd "$OUTPUT_DIR"
-LINKS=""
-UPLOAD_COUNT=0
 
+# Define variables to hold the final links
+SUPER_LINK=""
+FW_LINK=""
+
+# We process the files one by one to ensure we catch the right link
 for FILE in "$SUPER_ZIP" "$FIRMWARE_ZIP"; do
     if [ -f "$FILE" ]; then
         echo "   ⬆️ Uploading $FILE..."
+        
+        # 1. Try PixelDrain
         if [ -z "$PIXELDRAIN_KEY" ]; then
             RESPONSE=$(curl -s -T "$FILE" "https://pixeldrain.com/api/file/")
         else
@@ -283,35 +288,63 @@ for FILE in "$SUPER_ZIP" "$FIRMWARE_ZIP"; do
         fi
         
         FILE_ID=$(echo "$RESPONSE" | jq -r '.id')
+        FINAL_LINK=""
+
+        # 2. Verify PixelDrain
         if [ ! -z "$FILE_ID" ] && [ "$FILE_ID" != "null" ]; then
-            LINK="https://pixeldrain.com/u/$FILE_ID"
-            LINKS="${LINKS}\n📂 [${FILE}](${LINK})"
-            UPLOAD_COUNT=$((UPLOAD_COUNT+1))
+            FINAL_LINK="https://pixeldrain.com/u/$FILE_ID"
+            echo "      ✅ Success (PixelDrain): $FINAL_LINK"
         else
-            LINK=$(curl -s --upload-file "$FILE" "https://transfer.sh/$(basename "$FILE")")
-            if [[ "$LINK" == *"transfer.sh"* ]]; then
-                 LINKS="${LINKS}\n📂 [${FILE}](${LINK})"
-                 UPLOAD_COUNT=$((UPLOAD_COUNT+1))
+            # 3. Fallback to Transfer.sh
+            echo "      ⚠️ PixelDrain failed. Trying Transfer.sh..."
+            FINAL_LINK=$(curl -s --upload-file "$FILE" "https://transfer.sh/$(basename "$FILE")")
+            if [[ "$FINAL_LINK" == *"transfer.sh"* ]]; then
+                 echo "      ✅ Success (Transfer.sh): $FINAL_LINK"
+            else
+                 echo "      ❌ Upload Failed completely for $FILE"
             fi
+        fi
+
+        # 4. Assign to the correct variable based on filename
+        if [[ "$FILE" == *"Super_Images"* ]]; then
+            SUPER_LINK="$FINAL_LINK"
+        elif [[ "$FILE" == *"Firmware_Flasher"* ]]; then
+            FW_LINK="$FINAL_LINK"
         fi
     fi
 done
 
 # 10. NOTIFY
 if [ ! -z "$TELEGRAM_TOKEN" ] && [ ! -z "$CHAT_ID" ]; then
-    if [ "$UPLOAD_COUNT" -gt 0 ]; then
-        MSG="✅ *Build Complete!*
-        
+    # Construct the message based on which links exist
+    MSG="✅ *Build Complete!*
+    
 📱 *Device:* \`${DEVICE_CODE}\`
-📁 *Structure:* Organized (Bin/Images)
-        
-*Download Links:*
-${LINKS}"
-    else
-        MSG="❌ *Upload Failed!*"
+🤖 *Version:* \`${OS_VER}\`
+"
+
+    # Append Firmware Link
+    if [ ! -z "$FW_LINK" ]; then
+        MSG="${MSG}
+⬇️ [Download Firmware](${FW_LINK})"
     fi
+
+    # Append Super Link
+    if [ ! -z "$SUPER_LINK" ]; then
+        MSG="${MSG}
+⬇️ [Download Super Images](${SUPER_LINK})"
+    fi
+    
+    # If both failed
+    if [ -z "$FW_LINK" ] && [ -z "$SUPER_LINK" ]; then
+        MSG="❌ *Upload Failed!* Files were built but could not be uploaded."
+    fi
+
+    # Send
     curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
         -d chat_id="$CHAT_ID" \
         -d parse_mode="Markdown" \
         -d text="$MSG" > /dev/null
+        
+    echo "🔔 Notification sent."
 fi
