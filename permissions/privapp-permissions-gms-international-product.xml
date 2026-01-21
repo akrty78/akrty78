@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<permissions>
+    <privapp-permissions package="com.google.android.gms">
+        <permission name="android.permission.READ_NEARBY_STREAMING_POLICY"/>
+    </privapp-permissions>
+</permissions>
