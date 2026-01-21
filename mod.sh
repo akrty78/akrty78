@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - PATH FINDER EDITION
+#  NEXDROID GOONER - REDIRECT FIX EDITION
 # =========================================================
 
 ROM_URL="$1"
@@ -12,7 +12,7 @@ IMAGES_DIR="$OUTPUT_DIR/images"
 TOOLS_DIR="$OUTPUT_DIR/tools"
 TEMP_DIR="$GITHUB_WORKSPACE/temp"
 OTATOOLS_DIR="$GITHUB_WORKSPACE/otatools"
-FINAL_TOOLS_DIR="$GITHUB_WORKSPACE/flat_tools" # New Clean Dir
+FINAL_TOOLS_DIR="$GITHUB_WORKSPACE/flat_tools"
 
 # 1. SETUP
 echo "🛠️  Setting up Environment..."
@@ -24,37 +24,52 @@ export PATH="$BIN_DIR:$PATH"
 sudo apt-get update -y
 sudo apt-get install -y python3 python3-pip erofs-utils erofsfuse jq aria2 zip unzip liblz4-tool
 
-# 2. PREPARE TOOLS (With flattening logic)
-echo "⬇️  Fetching & Flattening Toolchain..."
+# 2. PREPARE TOOLS (Using CURL -L to fix redirect errors)
+echo "⬇️  Fetching Toolchain..."
 
-# Download SebaUbuntu's verified OTATools
-wget -q -O "otatools.zip" "https://github.com/SebaUbuntu/otatools-build/releases/download/v0.0.1/otatools.zip"
-unzip -q "otatools.zip" -d "$OTATOOLS_DIR"
-rm "otatools.zip"
+# Clean old attempts
+rm -rf "$OTATOOLS_DIR" "$FINAL_TOOLS_DIR"
+mkdir -p "$OTATOOLS_DIR" "$FINAL_TOOLS_DIR"
 
-# FIND LPMAKE AND MOVE PARENT FOLDER
-# This finds 'lpmake' anywhere inside otatools/ and saves its directory path
-LPMAKE_PATH=$(find "$OTATOOLS_DIR" -name "lpmake" -type f | head -n 1)
+# CHECK: Use User's Local lpmake if valid
+if [ -f "$BIN_DIR/lpmake" ]; then
+    echo "📦 Using LOCAL lpmake from bin/..."
+    cp "$BIN_DIR/lpmake" "$FINAL_TOOLS_DIR/lpmake"
+    # Copy libs if they exist
+    if [ -d "$BIN_DIR/lib64" ]; then cp -r "$BIN_DIR/lib64" "$FINAL_TOOLS_DIR/"; fi
+else
+    echo "☁️  Downloading OTATools (Curl Mode)..."
+    # We use curl -L to follow redirects (Fixes the unzip error)
+    curl -L -o "otatools.zip" "https://github.com/SebaUbuntu/otatools-build/releases/download/v0.0.1/otatools.zip"
+    
+    # Check if zip is valid
+    if ! unzip -tq otatools.zip; then
+        echo "❌ CRITICAL: Download failed (Invalid Zip). Switching to backup source..."
+        rm otatools.zip
+        curl -L -o "otatools.zip" "https://sourceforge.net/projects/xiaomi-eu-multilang-miui-roms/files/xiaomi.eu/MIUI-14/TOOLS/lpmake_linux.zip/download"
+    fi
 
-if [ -z "$LPMAKE_PATH" ]; then
-    echo "❌ CRITICAL: lpmake binary not found in downloaded zip!"
-    find "$OTATOOLS_DIR" -maxdepth 3 # Debug print
-    exit 1
+    unzip -q "otatools.zip" -d "$OTATOOLS_DIR"
+    rm "otatools.zip"
+
+    # FIND AND MOVE LPMAKE
+    LPMAKE_PATH=$(find "$OTATOOLS_DIR" -name "lpmake" -type f | head -n 1)
+    if [ -z "$LPMAKE_PATH" ]; then
+        echo "❌ CRITICAL: lpmake binary not found inside zip!"
+        exit 1
+    fi
+    
+    # Flatten structure
+    SOURCE_DIR=$(dirname "$LPMAKE_PATH")
+    cp -r "$SOURCE_DIR/"* "$FINAL_TOOLS_DIR/"
 fi
 
-echo "    Found lpmake at: $LPMAKE_PATH"
-SOURCE_BIN_DIR=$(dirname "$LPMAKE_PATH")   # e.g., .../bin
-SOURCE_ROOT_DIR=$(dirname "$SOURCE_BIN_DIR") # e.g., .../otatools
-
-# Move contents to clean folder to avoid nested paths
-echo "    Moving tools to: $FINAL_TOOLS_DIR"
-cp -r "$SOURCE_ROOT_DIR/"* "$FINAL_TOOLS_DIR/"
 chmod -R 777 "$FINAL_TOOLS_DIR"
 
 # 3. DOWNLOAD PAYLOAD DUMPER
 if [ ! -f "$BIN_DIR/payload-dumper-go" ]; then
-    wget -q https://github.com/ssut/payload-dumper-go/releases/download/1.2.2/payload-dumper-go_1.2.2_linux_amd64.tar.gz
-    tar -xzf payload-dumper-go_1.2.2_linux_amd64.tar.gz
+    curl -L -o pd.tar.gz https://github.com/ssut/payload-dumper-go/releases/download/1.2.2/payload-dumper-go_1.2.2_linux_amd64.tar.gz
+    tar -xzf pd.tar.gz
     find . -type f -name "payload-dumper-go" -not -path "*/bin/*" -exec mv {} "$BIN_DIR/" \;
     chmod +x "$BIN_DIR/payload-dumper-go"
 fi
@@ -154,25 +169,21 @@ rm payload.bin
 
 if [ "$FOUND_PARTITIONS" = false ]; then echo "❌ CRITICAL: No partitions found!"; exit 1; fi
 
-# 8. BUILD SUPER IMAGE (Docker 18.04 + Flatted Path)
+# 8. BUILD SUPER IMAGE (Docker 20.04)
 echo "🔨  Building Super..."
 echo "    Max Size: $SUPER_SIZE"
 
-# We map /work to GITHUB_WORKSPACE.
-# We expect tools in /work/flat_tools/bin/lpmake
-docker run --rm -v "$GITHUB_WORKSPACE":/work -w /work ubuntu:18.04 bash -c "
-    echo '    -> Docker: Installing basics...' &&
-    apt-get update -qq && apt-get install -y libssl1.0.0 libncurses5 > /dev/null 2>&1 || true &&
+# We use Ubuntu 20.04 which has libssl1.1 and libncurses5 available
+docker run --rm -v "$GITHUB_WORKSPACE":/work -w /work ubuntu:20.04 bash -c "
+    echo '    -> Docker: Installing libraries...' &&
+    apt-get update -qq && apt-get install -y libssl1.1 libncurses5 > /dev/null 2>&1 &&
     
     echo '    -> Docker: Setting up paths...' &&
-    export PATH=/work/flat_tools/bin:\$PATH &&
+    export PATH=/work/flat_tools:\$PATH &&
     export LD_LIBRARY_PATH=/work/flat_tools/lib64:\$LD_LIBRARY_PATH &&
     
-    echo '    -> Docker: Verifying binary...' &&
-    ls -l /work/flat_tools/bin/lpmake && 
-    
     echo '    -> Docker: Running Build...' &&
-    /work/flat_tools/bin/lpmake --metadata-size 65536 --super-name super --metadata-slots 2 \
+    /work/flat_tools/lpmake --metadata-size 65536 --super-name super --metadata-slots 2 \
     --device super:$SUPER_SIZE --group main:$SUPER_SIZE \
     $LPM_ARGS --output /work/NexMod_Output/images/super.img
 "
