@@ -1,10 +1,10 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - PORTABLE MODE (NO INSTALLS)
+#  NEXDROID GOONER - MANUAL PACK (PATCHED VBMETA)
 # =========================================================
 
-# Disable exit on error to handle things manually
+# Disable exit on error
 set +e 
 
 ROM_URL="$1"
@@ -12,93 +12,18 @@ GITHUB_WORKSPACE=$(pwd)
 BIN_DIR="$GITHUB_WORKSPACE/bin"
 OUTPUT_DIR="$GITHUB_WORKSPACE/NexMod_Output"
 IMAGES_DIR="$OUTPUT_DIR/images"
-TOOLS_DIR="$GITHUB_WORKSPACE/tools_portable"
+SUPER_DIR="$OUTPUT_DIR/super" # Folder for system/vendor images
 TEMP_DIR="$GITHUB_WORKSPACE/temp"
-OTATOOLS_DIR="$GITHUB_WORKSPACE/otatools"
 
-# 1. CLEANUP BAD STATE
-# If a previous run left a bad zip, delete it.
-if [ -f "otatools.zip" ]; then
-    FILE_SIZE=$(stat -c%s "otatools.zip")
-    if [ "$FILE_SIZE" -lt 1000000 ]; then
-        echo "🗑️  Deleting corrupt otatools.zip ($FILE_SIZE bytes)..."
-        rm "otatools.zip"
-    fi
-fi
-
-# 2. SETUP ENVIRONMENT
+# 1. SETUP ENVIRONMENT
 echo "🛠️  Setting up Environment..."
-mkdir -p "$IMAGES_DIR" "$TOOLS_DIR" "$TEMP_DIR" "$OTATOOLS_DIR" "$BIN_DIR"
+mkdir -p "$IMAGES_DIR" "$SUPER_DIR" "$TEMP_DIR" "$BIN_DIR"
 export PATH="$BIN_DIR:$PATH"
 
-# Install only safe tools
 sudo apt-get update -y
 sudo apt-get install -y python3 python3-pip erofs-utils erofsfuse jq aria2 zip unzip liblz4-tool
 
-# 3. PORTABLE LIBRARY SETUP (THE FIX)
-# We do NOT use dpkg -i. We extract the libs to a folder and point LD_LIBRARY_PATH there.
-echo "💉 Setting up Portable Libraries..."
-mkdir -p "$TOOLS_DIR/lib64"
-
-# Download the libs
-wget -q -O libssl.deb "http://security.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2.23_amd64.deb"
-wget -q -O libtinfo.deb "http://security.ubuntu.com/ubuntu/pool/universe/n/ncurses/libtinfo5_6.3-2ubuntu0.1_amd64.deb"
-wget -q -O libncurses.deb "http://security.ubuntu.com/ubuntu/pool/universe/n/ncurses/libncurses5_6.3-2ubuntu0.1_amd64.deb"
-
-# Extract them safely (dpkg -x extracts without installing)
-dpkg -x libssl.deb "$TOOLS_DIR"
-dpkg -x libtinfo.deb "$TOOLS_DIR"
-dpkg -x libncurses.deb "$TOOLS_DIR"
-
-# Move libs to our single lib64 folder
-# The structure inside .deb is usually usr/lib/x86_64-linux-gnu or lib/x86_64-linux-gnu
-cp -r "$TOOLS_DIR"/usr/lib/x86_64-linux-gnu/* "$TOOLS_DIR/lib64/" 2>/dev/null
-cp -r "$TOOLS_DIR"/lib/x86_64-linux-gnu/* "$TOOLS_DIR/lib64/" 2>/dev/null
-
-rm *.deb
-
-# 4. DOWNLOAD OTA TOOLS
-echo "⬇️  Fetching OTATools..."
-
-if [ ! -f "otatools.zip" ]; then
-    # Use a solid mirror
-    wget -q -O "otatools.zip" "https://sourceforge.net/projects/xiaomi-mt6768/files/tmp/otatools.zip/download"
-fi
-
-# Unzip
-unzip -q -o "otatools.zip" -d "$OTATOOLS_DIR"
-
-# FIND LPMAKE (Nuclear Search)
-echo "🔍 Locating lpmake..."
-FOUND_BIN=$(find "$OTATOOLS_DIR" -type f -name "lpmake" | head -n 1)
-
-if [ -z "$FOUND_BIN" ]; then
-    echo "❌ CRITICAL: lpmake binary not found! The zip is likely garbage."
-    ls -R "$OTATOOLS_DIR"
-    exit 1
-fi
-
-REAL_BIN_DIR=$(dirname "$FOUND_BIN")
-
-# 5. ACTIVATE PORTABLE MODE
-# We point the system to use our extracted libs instead of the missing system ones
-export PATH="$REAL_BIN_DIR:$PATH"
-export LD_LIBRARY_PATH="$TOOLS_DIR/lib64:$REAL_BIN_DIR/../lib64:$LD_LIBRARY_PATH"
-
-echo "   📍 Binary: $FOUND_BIN"
-echo "   📍 Lib Path: $LD_LIBRARY_PATH"
-
-# Verify
-lpmake --help > /dev/null 2>&1
-if [ $? -ne 0 ]; then
-    echo "❌ CRITICAL: lpmake failed to start."
-    # Use the portable linker to check what's missing
-    ldd "$FOUND_BIN"
-    exit 1
-fi
-echo "   ✅ lpmake is healthy (Portable Mode)."
-
-# 6. DOWNLOAD PAYLOAD DUMPER
+# 2. DOWNLOAD PAYLOAD DUMPER
 if [ ! -f "$BIN_DIR/payload-dumper-go" ]; then
     wget -q -O pd.tar.gz https://github.com/ssut/payload-dumper-go/releases/download/1.2.2/payload-dumper-go_1.2.2_linux_amd64.tar.gz
     tar -xzf pd.tar.gz
@@ -107,7 +32,7 @@ if [ ! -f "$BIN_DIR/payload-dumper-go" ]; then
     rm pd.tar.gz
 fi
 
-# 7. PROCESS ROM
+# 3. DOWNLOAD ROM
 echo "⬇️  Downloading ROM..."
 cd "$TEMP_DIR"
 aria2c -x 16 -s 16 --file-allocation=none -o "rom.zip" "$ROM_URL"
@@ -116,92 +41,123 @@ if [ ! -f "rom.zip" ]; then echo "❌ Download Failed"; exit 1; fi
 unzip -o "rom.zip" payload.bin
 rm "rom.zip"
 
+# 4. EXTRACT EVERYTHING
 echo "🔍 Extracting All Partitions..."
 payload-dumper-go -o "$IMAGES_DIR" payload.bin > /dev/null 2>&1
 
-# 8. DETECT DEVICE
-echo "🕵️  Detecting Device..."
-DEVICE_CODE=""
+# 5. DETECT INFO (Device, OS, Android Ver)
+echo "🕵️  Detecting Device Info..."
+DEVICE_CODE="unknown"
+OS_VER="1.0.0"
+ANDROID_VER="14"
+
+# We check mi_ext first, then system
 if [ -f "$IMAGES_DIR/mi_ext.img" ]; then
     mkdir -p mnt_detect
     erofsfuse "$IMAGES_DIR/mi_ext.img" mnt_detect
-    if [ -f "mnt_detect/etc/build.prop" ]; then
-        RAW=$(grep "ro.product.mod_device=" "mnt_detect/etc/build.prop" | head -1 | cut -d'=' -f2)
+    PROP="mnt_detect/etc/build.prop"
+    if [ -f "$PROP" ]; then
+        RAW=$(grep "ro.product.mod_device=" "$PROP" | head -1 | cut -d'=' -f2)
         DEVICE_CODE=$(echo "$RAW" | cut -d'_' -f1)
+    fi
+    fusermount -uz mnt_detect
+fi
+
+if [ -f "$IMAGES_DIR/system.img" ]; then
+    mkdir -p mnt_detect
+    erofsfuse "$IMAGES_DIR/system.img" mnt_detect
+    PROP="mnt_detect/system/build.prop"
+    # Fallback path
+    if [ ! -f "$PROP" ]; then PROP=$(find mnt_detect -name build.prop | head -1); fi
+    
+    if [ -f "$PROP" ]; then
+        # OS Version (e.g. OS1.0.5.0.UMCNXM)
+        RAW_OS=$(grep "ro.system.build.version.incremental=" "$PROP" | head -1 | cut -d'=' -f2)
+        if [ ! -z "$RAW_OS" ]; then OS_VER="$RAW_OS"; fi
+        
+        # Android Version (e.g. 14)
+        RAW_AND=$(grep "ro.system.build.version.release=" "$PROP" | head -1 | cut -d'=' -f2)
+        if [ ! -z "$RAW_AND" ]; then ANDROID_VER="$RAW_AND"; fi
     fi
     fusermount -uz mnt_detect
     rmdir mnt_detect
 fi
 
-if [ -z "$DEVICE_CODE" ]; then 
-    echo "⚠️  Detection Failed! Defaulting to 'marble'"
-    DEVICE_CODE="marble"
-fi
-echo "   -> Detected: $DEVICE_CODE"
+echo "   -> Device:  $DEVICE_CODE"
+echo "   -> Version: $OS_VER"
+echo "   -> Android: $ANDROID_VER"
 
-SUPER_SIZE=$(jq -r --arg dev "$DEVICE_CODE" '.[$dev].super_size' "$GITHUB_WORKSPACE/devices.json")
-if [ "$SUPER_SIZE" == "null" ] || [ -z "$SUPER_SIZE" ]; then 
-    SUPER_SIZE="9126805504"
-fi
+# 6. DISABLE VBMETA VERIFICATION (Python Script)
+echo "🛡️  Patching VBMETA to Disable Verification..."
+cat <<EOF > patch_vbmeta.py
+import sys
 
-# 9. REPACK & BUILD SUPER (VAB)
-echo "🔄 Repacking & Building VAB Super..."
-LPM_ARGS=""
+def patch_image(path):
+    try:
+        with open(path, 'r+b') as f:
+            f.seek(123)
+            # Flag 0 (0x00) -> Disable Verity (0x01) + Disable Verification (0x02) = 0x03
+            # We just overwrite with 2 (Disable Verification) or 3 (Both)
+            # Standard for Xiaomi modding is usually just disable verification bit.
+            f.write(b'\x03') 
+        print(f"Patched: {path}")
+    except FileNotFoundError:
+        pass
+
+if __name__ == "__main__":
+    patch_image(sys.argv[1])
+EOF
+
+if [ -f "$IMAGES_DIR/vbmeta.img" ]; then
+    python3 patch_vbmeta.py "$IMAGES_DIR/vbmeta.img"
+fi
+if [ -f "$IMAGES_DIR/vbmeta_system.img" ]; then
+    python3 patch_vbmeta.py "$IMAGES_DIR/vbmeta_system.img"
+fi
+rm patch_vbmeta.py
+
+# 7. MOD INJECTION & REPACK
+echo "🔄 Modding Logical Partitions..."
 LOGICALS="system system_dlkm vendor vendor_dlkm product odm mi_ext"
 
 for part in $LOGICALS; do
     if [ -f "$IMAGES_DIR/${part}.img" ]; then
+        echo "   -> Processing $part..."
         mkdir -p "${part}_dump" "mnt_point"
+        
         erofsfuse "$IMAGES_DIR/${part}.img" "mnt_point"
         cp -a "mnt_point/." "${part}_dump/"
         fusermount -uz "mnt_point"
         rmdir "mnt_point"
-        rm "$IMAGES_DIR/${part}.img"
+        rm "$IMAGES_DIR/${part}.img" # Delete original from firmware folder
         
         # INJECT MODS
         if [ -d "$GITHUB_WORKSPACE/mods/$part" ]; then
+            echo "      💉 Injecting mods..."
             cp -r "$GITHUB_WORKSPACE/mods/$part/"* "${part}_dump/"
         fi
         
-        mkfs.erofs -zlz4 "$IMAGES_DIR/${part}.img" "${part}_dump" > /dev/null
+        # REPACK (Output to 'super' folder for manual building)
+        mkfs.erofs -zlz4 "$SUPER_DIR/${part}.img" "${part}_dump" > /dev/null
         rm -rf "${part}_dump"
-        
-        IMG_SIZE=$(stat -c%s "$IMAGES_DIR/${part}.img")
-        LPM_ARGS="$LPM_ARGS --partition ${part}:readonly:${IMG_SIZE}:main --image ${part}=$IMAGES_DIR/${part}.img"
     fi
 done
 
-lpmake --metadata-size 65536 \
-       --super-name super \
-       --metadata-slots 3 \
-       --virtual-ab \
-       --device super:$SUPER_SIZE \
-       --group main:$SUPER_SIZE \
-       $LPM_ARGS \
-       --sparse \
-       --output "$IMAGES_DIR/super.img"
+# 8. ORGANIZE
+# Move firmware (boot, patched vbmeta, etc) to root of output
+find "$IMAGES_DIR" -maxdepth 1 -type f -name "*.img" -exec mv {} "$OUTPUT_DIR/" \;
 
-if [ -f "$IMAGES_DIR/super.img" ]; then
-    echo "✅  SUPER.IMG CREATED!"
-    for part in $LOGICALS; do rm -fv "$IMAGES_DIR/${part}.img"; done
-else
-    echo "❌  CRITICAL ERROR: lpmake failed."
-    exit 1
-fi
-
-# 10. PACK & UPLOAD
+# 9. ZIP IT
 echo "📦  Zipping..."
 cd "$OUTPUT_DIR"
-curl -L -o tools.zip https://dl.google.com/android/repository/platform-tools-latest-windows.zip
-unzip -q tools.zip && mkdir -p bin/windows && mv platform-tools/* bin/windows/ && rm -rf platform-tools tools.zip
 
-if [ -f "$GITHUB_WORKSPACE/gen_scripts.py" ]; then
-    python3 "$GITHUB_WORKSPACE/gen_scripts.py" "$DEVICE_CODE" "images"
-fi
+# ZIP NAME FORMAT: ota_[NexDroid]_{devicename}_{OSVERSION}_{android version}
+ZIP_NAME="ota_[NexDroid]_${DEVICE_CODE}_${OS_VER}_${ANDROID_VER}.zip"
 
-ZIP_NAME="NexDroid_${DEVICE_CODE}_VAB_Pack.zip"
+# Zip everything in Output Dir (Firmware + 'super' folder)
 zip -r -q "$ZIP_NAME" .
 
+# 10. UPLOAD
 echo "☁️  Uploading to PixelDrain..."
 if [ -z "$PIXELDRAIN_KEY" ]; then
     RESPONSE=$(curl -s -T "$ZIP_NAME" "https://pixeldrain.com/api/file/")
@@ -219,12 +175,17 @@ else
     UPLOAD_SUCCESS=true
 fi
 
+# 11. NOTIFY
 if [ ! -z "$TELEGRAM_TOKEN" ] && [ ! -z "$CHAT_ID" ]; then
     if [ "$UPLOAD_SUCCESS" = true ]; then
-        MSG="✅ *VAB Build Complete!*
+        MSG="✅ *Modding Complete!*
         
-📱 Device: \`${DEVICE_CODE}\`
-⬇️ [Download ROM](${DOWNLOAD_LINK})"
+📱 *Device:* \`${DEVICE_CODE}\`
+🤖 *Android:* \`${ANDROID_VER}\`
+💿 *Version:* \`${OS_VER}\`
+        
+ℹ️ _Contains patched vbmeta & raw super images._
+⬇️ [Download Pack](${DOWNLOAD_LINK})"
     else
         MSG="❌ *Upload Failed!* Check GitHub Logs."
     fi
