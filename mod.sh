@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - DOCKER V2 (VERBOSE & FIXED)
+#  NEXDROID GOONER - UNIVERSAL DOCKER EDITION
 # =========================================================
 
 ROM_URL="$1"
@@ -11,21 +11,34 @@ OUTPUT_DIR="$GITHUB_WORKSPACE/NexMod_Output"
 IMAGES_DIR="$OUTPUT_DIR/images"
 TOOLS_DIR="$OUTPUT_DIR/tools"
 TEMP_DIR="$GITHUB_WORKSPACE/temp"
+OTATOOLS_DIR="$GITHUB_WORKSPACE/otatools"
 
-# 1. SETUP ENVIRONMENT
+# 1. SETUP
 echo "🛠️  Setting up Environment..."
-mkdir -p "$IMAGES_DIR" "$TOOLS_DIR" "$TEMP_DIR"
+mkdir -p "$IMAGES_DIR" "$TOOLS_DIR" "$TEMP_DIR" "$OTATOOLS_DIR"
 chmod +x "$BIN_DIR"/*
 export PATH="$BIN_DIR:$PATH"
 
-# Install host tools
+# Install basics on HOST (for extraction)
 sudo apt-get update -y
 sudo apt-get install -y python3 python3-pip erofs-utils erofsfuse jq aria2 zip unzip liblz4-tool
 
-# 2. DOWNLOAD TOOLS
-echo "⬇️  Fetching Tools..."
+# 2. PREPARE TOOLS (Download Full Package)
+echo "⬇️  Fetching Portable Toolchain..."
 
-# Payload Dumper
+# Always clean up old tools to avoid conflicts
+rm -rf "$OTATOOLS_DIR"
+mkdir -p "$OTATOOLS_DIR"
+
+# Download SebaUbuntu's verified OTATools (Includes lib64 folder)
+wget -q -O "otatools.zip" "https://github.com/SebaUbuntu/otatools-build/releases/download/v0.0.1/otatools.zip"
+unzip -q "otatools.zip" -d "$OTATOOLS_DIR"
+rm "otatools.zip"
+
+# Fix permissions
+chmod -R +x "$OTATOOLS_DIR"
+
+# 3. DOWNLOAD PAYLOAD DUMPER
 if [ ! -f "$BIN_DIR/payload-dumper-go" ]; then
     wget -q https://github.com/ssut/payload-dumper-go/releases/download/1.2.2/payload-dumper-go_1.2.2_linux_amd64.tar.gz
     tar -xzf payload-dumper-go_1.2.2_linux_amd64.tar.gz
@@ -33,30 +46,22 @@ if [ ! -f "$BIN_DIR/payload-dumper-go" ]; then
     chmod +x "$BIN_DIR/payload-dumper-go"
 fi
 
-# lpmake (We download the Linux binary, just in case yours is the .exe)
-if [ ! -f "$BIN_DIR/lpmake" ]; then
-    wget -q -O "$BIN_DIR/lpmake" "https://github.com/elfamigos/android-tools-bin/raw/main/linux/lpmake"
-fi
-# Ensure it is executable on host
-chmod +x "$BIN_DIR/lpmake"
-
-# 3. DOWNLOAD ROM
+# 4. DOWNLOAD ROM
 echo "⬇️  Downloading ROM..."
 cd "$TEMP_DIR"
 aria2c -x 16 -s 16 --file-allocation=none -o "rom.zip" "$ROM_URL"
 unzip -o "rom.zip" payload.bin
 rm "rom.zip"
 
-# 4. EXTRACT FIRMWARE
+# 5. EXTRACT FIRMWARE
 echo "🔍 Extracting Firmware..."
 payload-dumper-go -p boot,dtbo,vendor_boot,recovery,init_boot,vbmeta,vbmeta_system,vbmeta_vendor -o "$IMAGES_DIR" payload.bin > /dev/null 2>&1
 
-# 5. DETECT DEVICE
+# 6. SMART DETECTION
 echo "🕵️  Detecting Device Identity..."
 payload-dumper-go -p mi_ext,system -o . payload.bin > /dev/null 2>&1
 
 DEVICE_CODE=""
-# Check mi_ext
 if [ -f "mi_ext.img" ]; then
     mkdir -p mnt_id
     erofsfuse mi_ext.img mnt_id
@@ -71,7 +76,6 @@ if [ -f "mi_ext.img" ]; then
     rm mi_ext.img
 fi
 
-# Check System
 if [ -f "system.img" ]; then
     mkdir -p mnt_id
     erofsfuse system.img mnt_id
@@ -94,7 +98,7 @@ echo "✅  Identity: $DEVICE_CODE | $OS_VER"
 SUPER_SIZE=$(jq -r --arg dev "$DEVICE_CODE" '.[$dev].super_size' "$GITHUB_WORKSPACE/devices.json")
 if [ "$SUPER_SIZE" == "null" ] || [ -z "$SUPER_SIZE" ]; then echo "❌  DEVICE UNKNOWN: '$DEVICE_CODE' - Add to devices.json"; exit 1; fi
 
-# 6. MODDING ENGINE
+# 7. MODDING ENGINE
 LPM_ARGS=""
 PARTITIONS="system system_dlkm vendor vendor_dlkm product odm mi_ext"
 FOUND_PARTITIONS=false
@@ -118,7 +122,6 @@ for part in $PARTITIONS; do
             cp -r "$GITHUB_WORKSPACE/mods/$part/"* "${part}_dump/"
         fi
         
-        # Standard compression
         mkfs.erofs -zlz4 "${part}_mod.img" "${part}_dump"
         if [ $? -ne 0 ]; then
             echo "❌ CRITICAL: Failed to compress $part!"
@@ -138,35 +141,39 @@ rm payload.bin
 
 if [ "$FOUND_PARTITIONS" = false ]; then echo "❌ CRITICAL: No partitions found!"; exit 1; fi
 
-# 7. BUILD SUPER IMAGE (VIA DOCKER V2)
-echo "🔨  Building Super (Docker V2)..."
+# 8. BUILD SUPER IMAGE (VIA LEGACY DOCKER)
+echo "🔨  Building Super (Docker 18.04 + Portable Tools)..."
 echo "    Max Size: $SUPER_SIZE"
 
-# We run Docker with explicit permissions fixes
-# If lpmake fails, we will see the error now because we removed the redirections
-docker run --rm -v "$GITHUB_WORKSPACE":/work -w /work ubuntu:20.04 bash -c "
-    echo '    -> Docker: Installing libs...'
-    apt-get update -qq && apt-get install -y -qq libssl1.1 libncurses5 > /dev/null
+# 1. Use Ubuntu 18.04 (Maximum compatibility)
+# 2. Use the DOWNLOADED OTATOOLS (in /work/otatools)
+# 3. Explicitly link the downloaded lib64 folder
+# 4. Use verbose output
+docker run --rm -v "$GITHUB_WORKSPACE":/work -w /work ubuntu:18.04 bash -c "
+    echo '    -> Docker: Installing basics...' &&
+    apt-get update -qq && apt-get install -y libssl1.0.0 libncurses5 > /dev/null 2>&1 || true &&
     
-    echo '    -> Docker: Fixing permissions...'
-    chmod +x /work/bin/lpmake
+    echo '    -> Docker: Linking libraries...' &&
+    export PATH=/work/otatools/bin:\$PATH &&
+    export LD_LIBRARY_PATH=/work/otatools/lib64:\$LD_LIBRARY_PATH &&
     
-    echo '    -> Docker: Running lpmake...'
-    /work/bin/lpmake --metadata-size 65536 --super-name super --metadata-slots 2 \
+    echo '    -> Docker: Checking lpmake...' &&
+    ldd /work/otatools/bin/lpmake && 
+    
+    echo '    -> Docker: Running Build...' &&
+    /work/otatools/bin/lpmake --metadata-size 65536 --super-name super --metadata-slots 2 \
     --device super:$SUPER_SIZE --group main:$SUPER_SIZE \
     $LPM_ARGS --output /work/NexMod_Output/images/super.img
 "
 
-# Check result
 if [ ! -f "$IMAGES_DIR/super.img" ]; then
-    echo "❌ CRITICAL: Docker build failed."
-    echo "   If you see 'Not enough space', your partitions are too big for the super partition."
+    echo "❌ CRITICAL: Docker build failed (See logs above)."
     exit 1
 fi
 
 echo "✅ Super Image Created Successfully!"
 
-# 8. FINALIZE & UPLOAD
+# 9. FINALIZE & UPLOAD
 cd "$OUTPUT_DIR"
 python3 "$GITHUB_WORKSPACE/gen_scripts.py" "$DEVICE_CODE" "images"
 
@@ -190,4 +197,3 @@ if [ "$FILE_ID" == "null" ] || [ -z "$FILE_ID" ]; then echo "❌ Upload Failed: 
 
 DOWNLOAD_LINK="https://pixeldrain.com/u/$FILE_ID"
 echo "✅ DONE! Link: $DOWNLOAD_LINK"
-
