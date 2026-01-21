@@ -4,7 +4,7 @@
 #  NEXDROID GOONER - FINAL PRODUCTION BUILD (SELF-HOSTED)
 # =========================================================
 
-# Disable immediate exit so we can log errors manually
+# We handle errors manually
 set +e 
 
 ROM_URL="$1"
@@ -32,7 +32,9 @@ echo "💉 Injecting Legacy Libraries for lpmake..."
 wget -q -O libssl.deb "http://security.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2.23_amd64.deb"
 wget -q -O libtinfo.deb "http://security.ubuntu.com/ubuntu/pool/universe/n/ncurses/libtinfo5_6.3-2ubuntu0.1_amd64.deb"
 wget -q -O libncurses.deb "http://security.ubuntu.com/ubuntu/pool/universe/n/ncurses/libncurses5_6.3-2ubuntu0.1_amd64.deb"
-sudo dpkg -i libssl.deb libtinfo.deb libncurses.deb
+
+# Try installing, force fix if broken
+sudo dpkg -i libssl.deb libtinfo.deb libncurses.deb || sudo apt-get install -f -y
 rm *.deb
 
 # ---------------------------------------------------------
@@ -40,40 +42,59 @@ rm *.deb
 # ---------------------------------------------------------
 echo "⬇️  Setting up OTATools..."
 
-# STRATEGY 1: Check for local file (Best Practice)
+# STRATEGY 1: Check for local file (Safe Copy)
 if [ -f "$GITHUB_WORKSPACE/otatools.zip" ]; then
     echo "   ✅ Found local otatools.zip in repo."
-    cp "$GITHUB_WORKSPACE/otatools.zip" .
+    # Only copy if we aren't already in the same dir
+    if [ ! -f "./otatools.zip" ]; then
+        cp "$GITHUB_WORKSPACE/otatools.zip" .
+    fi
 else
     # STRATEGY 2: Download with User-Agent (Fallback)
     echo "   ⚠️ Local file missing. Downloading from backup..."
     wget -U "Mozilla/5.0" -q -O "otatools.zip" "https://github.com/SebaUbuntu/otatools-build/releases/download/v0.0.1/otatools.zip"
 fi
 
-# VERIFY ZIP INTEGRITY
-if unzip -tq otatools.zip > /dev/null 2>&1; then
-    unzip -q "otatools.zip" -d "$OTATOOLS_DIR"
-    rm "otatools.zip"
-else
-    echo "❌ CRITICAL: otatools.zip is corrupt!"
-    echo "   (The download likely failed or was blocked. Upload otatools.zip to your repo manually.)"
-    # Debug: Print first few lines to see if it's an HTML error page
-    head -n 10 otatools.zip
+# EXTRACT
+unzip -q -o "otatools.zip" -d "$OTATOOLS_DIR"
+
+# --- SELF-HEALING: FIND THE BINARY ---
+# Sometimes zips are nested like otatools/bin/lpmake or just bin/lpmake
+# We find lpmake and ensure it's in the right place.
+echo "🔍 Locating lpmake..."
+FOUND_BIN=$(find "$OTATOOLS_DIR" -type f -name "lpmake" | head -n 1)
+
+if [ -z "$FOUND_BIN" ]; then
+    echo "❌ CRITICAL: lpmake binary not found after unzip!"
     exit 1
 fi
 
-# Link Tools & Libs
-export PATH="$OTATOOLS_DIR/bin:$PATH"
-export LD_LIBRARY_PATH="$OTATOOLS_DIR/lib64:$LD_LIBRARY_PATH"
+# Get the directory containing lpmake
+REAL_BIN_DIR=$(dirname "$FOUND_BIN")
+REAL_ROOT_DIR=$(dirname "$REAL_BIN_DIR")
+
+echo "   -> Found at: $FOUND_BIN"
+echo "   -> Setting root to: $REAL_ROOT_DIR"
+
+# Link Tools & Libs based on actual location
+export PATH="$REAL_BIN_DIR:$PATH"
+# Check if lib64 exists, otherwise try lib
+if [ -d "$REAL_ROOT_DIR/lib64" ]; then
+    export LD_LIBRARY_PATH="$REAL_ROOT_DIR/lib64:$LD_LIBRARY_PATH"
+else
+    export LD_LIBRARY_PATH="$REAL_ROOT_DIR/lib:$LD_LIBRARY_PATH"
+fi
 
 # Verify lpmake works natively
 echo "🧪 Testing lpmake..."
 lpmake --help > /dev/null 2>&1
 if [ $? -ne 0 ]; then
-    echo "❌ CRITICAL: lpmake binary is broken. Check library dependencies."
-    ldd "$OTATOOLS_DIR/bin/lpmake"
+    echo "❌ CRITICAL: lpmake binary found but failed to run."
+    echo "   Debug info:"
+    ldd "$FOUND_BIN"
     exit 1
 fi
+echo "   ✅ lpmake is healthy."
 
 # Download Payload Dumper
 if [ ! -f "$BIN_DIR/payload-dumper-go" ]; then
