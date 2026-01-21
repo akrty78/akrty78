@@ -1,7 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - SPEED ZIP EDITION
+#  NEXDROID GOONER - DUAL ZIP EDITION
+#  (Zip 1: Firmware | Zip 2: Super Images)
 # =========================================================
 
 set +e 
@@ -19,7 +20,6 @@ echo "🛠️  Setting up Environment..."
 mkdir -p "$IMAGES_DIR" "$SUPER_DIR" "$TEMP_DIR" "$BIN_DIR"
 export PATH="$BIN_DIR:$PATH"
 
-# Install 7zip for fast multithreaded zipping
 sudo apt-get update -y
 sudo apt-get install -y python3 python3-pip erofs-utils erofsfuse jq aria2 zip unzip liblz4-tool p7zip-full
 
@@ -89,7 +89,7 @@ EOF
 [ -f "$IMAGES_DIR/vbmeta_system.img" ] && python3 patch_vbmeta.py "$IMAGES_DIR/vbmeta_system.img"
 rm patch_vbmeta.py
 
-# 7. MOD & PREPARE FOR ZIP
+# 7. MOD & PREPARE SUPER
 echo "🔄 Modding Partitions..."
 LOGICALS="system system_ext product mi_ext vendor odm system_dlkm vendor_dlkm"
 
@@ -97,91 +97,98 @@ for part in $LOGICALS; do
     if [ -f "$IMAGES_DIR/${part}.img" ]; then
         echo "   -> Processing $part..."
         mkdir -p "${part}_dump" "mnt_point"
-        
         erofsfuse "$IMAGES_DIR/${part}.img" "mnt_point"
         cp -a "mnt_point/." "${part}_dump/"
         fusermount -uz "mnt_point"
         rmdir "mnt_point"
         rm "$IMAGES_DIR/${part}.img"
         
-        # INJECT MODS
         if [ -d "$GITHUB_WORKSPACE/mods/$part" ]; then
             echo "      💉 Injecting mods..."
             cp -r "$GITHUB_WORKSPACE/mods/$part/"* "${part}_dump/"
         fi
         
-        # REPACK to SUPER_DIR
         mkfs.erofs -zlz4 "$SUPER_DIR/${part}.img" "${part}_dump" > /dev/null
         rm -rf "${part}_dump"
     fi
 done
 
-# 8. CREATE INNER ZIP (Super Pack)
-echo "⚡ Zipping Super Images (Multithreaded)..."
+# 8. CREATE ZIP 1: SUPER IMAGES
+echo "📦  Creating Zip 1: Super Images..."
 cd "$SUPER_DIR"
+SUPER_ZIP="Super_Images_${DEVICE_CODE}_${OS_VER}.zip"
 
-# Zip all .img files into super_pack.zip
-# -tzip = Create Zip format
-# -mx3 = Fast compression (Good balance of speed/size)
-# -mmt = Use all CPU cores (FAST)
-7z a -tzip -mx3 -mmt=$(nproc) "super_pack.zip" *.img > /dev/null
+# Zip all images inside 'super' folder
+7z a -tzip -mx3 -mmt=$(nproc) "$SUPER_ZIP" *.img > /dev/null
+mv "$SUPER_ZIP" "$OUTPUT_DIR/"
+rm *.img # Clean up to save space
 
-if [ -f "super_pack.zip" ]; then
-    echo "   ✅ Inner Zip Created"
-    rm *.img # Delete raw images
-    mv "super_pack.zip" "$OUTPUT_DIR/"
-else
-    echo "   ❌ Inner Zip Failed"
-    exit 1
-fi
-
-# 9. CREATE FINAL ZIP
-echo "📦  Creating Final Bundle..."
+# 9. CREATE ZIP 2: FIRMWARE
+echo "📦  Creating Zip 2: Firmware & Scripts..."
 cd "$OUTPUT_DIR"
-
-# Move firmware here
+# Move firmware from images folder to here
 find "$IMAGES_DIR" -maxdepth 1 -type f -name "*.img" -exec mv {} . \;
 
-ZIP_NAME="ota_[NexDroid]_${DEVICE_CODE}_${OS_VER}.zip"
-
-# Zip Firmware + super_pack.zip
-zip -r -q "$ZIP_NAME" .
-
-# 10. UPLOAD
-echo "☁️  Uploading..."
-FILE_SIZE=$(du -h "$ZIP_NAME" | cut -f1)
-echo "    Size: $FILE_SIZE"
-
-# Mirror 1 (PixelDrain)
-if [ -z "$PIXELDRAIN_KEY" ]; then
-    PD_R=$(curl -s -T "$ZIP_NAME" "https://pixeldrain.com/api/file/")
-else
-    PD_R=$(curl -s -T "$ZIP_NAME" -u :$PIXELDRAIN_KEY "https://pixeldrain.com/api/file/")
+# Generate Scripts if available
+if [ -f "$GITHUB_WORKSPACE/gen_scripts.py" ]; then
+    python3 "$GITHUB_WORKSPACE/gen_scripts.py" "$DEVICE_CODE" "images"
 fi
-PD_ID=$(echo "$PD_R" | jq -r '.id')
 
-if [ ! -z "$PD_ID" ] && [ "$PD_ID" != "null" ]; then
-    LINK="https://pixeldrain.com/u/$PD_ID"
-    SUCCESS=true
-else
-    # Mirror 2 (Transfer.sh)
-    echo "    ⚠️ Backup Mirror..."
-    LINK=$(curl -s --upload-file "$ZIP_NAME" "https://transfer.sh/$(basename "$ZIP_NAME")")
-    if [[ "$LINK" == *"transfer.sh"* ]]; then SUCCESS=true; else SUCCESS=false; fi
-fi
+FIRMWARE_ZIP="Firmware_Flasher_${DEVICE_CODE}_${OS_VER}.zip"
+# Zip everything EXCEPT the Super Zip
+zip -q "$FIRMWARE_ZIP" *.img *.bat *.sh bin/
+
+# 10. UPLOAD LOOP
+echo "☁️  Uploading Zips..."
+LINKS=""
+UPLOAD_COUNT=0
+
+# We upload both zips
+for FILE in "$SUPER_ZIP" "$FIRMWARE_ZIP"; do
+    if [ -f "$FILE" ]; then
+        echo "   ⬆️ Uploading $FILE..."
+        
+        # Try PixelDrain
+        if [ -z "$PIXELDRAIN_KEY" ]; then
+            RESPONSE=$(curl -s -T "$FILE" "https://pixeldrain.com/api/file/")
+        else
+            RESPONSE=$(curl -s -T "$FILE" -u :$PIXELDRAIN_KEY "https://pixeldrain.com/api/file/")
+        fi
+        
+        FILE_ID=$(echo "$RESPONSE" | jq -r '.id')
+        
+        if [ ! -z "$FILE_ID" ] && [ "$FILE_ID" != "null" ]; then
+            LINK="https://pixeldrain.com/u/$FILE_ID"
+            echo "      ✅ Success: $LINK"
+            LINKS="${LINKS}\n📂 [${FILE}](${LINK})"
+            UPLOAD_COUNT=$((UPLOAD_COUNT+1))
+        else
+            # Backup Mirror for big file failure
+            echo "      ⚠️ PixelDrain failed. Trying Backup..."
+            LINK=$(curl -s --upload-file "$FILE" "https://transfer.sh/$(basename "$FILE")")
+            if [[ "$LINK" == *"transfer.sh"* ]]; then
+                 echo "      ✅ Success (Backup): $LINK"
+                 LINKS="${LINKS}\n📂 [${FILE}](${LINK})"
+                 UPLOAD_COUNT=$((UPLOAD_COUNT+1))
+            fi
+        fi
+    fi
+done
 
 # 11. NOTIFY
 if [ ! -z "$TELEGRAM_TOKEN" ] && [ ! -z "$CHAT_ID" ]; then
-    if [ "$SUCCESS" = true ]; then
+    if [ "$UPLOAD_COUNT" -gt 0 ]; then
         MSG="✅ *Build Complete!*
         
-📱 Device: \`${DEVICE_CODE}\`
-📦 Size: ${FILE_SIZE}
-ℹ️ _Structure: super_pack.zip (Inside) + Firmware_
-⬇️ [Download](${LINK})"
+📱 *Device:* \`${DEVICE_CODE}\`
+💿 *Version:* \`${OS_VER}\`
+        
+*Download Links:*
+${LINKS}"
     else
-        MSG="❌ *Upload Failed!* Size: ${FILE_SIZE}"
+        MSG="❌ *Upload Failed!* Zips created but upload rejected."
     fi
+    
     curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
         -d chat_id="$CHAT_ID" \
         -d parse_mode="Markdown" \
