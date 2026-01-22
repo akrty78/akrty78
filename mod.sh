@@ -2,7 +2,7 @@
 
 # =========================================================
 #  NEXDROID GOONER - FINAL INTEGRATED EDITION
-#  (Single Script: Downloads, Mods, Patches, Builds)
+#  (Fixed: Absolute Paths for Signing Keys)
 # =========================================================
 
 set +e 
@@ -19,20 +19,13 @@ SUPER_DIR="$OUTPUT_DIR/super"
 TEMP_DIR="$GITHUB_WORKSPACE/temp"
 
 # --- CONFIGURATION ---
-# 1. GApps (Google Drive Link)
 GAPPS_LINK="https://drive.google.com/file/d/1soDPsc9dhdXbuHLSx4t2L3u7x0fOlx_8/view?usp=drive_link"
-
-# 2. NexPackage (Your Assets)
 NEX_PACKAGE_LINK="https://drive.google.com/file/d/YOUR_NEX_PACKAGE_LINK/view?usp=sharing"
-
-# 3. Launcher Repo
 LAUNCHER_REPO="Mods-Center/HyperOS-Launcher"
 
-# 4. GApps List
 PRODUCT_APP="GoogleTTS SoundPickerGoogle LatinImeGoogle MiuiBiometric GeminiShell Wizard"
 PRODUCT_PRIV="AndroidAutoStub GoogleRestore GooglePartnerSetup Assistant HotwordEnrollmentYGoogleRISCV_WIDEBAND Velvet Phonesky MIUIPackageInstaller"
 
-# 5. Props
 PROPS_CONTENT='
 ro.miui.support_super_clipboard=1
 persist.sys.support_super_clipboard=1
@@ -77,7 +70,8 @@ sudo apt-get update -y
 sudo apt-get install -y python3 python3-pip erofs-utils erofsfuse jq aria2 zip unzip liblz4-tool p7zip-full apktool apksigner openjdk-17-jdk
 pip3 install gdown --break-system-packages
 
-# Generate Signing Keys (Standard Android Format)
+# Generate Signing Keys (In Workspace Root)
+cd "$GITHUB_WORKSPACE"
 if [ ! -f "testkey.pk8" ]; then
     echo "🔑 Generating Signing Keys..."
     openssl genrsa -out key.pem 2048
@@ -91,7 +85,7 @@ fi
 #  2. DOWNLOAD RESOURCES
 # =========================================================
 
-# A. Payload Dumper
+# Payload Dumper
 if [ ! -f "$BIN_DIR/payload-dumper-go" ]; then
     wget -q -O pd.tar.gz https://github.com/ssut/payload-dumper-go/releases/download/1.2.2/payload-dumper-go_1.2.2_linux_amd64.tar.gz
     tar -xzf pd.tar.gz
@@ -100,21 +94,21 @@ if [ ! -f "$BIN_DIR/payload-dumper-go" ]; then
     rm pd.tar.gz
 fi
 
-# B. GApps Bundle
+# GApps Bundle
 if [ ! -d "gapps_src" ]; then
     echo "⬇️  Downloading GApps..."
     gdown "$GAPPS_LINK" -O gapps.zip --fuzzy
     unzip -q gapps.zip -d gapps_src && rm gapps.zip
 fi
 
-# C. NexPackage
+# NexPackage
 if [[ "$NEX_PACKAGE_LINK" == *"drive.google.com"* ]]; then
     echo "⬇️  Downloading NexPackage..."
     gdown "$NEX_PACKAGE_LINK" -O nex.zip --fuzzy
     unzip -q nex.zip -d nex_pkg && rm nex.zip
 fi
 
-# D. HyperOS Launcher
+# HyperOS Launcher
 echo "⬇️  Fetching Launcher..."
 LAUNCHER_URL=$(curl -s "https://api.github.com/repos/$LAUNCHER_REPO/releases/latest" | jq -r '.assets[] | select(.name | endswith(".zip")) | .browser_download_url' | head -n 1)
 if [ ! -z "$LAUNCHER_URL" ] && [ "$LAUNCHER_URL" != "null" ]; then
@@ -138,7 +132,7 @@ echo "🔍 Extracting Firmware..."
 payload-dumper-go -o "$IMAGES_DIR" payload.bin > /dev/null 2>&1
 
 # Detect Device
-DEVICE_CODE="unknown"; OS_VER="1.0.0"
+DEVICE_CODE="unknown"
 if [ -f "$IMAGES_DIR/mi_ext.img" ]; then
     mkdir -p mnt; erofsfuse "$IMAGES_DIR/mi_ext.img" mnt
     RAW=$(grep "ro.product.mod_device=" "mnt/etc/build.prop" 2>/dev/null | head -1 | cut -d'=' -f2)
@@ -171,7 +165,7 @@ for part in $LOGICALS; do
         # ----------------------------------------
         # A. GAPPS INJECTION (Product Only)
         # ----------------------------------------
-        if [ "$part" == "product" ] && [ -d "gapps_src" ]; then
+        if [ "$part" == "product" ] && [ -d "$GITHUB_WORKSPACE/gapps_src" ]; then
             echo "      🔵 Injecting GApps..."
             
             APP_DIR=$(find "$DUMP_DIR" -type d -name "app" -print -quit)
@@ -181,7 +175,7 @@ for part in $LOGICALS; do
                 local list=$1; local dest=$2
                 [ -z "$dest" ] && return
                 for app in $list; do
-                    src=$(find "gapps_src" -name "${app}.apk" -print -quit)
+                    src=$(find "$GITHUB_WORKSPACE/gapps_src" -name "${app}.apk" -print -quit)
                     if [ -f "$src" ]; then
                         mkdir -p "$dest/$app"
                         cp "$src" "$dest/$app/"
@@ -197,7 +191,7 @@ for part in $LOGICALS; do
             # Permissions
             ETC_DIR=$(find "$DUMP_DIR" -type d -name "etc" -print -quit)
             if [ ! -z "$ETC_DIR" ]; then
-                find "gapps_src" -name "*.xml" | while read xml; do
+                find "$GITHUB_WORKSPACE/gapps_src" -name "*.xml" | while read xml; do
                     [ -d "$ETC_DIR/permissions" ] && cp "$xml" "$ETC_DIR/permissions/" 2>/dev/null
                     [ -d "$ETC_DIR/sysconfig" ] && cp "$xml" "$ETC_DIR/sysconfig/" 2>/dev/null
                 done
@@ -212,28 +206,30 @@ for part in $LOGICALS; do
         if [ ! -z "$PROV_APK" ]; then
             echo "      🔧 Patching Provision.apk..."
             
-            # 1. Decompile (No Resources)
+            # 1. Decompile
             apktool d -r -f "$PROV_APK" -o "prov_temp" > /dev/null 2>&1
             
-            # 2. Patch Code
+            # 2. Patch Code (SED)
             PATCHED_COUNT=0
-            grep -r "IS_INTERNATIONAL_BUILD" "prov_temp" | cut -d: -f1 | while read smali_file; do
-                echo "         > Found check in: $smali_file"
-                sed -i -E 's/sget-boolean ([vp][0-9]+), Lmiui\/os\/Build;->IS_INTERNATIONAL_BUILD:Z/const\/4 \1, 0x1/g' "$smali_file"
-                PATCHED_COUNT=$((PATCHED_COUNT + 1))
-            done
+            if [ -d "prov_temp" ]; then
+                grep -r "IS_INTERNATIONAL_BUILD" "prov_temp" | cut -d: -f1 | while read smali_file; do
+                    sed -i -E 's/sget-boolean ([vp][0-9]+), Lmiui\/os\/Build;->IS_INTERNATIONAL_BUILD:Z/const\/4 \1, 0x1/g' "$smali_file"
+                    PATCHED_COUNT=$((PATCHED_COUNT + 1))
+                done
+            fi
             
             # 3. Recompile
             apktool b "prov_temp" -o "$PROV_APK" > /dev/null 2>&1
             
-            # 4. Sign (FIXED: Uses testkey.pk8)
-            apksigner sign --key "testkey.pk8" --cert "testkey.x509.pem" "$PROV_APK"
+            # 4. Sign (FIXED: Using ABSOLUTE PATH to keys)
+            echo "      ✍️  Signing..."
+            apksigner sign --key "$GITHUB_WORKSPACE/testkey.pk8" --cert "$GITHUB_WORKSPACE/testkey.x509.pem" "$PROV_APK"
             
-            # Verify Signature
+            # Verify
             if apksigner verify "$PROV_APK" | grep -q "Verified"; then
                  echo "         ✅ Patch Applied & Signed."
             else
-                 echo "         ⚠️  WARNING: Signature Verification Failed!"
+                 echo "         ❌ FATAL: Signature Verification Failed!"
             fi
             
             rm -rf "prov_temp"
@@ -251,13 +247,13 @@ for part in $LOGICALS; do
             fi
         fi
 
-        if [ -d "nex_pkg" ]; then
+        if [ -d "$GITHUB_WORKSPACE/nex_pkg" ]; then
             MEDIA_DIR=$(find "$DUMP_DIR" -type d -name "media" -print -quit)
             if [ ! -z "$MEDIA_DIR" ]; then
-                [ -f "nex_pkg/bootanimation.zip" ] && cp "nex_pkg/bootanimation.zip" "$MEDIA_DIR/"
-                if [ -d "nex_pkg/walls" ]; then
+                [ -f "$GITHUB_WORKSPACE/nex_pkg/bootanimation.zip" ] && cp "$GITHUB_WORKSPACE/nex_pkg/bootanimation.zip" "$MEDIA_DIR/"
+                if [ -d "$GITHUB_WORKSPACE/nex_pkg/walls" ]; then
                     mkdir -p "$MEDIA_DIR/wallpaper/wallpaper_group"
-                    cp -r nex_pkg/walls/* "$MEDIA_DIR/wallpaper/wallpaper_group/" 2>/dev/null
+                    cp -r "$GITHUB_WORKSPACE/nex_pkg/walls/"* "$MEDIA_DIR/wallpaper/wallpaper_group/" 2>/dev/null
                 fi
             fi
         fi
@@ -319,7 +315,6 @@ upload() {
 LINK_FW=$(upload "Firmware_Flasher.zip")
 LINK_SUPER=$(upload "$SUPER_ZIP")
 
-# Notify Telegram
 if [ ! -z "$TELEGRAM_TOKEN" ]; then
     MSG="✅ *Build Done!*
 📱 *Device:* $DEVICE_CODE
