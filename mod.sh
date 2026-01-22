@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - ALL-IN-ONE EDITION
-#  (Integrates Debloater + Smali Patcher + GApps + Permissions + Build)
+#  NEXDROID GOONER - ROOT POWER EDITION
+#  (Uses Sudo for FS operations to ensure files stick)
 # =========================================================
 
 set +e 
@@ -23,7 +23,7 @@ IMAGES_DIR="$OUTPUT_DIR/images"
 SUPER_DIR="$OUTPUT_DIR/super"
 TEMP_DIR="$GITHUB_WORKSPACE/temp"
 
-# --- BLOATWARE LIST (Folders to Delete) ---
+# --- BLOATWARE LIST ---
 BLOAT_LIST="
 MSA Miuidaemon MiuiDaemon HybridAccessory Joyose SoterService AnalyticsCore 
 Facebook Netflix MiCoin MiPay MiCredit Updater MiBrowser
@@ -151,15 +151,29 @@ for part in $LOGICALS; do
     if [ -f "$IMAGES_DIR/${part}.img" ]; then
         echo "   -> Modding $part..."
         mkdir -p "${part}_dump" "mnt"
+        
+        # USE SUDO FOR MOUNT/COPY (Fixes Permission Issues)
+        # 1. Mount
         erofsfuse "$IMAGES_DIR/${part}.img" "mnt"
-        cp -a "mnt/." "${part}_dump/"
+        
+        # 2. Check if mount worked
+        if [ -z "$(ls -A mnt)" ]; then
+            echo "      ❌ ERROR: Mount failed or empty image!"
+            fusermount -uz "mnt"
+            continue
+        fi
+
+        # 3. Copy with Permissions (sudo cp -a)
+        sudo cp -a "mnt/." "${part}_dump/"
+        sudo chown -R $(whoami) "${part}_dump" # Reclaim ownership for editing
+        
         fusermount -uz "mnt"
         rm "$IMAGES_DIR/${part}.img"
         
         DUMP_DIR="${part}_dump"
 
         # -----------------------------
-        # A. DEBLOATER (INTEGRATED)
+        # A. DEBLOATER
         # -----------------------------
         echo "      🗑️  Debloating..."
         for app in $BLOAT_LIST; do
@@ -171,49 +185,50 @@ for part in $LOGICALS; do
         done
 
         # -----------------------------
-        # B. GAPPS & PERMISSIONS (Product Only)
+        # B. GAPPS INJECTION & PERMISSIONS
         # -----------------------------
         if [ "$part" == "product" ] && [ -d "$GITHUB_WORKSPACE/gapps_src" ]; then
-            echo "      🔵 Injecting GApps & Permissions..."
+            echo "      🔵 Injecting GApps..."
             
-            # 1. Inject APKs
             APP_DIR=$(find "$DUMP_DIR" -type d -name "app" -print -quit)
             PRIV_DIR=$(find "$DUMP_DIR" -type d -name "priv-app" -print -quit)
             
-            inject_app() {
-                local list=$1; local dest=$2
-                [ -z "$dest" ] && return
-                for app in $list; do
-                    src=$(find "$GITHUB_WORKSPACE/gapps_src" -name "${app}.apk" -print -quit)
-                    if [ -f "$src" ]; then
-                        mkdir -p "$dest/$app"; cp "$src" "$dest/$app/"
-                        chmod 644 "$dest/$app/${app}.apk"; echo "         + $app"
-                    fi
-                done
-            }
-            inject_app "$PRODUCT_APP" "$APP_DIR"
-            inject_app "$PRODUCT_PRIV" "$PRIV_DIR"
-            
-            # 2. Inject Permissions
+            if [ -z "$APP_DIR" ] || [ -z "$PRIV_DIR" ]; then
+                echo "      ⚠️  WARNING: Could not find app/priv-app folders in Product!"
+            else
+                inject_app() {
+                    local list=$1; local dest=$2
+                    [ -z "$dest" ] && return
+                    for app in $list; do
+                        src=$(find "$GITHUB_WORKSPACE/gapps_src" -name "${app}.apk" -print -quit)
+                        if [ -f "$src" ]; then
+                            mkdir -p "$dest/$app"
+                            cp "$src" "$dest/$app/"
+                            # VERIFICATION
+                            if [ -f "$dest/$app/${app}.apk" ]; then
+                                echo "         + $app (Verified)"
+                            else
+                                echo "         ❌ FAILED TO COPY: $app"
+                            fi
+                        fi
+                    done
+                }
+                inject_app "$PRODUCT_APP" "$APP_DIR"
+                inject_app "$PRODUCT_PRIV" "$PRIV_DIR"
+            fi
+
+            # Permissions
             ETC_DIR=$(find "$DUMP_DIR" -type d -name "etc" -print -quit)
             if [ ! -z "$ETC_DIR" ]; then
-                
-                # A. Standard XMLs from Repo -> etc/permissions
                 if [ -d "$GITHUB_WORKSPACE/permissions" ]; then
-                    echo "         📂 Copying Standard Permissions..."
                     find "$GITHUB_WORKSPACE/permissions" -maxdepth 1 -name "*.xml" -exec cp {} "$ETC_DIR/permissions/" \; 2>/dev/null
                 fi
-
-                # B. Special Default Permissions -> etc/default-permissions
                 DEF_PERM_SRC="$GITHUB_WORKSPACE/permissions/default-permissions/default-permissions-google.xml"
                 if [ -f "$DEF_PERM_SRC" ]; then
-                    echo "         📂 Injecting default-permissions-google.xml..."
                     mkdir -p "$ETC_DIR/default-permissions"
                     cp "$DEF_PERM_SRC" "$ETC_DIR/default-permissions/"
-                    chmod 644 "$ETC_DIR/default-permissions/default-permissions-google.xml"
+                    echo "         + Permissions Injected."
                 fi
-                
-                # C. GApps Zip Fallback
                 find "$GITHUB_WORKSPACE/gapps_src" -name "*.xml" | while read xml; do
                     [ -d "$ETC_DIR/sysconfig" ] && cp "$xml" "$ETC_DIR/sysconfig/" 2>/dev/null
                 done
@@ -221,7 +236,7 @@ for part in $LOGICALS; do
         fi
 
         # -----------------------------
-        # C. SMALI PATCHER (INTEGRATED)
+        # C. SMALI PATCHER
         # -----------------------------
         PROV_APK=$(find "$DUMP_DIR" -name "Provision.apk" -type f -print -quit)
         if [ ! -z "$PROV_APK" ]; then
@@ -257,12 +272,26 @@ for part in $LOGICALS; do
         fi
         
         # -----------------------------
-        # E. PROPS & REPACK
+        # E. REPACK (WITH SUDO)
         # -----------------------------
         find "$DUMP_DIR" -name "build.prop" | while read prop; do echo "$PROPS_CONTENT" >> "$prop"; done
         
-        mkfs.erofs -zlz4 "$SUPER_DIR/${part}.img" "$DUMP_DIR" > /dev/null
-        rm -rf "$DUMP_DIR"
+        # VERIFY BEFORE REPACKING
+        if [ "$part" == "product" ]; then
+             COUNT=$(find "$DUMP_DIR" -name "GoogleTTS.apk" | wc -l)
+             if [ "$COUNT" -gt 0 ]; then
+                 echo "      ✅ VERIFIED: Google Apps exist in dump before repacking."
+             else
+                 echo "      ❌ WARNING: Google Apps MISSING in dump before repacking!"
+             fi
+        fi
+        
+        # USE SUDO TO REPACK (Ensures FS correctness)
+        # We removed > /dev/null to see errors
+        sudo mkfs.erofs -zlz4 "$SUPER_DIR/${part}.img" "$DUMP_DIR"
+        
+        # Clean up with sudo
+        sudo rm -rf "$DUMP_DIR"
     fi
 done
 
