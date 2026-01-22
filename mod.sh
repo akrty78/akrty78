@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - MODULAR EDITION
-#  (Main Script - Orchestrator)
+#  NEXDROID GOONER - ALL-IN-ONE EDITION
+#  (Integrates Debloater + Smali Patcher + GApps + Build)
 # =========================================================
 
 set +e 
@@ -22,6 +22,12 @@ OUTPUT_DIR="$GITHUB_WORKSPACE/NexMod_Output"
 IMAGES_DIR="$OUTPUT_DIR/images"
 SUPER_DIR="$OUTPUT_DIR/super"
 TEMP_DIR="$GITHUB_WORKSPACE/temp"
+
+# --- BLOATWARE LIST (Folders to Delete) ---
+BLOAT_LIST="
+MSA Miuidaemon MiuiDaemon HybridAccessory Joyose SoterService AnalyticsCore 
+Facebook Netflix MiCoin MiPay MiCredit Updater MiBrowser
+"
 
 # --- APPS & PROPS ---
 PRODUCT_APP="GoogleTTS SoundPickerGoogle LatinImeGoogle MiuiBiometric GeminiShell Wizard"
@@ -108,9 +114,6 @@ if [ ! -z "$LAUNCHER_URL" ] && [ "$LAUNCHER_URL" != "null" ]; then
     rm -rf l_ext l.zip
 fi
 
-# Make scripts executable
-chmod +x "$GITHUB_WORKSPACE/smali_patcher.sh" 2>/dev/null
-
 # =========================================================
 #  3. DOWNLOAD & EXTRACT ROM
 # =========================================================
@@ -155,7 +158,21 @@ for part in $LOGICALS; do
         
         DUMP_DIR="${part}_dump"
 
-        # A. GAPPS (Product Only)
+        # -----------------------------
+        # A. DEBLOATER (INTEGRATED)
+        # -----------------------------
+        echo "      🗑️  Debloating..."
+        for app in $BLOAT_LIST; do
+            found=$(find "$DUMP_DIR" -type d -iname "$app" -print -quit)
+            if [ ! -z "$found" ]; then
+                rm -rf "$found"
+                echo "         🔥 Nuked: $app"
+            fi
+        done
+
+        # -----------------------------
+        # B. GAPPS INJECTION (Product Only)
+        # -----------------------------
         if [ "$part" == "product" ] && [ -d "$GITHUB_WORKSPACE/gapps_src" ]; then
             echo "      🔵 Injecting GApps..."
             APP_DIR=$(find "$DUMP_DIR" -type d -name "app" -print -quit)
@@ -183,12 +200,26 @@ for part in $LOGICALS; do
             fi
         fi
 
-        # B. SMALI PATCHER (EXTERNAL CALL)
-        if [ -f "$GITHUB_WORKSPACE/smali_patcher.sh" ]; then
-             bash "$GITHUB_WORKSPACE/smali_patcher.sh" "$DUMP_DIR"
+        # -----------------------------
+        # C. SMALI PATCHER (INTEGRATED)
+        # -----------------------------
+        PROV_APK=$(find "$DUMP_DIR" -name "Provision.apk" -type f -print -quit)
+        if [ ! -z "$PROV_APK" ]; then
+            echo "      🔧 Patching Provision.apk..."
+            apktool d -r -f "$PROV_APK" -o "prov_temp" > /dev/null 2>&1
+            if [ -d "prov_temp" ]; then
+                grep -r "IS_INTERNATIONAL_BUILD" "prov_temp" | cut -d: -f1 | while read smali_file; do
+                    sed -i -E 's/sget-boolean ([vp][0-9]+), Lmiui\/os\/Build;->IS_INTERNATIONAL_BUILD:Z/const\/4 \1, 0x1/g' "$smali_file"
+                done
+            fi
+            apktool b "prov_temp" -o "$PROV_APK" > /dev/null 2>&1
+            rm -rf "prov_temp"
+            echo "         ✅ Patch Applied (Unsigned)."
         fi
 
-        # C. NEXPACKAGE
+        # -----------------------------
+        # D. NEXPACKAGE
+        # -----------------------------
         if [ -f "$TEMP_DIR/MiuiHome_Latest.apk" ]; then
             TARGET=$(find "$DUMP_DIR" -name "MiuiHome.apk" -type f -print -quit)
             if [ ! -z "$TARGET" ]; then
@@ -205,10 +236,12 @@ for part in $LOGICALS; do
             fi
         fi
         
-        # D. PROPS
+        # -----------------------------
+        # E. PROPS & REPACK
+        # -----------------------------
         find "$DUMP_DIR" -name "build.prop" | while read prop; do echo "$PROPS_CONTENT" >> "$prop"; done
-
-        # REPACK
+        
+        # 
         mkfs.erofs -zlz4 "$SUPER_DIR/${part}.img" "$DUMP_DIR" > /dev/null
         rm -rf "$DUMP_DIR"
     fi
