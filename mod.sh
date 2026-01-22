@@ -1,14 +1,19 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - UNSIGNED EDITION
-#  (Decompile -> Patch -> Recompile -> Done)
+#  NEXDROID GOONER - STABILITY EDITION
+#  (Unsigned + Resource Saver + Upload Fallback)
 # =========================================================
 
 set +e 
 
 # --- INPUTS ---
 ROM_URL="$1"
+
+# --- CONFIGURATION ---
+GAPPS_LINK="https://drive.google.com/file/d/1soDPsc9dhdXbuHLSx4t2L3u7x0fOlx_8/view?usp=drive_link"
+NEX_PACKAGE_LINK="https://drive.google.com/file/d/YOUR_NEX_PACKAGE_LINK/view?usp=sharing"
+LAUNCHER_REPO="Mods-Center/HyperOS-Launcher"
 
 # --- DIRECTORIES ---
 GITHUB_WORKSPACE=$(pwd)
@@ -18,14 +23,9 @@ IMAGES_DIR="$OUTPUT_DIR/images"
 SUPER_DIR="$OUTPUT_DIR/super"
 TEMP_DIR="$GITHUB_WORKSPACE/temp"
 
-# --- CONFIGURATION ---
-GAPPS_LINK="https://drive.google.com/file/d/1soDPsc9dhdXbuHLSx4t2L3u7x0fOlx_8/view?usp=drive_link"
-NEX_PACKAGE_LINK="https://drive.google.com/file/d/YOUR_NEX_PACKAGE_LINK/view?usp=sharing"
-LAUNCHER_REPO="Mods-Center/HyperOS-Launcher"
-
+# --- APPS & PROPS ---
 PRODUCT_APP="GoogleTTS SoundPickerGoogle LatinImeGoogle MiuiBiometric GeminiShell Wizard"
 PRODUCT_PRIV="AndroidAutoStub GoogleRestore GooglePartnerSetup Assistant HotwordEnrollmentYGoogleRISCV_WIDEBAND Velvet Phonesky MIUIPackageInstaller"
-
 PROPS_CONTENT='
 ro.miui.support_super_clipboard=1
 persist.sys.support_super_clipboard=1
@@ -60,21 +60,20 @@ ro.miui.has_gmscore=1
 '
 
 # =========================================================
-#  1. INITIALIZATION & TOOLS
+#  1. SETUP & TOOLS
 # =========================================================
 echo "🛠️  Setting up Environment..."
 mkdir -p "$IMAGES_DIR" "$SUPER_DIR" "$TEMP_DIR" "$BIN_DIR"
 export PATH="$BIN_DIR:$PATH"
 
 sudo apt-get update -y
-# REMOVED: zipalign, apksigner, openjdk (Not needed for unsigned)
+# Minimal install to save time/space
 sudo apt-get install -y python3 python3-pip erofs-utils erofsfuse jq aria2 zip unzip liblz4-tool p7zip-full apktool
 pip3 install gdown --break-system-packages
 
 # =========================================================
 #  2. DOWNLOAD RESOURCES
 # =========================================================
-
 # Payload Dumper
 if [ ! -f "$BIN_DIR/payload-dumper-go" ]; then
     wget -q -O pd.tar.gz https://github.com/ssut/payload-dumper-go/releases/download/1.2.2/payload-dumper-go_1.2.2_linux_amd64.tar.gz
@@ -84,7 +83,7 @@ if [ ! -f "$BIN_DIR/payload-dumper-go" ]; then
     rm pd.tar.gz
 fi
 
-# GApps Bundle
+# GApps
 if [ ! -d "gapps_src" ]; then
     echo "⬇️  Downloading GApps..."
     gdown "$GAPPS_LINK" -O gapps.zip --fuzzy
@@ -98,7 +97,7 @@ if [[ "$NEX_PACKAGE_LINK" == *"drive.google.com"* ]]; then
     unzip -q nex.zip -d nex_pkg && rm nex.zip
 fi
 
-# HyperOS Launcher
+# Launcher
 echo "⬇️  Fetching Launcher..."
 LAUNCHER_URL=$(curl -s "https://api.github.com/repos/$LAUNCHER_REPO/releases/latest" | jq -r '.assets[] | select(.name | endswith(".zip")) | .browser_download_url' | head -n 1)
 if [ ! -z "$LAUNCHER_URL" ] && [ "$LAUNCHER_URL" != "null" ]; then
@@ -116,10 +115,11 @@ echo "⬇️  Downloading ROM..."
 cd "$TEMP_DIR"
 aria2c -x 16 -s 16 --file-allocation=none -o "rom.zip" "$ROM_URL"
 if [ ! -f "rom.zip" ]; then echo "❌ Download Failed"; exit 1; fi
-unzip -o "rom.zip" payload.bin && rm "rom.zip"
+unzip -o "rom.zip" payload.bin && rm "rom.zip" # CLEANUP IMMEDIATELY
 
 echo "🔍 Extracting Firmware..."
 payload-dumper-go -o "$IMAGES_DIR" payload.bin > /dev/null 2>&1
+rm payload.bin # CLEANUP IMMEDIATELY
 
 # Detect Device
 DEVICE_CODE="unknown"
@@ -148,37 +148,29 @@ for part in $LOGICALS; do
         erofsfuse "$IMAGES_DIR/${part}.img" "mnt"
         cp -a "mnt/." "${part}_dump/"
         fusermount -uz "mnt"
-        rm "$IMAGES_DIR/${part}.img"
+        rm "$IMAGES_DIR/${part}.img" # CLEANUP INPUT IMAGE IMMEDIATELY
         
         DUMP_DIR="${part}_dump"
 
-        # ----------------------------------------
-        # A. GAPPS INJECTION (Product Only)
-        # ----------------------------------------
+        # A. GAPPS (Product Only)
         if [ "$part" == "product" ] && [ -d "$GITHUB_WORKSPACE/gapps_src" ]; then
             echo "      🔵 Injecting GApps..."
-            
             APP_DIR=$(find "$DUMP_DIR" -type d -name "app" -print -quit)
             PRIV_DIR=$(find "$DUMP_DIR" -type d -name "priv-app" -print -quit)
-            
             inject_app() {
                 local list=$1; local dest=$2
                 [ -z "$dest" ] && return
                 for app in $list; do
                     src=$(find "$GITHUB_WORKSPACE/gapps_src" -name "${app}.apk" -print -quit)
                     if [ -f "$src" ]; then
-                        mkdir -p "$dest/$app"
-                        cp "$src" "$dest/$app/"
-                        chmod 644 "$dest/$app/${app}.apk"
-                        echo "         + $app"
+                        mkdir -p "$dest/$app"; cp "$src" "$dest/$app/"
+                        chmod 644 "$dest/$app/${app}.apk"; echo "         + $app"
                     fi
                 done
             }
-            
             inject_app "$PRODUCT_APP" "$APP_DIR"
             inject_app "$PRODUCT_PRIV" "$PRIV_DIR"
             
-            # Permissions
             ETC_DIR=$(find "$DUMP_DIR" -type d -name "etc" -print -quit)
             if [ ! -z "$ETC_DIR" ]; then
                 find "$GITHUB_WORKSPACE/gapps_src" -name "*.xml" | while read xml; do
@@ -188,115 +180,14 @@ for part in $LOGICALS; do
             fi
         fi
 
-        # ----------------------------------------
-        # B. SMALI PATCHER (Provision.apk)
-        # ----------------------------------------
+        # B. SMALI PATCHER (Unsigned)
         PROV_APK=$(find "$DUMP_DIR" -name "Provision.apk" -type f -print -quit)
-        
         if [ ! -z "$PROV_APK" ]; then
             echo "      🔧 Patching Provision.apk..."
-            
-            # 1. Decompile
             apktool d -r -f "$PROV_APK" -o "prov_temp" > /dev/null 2>&1
-            
-            # 2. Patch Code
             if [ -d "prov_temp" ]; then
                 grep -r "IS_INTERNATIONAL_BUILD" "prov_temp" | cut -d: -f1 | while read smali_file; do
                     sed -i -E 's/sget-boolean ([vp][0-9]+), Lmiui\/os\/Build;->IS_INTERNATIONAL_BUILD:Z/const\/4 \1, 0x1/g' "$smali_file"
                 done
             fi
-            
-            # 3. Recompile (Raw, Unsigned)
-            apktool b "prov_temp" -o "$PROV_APK" > /dev/null 2>&1
-            
-            echo "         ✅ Patch Applied (Unsigned)."
-            rm -rf "prov_temp"
-        fi
-
-        # ----------------------------------------
-        # C. NEXPACKAGE
-        # ----------------------------------------
-        if [ -f "$TEMP_DIR/MiuiHome_Latest.apk" ]; then
-            TARGET=$(find "$DUMP_DIR" -name "MiuiHome.apk" -type f -print -quit)
-            if [ ! -z "$TARGET" ]; then
-                cp "$TEMP_DIR/MiuiHome_Latest.apk" "$TARGET"
-                chmod 644 "$TARGET"
-                echo "      📱 Launcher Updated."
-            fi
-        fi
-
-        if [ -d "$GITHUB_WORKSPACE/nex_pkg" ]; then
-            MEDIA_DIR=$(find "$DUMP_DIR" -type d -name "media" -print -quit)
-            if [ ! -z "$MEDIA_DIR" ]; then
-                [ -f "$GITHUB_WORKSPACE/nex_pkg/bootanimation.zip" ] && cp "$GITHUB_WORKSPACE/nex_pkg/bootanimation.zip" "$MEDIA_DIR/"
-                if [ -d "$GITHUB_WORKSPACE/nex_pkg/walls" ]; then
-                    mkdir -p "$MEDIA_DIR/wallpaper/wallpaper_group"
-                    cp -r "$GITHUB_WORKSPACE/nex_pkg/walls/"* "$MEDIA_DIR/wallpaper/wallpaper_group/" 2>/dev/null
-                fi
-            fi
-        fi
-        
-        # ----------------------------------------
-        # D. PROPS
-        # ----------------------------------------
-        find "$DUMP_DIR" -name "build.prop" | while read prop; do
-            echo "$PROPS_CONTENT" >> "$prop"
-        done
-
-        # ----------------------------------------
-        # REPACK
-        # ----------------------------------------
-        mkfs.erofs -zlz4 "$SUPER_DIR/${part}.img" "$DUMP_DIR" > /dev/null
-        rm -rf "$DUMP_DIR"
-    fi
-done
-
-# =========================================================
-#  5. COMPRESSION & UPLOAD
-# =========================================================
-echo "📦  Zipping Super..."
-cd "$SUPER_DIR"
-SUPER_ZIP="Super_Images_${DEVICE_CODE}.zip"
-7z a -tzip -mx3 -mmt=$(nproc) "$SUPER_ZIP" *.img > /dev/null
-mv "$SUPER_ZIP" "$OUTPUT_DIR/"
-
-echo "📦  Zipping Firmware..."
-cd "$OUTPUT_DIR"
-mkdir -p FirmwarePack/images
-find "$IMAGES_DIR" -maxdepth 1 -type f -name "*.img" -exec mv {} FirmwarePack/images/ \;
-
-cat <<EOF > FirmwarePack/flash_rom.bat
-@echo off
-fastboot set_active a
-for %%f in (images\*.img) do fastboot flash %%~nf "%%f"
-fastboot flash cust images\cust.img
-fastboot flash super images\super.img
-fastboot erase userdata
-fastboot reboot
-EOF
-
-cd FirmwarePack && zip -r -q "../Firmware_Flasher.zip" .
-
-echo "☁️  Uploading..."
-cd "$OUTPUT_DIR"
-
-upload() {
-    [ ! -f "$1" ] && return
-    echo "   ⬆️ $1"
-    if [ -z "$PIXELDRAIN_KEY" ]; then
-        curl -s -T "$1" "https://pixeldrain.com/api/file/" | jq -r '"https://pixeldrain.com/u/" + .id'
-    else
-        curl -s -T "$1" -u :$PIXELDRAIN_KEY "https://pixeldrain.com/api/file/" | jq -r '"https://pixeldrain.com/u/" + .id'
-    fi
-}
-
-LINK_FW=$(upload "Firmware_Flasher.zip")
-LINK_SUPER=$(upload "$SUPER_ZIP")
-
-if [ ! -z "$TELEGRAM_TOKEN" ]; then
-    MSG="✅ *Build Done!*
-📱 *Device:* $DEVICE_CODE
-📦 [Firmware]($LINK_FW)
-📦 [Super]($LINK_SUPER)"
-    curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" -d chat_id="$CHAT_ID" -d parse_mode="Markdown" -d text="$MSG" > /dev/null
-fi
+            apktool b "prov_
