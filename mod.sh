@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - FINAL INTEGRATED EDITION
-#  (Fixed: Absolute Paths for Signing Keys)
+#  NEXDROID GOONER - FINAL STABLE
+#  (Fixed: Zipalign + Proper Signing)
 # =========================================================
 
 set +e 
@@ -67,18 +67,18 @@ mkdir -p "$IMAGES_DIR" "$SUPER_DIR" "$TEMP_DIR" "$BIN_DIR"
 export PATH="$BIN_DIR:$PATH"
 
 sudo apt-get update -y
-sudo apt-get install -y python3 python3-pip erofs-utils erofsfuse jq aria2 zip unzip liblz4-tool p7zip-full apktool apksigner openjdk-17-jdk
+# ADDED: zipalign (Crucial for signing)
+sudo apt-get install -y python3 python3-pip erofs-utils erofsfuse jq aria2 zip unzip liblz4-tool p7zip-full apktool apksigner zipalign openjdk-17-jdk
 pip3 install gdown --break-system-packages
 
-# Generate Signing Keys (In Workspace Root)
+# Generate Signing Keys (Standard AOSP Format)
 cd "$GITHUB_WORKSPACE"
 if [ ! -f "testkey.pk8" ]; then
     echo "🔑 Generating Signing Keys..."
-    openssl genrsa -out key.pem 2048
-    openssl req -new -key key.pem -out request.pem -subj "/C=US/ST=CA/L=Mountain View/O=Android/OU=Android/CN=Android/emailAddress=android@android.com"
-    openssl x509 -req -days 9999 -in request.pem -signkey key.pem -out testkey.x509.pem
-    openssl pkcs8 -topk8 -outform DER -in key.pem -inform PEM -out testkey.pk8 -nocrypt
-    rm key.pem request.pem
+    openssl genrsa -3 -out key.pem 2048
+    openssl req -new -x509 -key key.pem -out testkey.x509.pem -days 10000 -subj "/C=US/ST=CA/L=Mountain View/O=Android/OU=Android/CN=Android/emailAddress=android@android.com"
+    openssl pkcs8 -in key.pem -topk8 -outform DER -out testkey.pk8 -nocrypt
+    rm key.pem
 fi
 
 # =========================================================
@@ -209,27 +209,35 @@ for part in $LOGICALS; do
             # 1. Decompile
             apktool d -r -f "$PROV_APK" -o "prov_temp" > /dev/null 2>&1
             
-            # 2. Patch Code (SED)
-            PATCHED_COUNT=0
+            # 2. Patch Code
             if [ -d "prov_temp" ]; then
                 grep -r "IS_INTERNATIONAL_BUILD" "prov_temp" | cut -d: -f1 | while read smali_file; do
                     sed -i -E 's/sget-boolean ([vp][0-9]+), Lmiui\/os\/Build;->IS_INTERNATIONAL_BUILD:Z/const\/4 \1, 0x1/g' "$smali_file"
-                    PATCHED_COUNT=$((PATCHED_COUNT + 1))
                 done
             fi
             
             # 3. Recompile
-            apktool b "prov_temp" -o "$PROV_APK" > /dev/null 2>&1
+            apktool b "prov_temp" -o "$PROV_APK.unaligned" > /dev/null 2>&1
             
-            # 4. Sign (FIXED: Using ABSOLUTE PATH to keys)
-            echo "      ✍️  Signing..."
-            apksigner sign --key "$GITHUB_WORKSPACE/testkey.pk8" --cert "$GITHUB_WORKSPACE/testkey.x509.pem" "$PROV_APK"
-            
-            # Verify
-            if apksigner verify "$PROV_APK" | grep -q "Verified"; then
-                 echo "         ✅ Patch Applied & Signed."
+            if [ -f "$PROV_APK.unaligned" ]; then
+                # 4. Zipalign (CRITICAL FIX)
+                echo "      📏 Zipaligning..."
+                zipalign -p -f 4 "$PROV_APK.unaligned" "$PROV_APK.aligned"
+                mv "$PROV_APK.aligned" "$PROV_APK"
+                rm "$PROV_APK.unaligned"
+
+                # 5. Sign
+                echo "      ✍️  Signing..."
+                apksigner sign --key "$GITHUB_WORKSPACE/testkey.pk8" --cert "$GITHUB_WORKSPACE/testkey.x509.pem" "$PROV_APK"
+                
+                # Verify
+                if apksigner verify "$PROV_APK" | grep -q "Verified"; then
+                     echo "         ✅ Patch Applied & Signed."
+                else
+                     echo "         ❌ FATAL: Signature Failed!"
+                fi
             else
-                 echo "         ❌ FATAL: Signature Verification Failed!"
+                echo "         ❌ FATAL: Recompile Failed!"
             fi
             
             rm -rf "prov_temp"
