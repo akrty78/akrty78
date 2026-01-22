@@ -77,7 +77,7 @@ sudo apt-get update -y
 sudo apt-get install -y python3 python3-pip erofs-utils erofsfuse jq aria2 zip unzip liblz4-tool p7zip-full apktool apksigner openjdk-17-jdk
 pip3 install gdown --break-system-packages
 
-# Generate Signing Keys (For patching APKs)
+# Generate Signing Keys (Standard Android Format)
 if [ ! -f "testkey.pk8" ]; then
     echo "🔑 Generating Signing Keys..."
     openssl genrsa -out key.pem 2048
@@ -174,7 +174,6 @@ for part in $LOGICALS; do
         if [ "$part" == "product" ] && [ -d "gapps_src" ]; then
             echo "      🔵 Injecting GApps..."
             
-            # Find destination folders dynamically
             APP_DIR=$(find "$DUMP_DIR" -type d -name "app" -print -quit)
             PRIV_DIR=$(find "$DUMP_DIR" -type d -name "priv-app" -print -quit)
             
@@ -182,7 +181,6 @@ for part in $LOGICALS; do
                 local list=$1; local dest=$2
                 [ -z "$dest" ] && return
                 for app in $list; do
-                    # Find APK in source
                     src=$(find "gapps_src" -name "${app}.apk" -print -quit)
                     if [ -f "$src" ]; then
                         mkdir -p "$dest/$app"
@@ -200,9 +198,6 @@ for part in $LOGICALS; do
             ETC_DIR=$(find "$DUMP_DIR" -type d -name "etc" -print -quit)
             if [ ! -z "$ETC_DIR" ]; then
                 find "gapps_src" -name "*.xml" | while read xml; do
-                    # Smart copy: decide subfolder based on filename content? 
-                    # For simplicity, we assume permissions struct in source or dump to etc/permissions
-                    # Or simpler: just dump all XMLs to etc/permissions and etc/sysconfig if they exist
                     [ -d "$ETC_DIR/permissions" ] && cp "$xml" "$ETC_DIR/permissions/" 2>/dev/null
                     [ -d "$ETC_DIR/sysconfig" ] && cp "$xml" "$ETC_DIR/sysconfig/" 2>/dev/null
                 done
@@ -212,40 +207,41 @@ for part in $LOGICALS; do
         # ----------------------------------------
         # B. SMALI PATCHER (Provision.apk)
         # ----------------------------------------
-        # Search for Provision.apk in this partition
         PROV_APK=$(find "$DUMP_DIR" -name "Provision.apk" -type f -print -quit)
         
         if [ ! -z "$PROV_APK" ]; then
             echo "      🔧 Patching Provision.apk..."
             
-            # 1. Decompile (No Resources to avoid crashes)
+            # 1. Decompile (No Resources)
             apktool d -r -f "$PROV_APK" -o "prov_temp" > /dev/null 2>&1
             
-            # 2. Find and Patch using SED (No Python!)
-            # Look for: sget-boolean vX, Lmiui/os/Build;->IS_INTERNATIONAL_BUILD:Z
-            # Replace with: const/4 vX, 0x1
-            
+            # 2. Patch Code
+            PATCHED_COUNT=0
             grep -r "IS_INTERNATIONAL_BUILD" "prov_temp" | cut -d: -f1 | while read smali_file; do
-                echo "         > Patching: $smali_file"
-                # Use sed with regex capture group to keep the register (v0, v1 etc)
+                echo "         > Found check in: $smali_file"
                 sed -i -E 's/sget-boolean ([vp][0-9]+), Lmiui\/os\/Build;->IS_INTERNATIONAL_BUILD:Z/const\/4 \1, 0x1/g' "$smali_file"
+                PATCHED_COUNT=$((PATCHED_COUNT + 1))
             done
             
             # 3. Recompile
             apktool b "prov_temp" -o "$PROV_APK" > /dev/null 2>&1
             
-            # 4. Sign
-            apksigner sign --key "key.pem" --cert "testkey.x509.pem" "$PROV_APK"
+            # 4. Sign (FIXED: Uses testkey.pk8)
+            apksigner sign --key "testkey.pk8" --cert "testkey.x509.pem" "$PROV_APK"
             
-            # Cleanup
+            # Verify Signature
+            if apksigner verify "$PROV_APK" | grep -q "Verified"; then
+                 echo "         ✅ Patch Applied & Signed."
+            else
+                 echo "         ⚠️  WARNING: Signature Verification Failed!"
+            fi
+            
             rm -rf "prov_temp"
-            echo "         ✅ Patch Applied."
         fi
 
         # ----------------------------------------
-        # C. NEXPACKAGE (Launcher & Media)
+        # C. NEXPACKAGE
         # ----------------------------------------
-        # Launcher Update
         if [ -f "$TEMP_DIR/MiuiHome_Latest.apk" ]; then
             TARGET=$(find "$DUMP_DIR" -name "MiuiHome.apk" -type f -print -quit)
             if [ ! -z "$TARGET" ]; then
@@ -255,7 +251,6 @@ for part in $LOGICALS; do
             fi
         fi
 
-        # Media / Bootanim
         if [ -d "nex_pkg" ]; then
             MEDIA_DIR=$(find "$DUMP_DIR" -type d -name "media" -print -quit)
             if [ ! -z "$MEDIA_DIR" ]; then
@@ -268,7 +263,7 @@ for part in $LOGICALS; do
         fi
         
         # ----------------------------------------
-        # D. PROPS INJECTION
+        # D. PROPS
         # ----------------------------------------
         find "$DUMP_DIR" -name "build.prop" | while read prop; do
             echo "$PROPS_CONTENT" >> "$prop"
@@ -296,7 +291,6 @@ cd "$OUTPUT_DIR"
 mkdir -p FirmwarePack/images
 find "$IMAGES_DIR" -maxdepth 1 -type f -name "*.img" -exec mv {} FirmwarePack/images/ \;
 
-# Create Flasher Bat
 cat <<EOF > FirmwarePack/flash_rom.bat
 @echo off
 fastboot set_active a
