@@ -2,7 +2,7 @@
 
 # =========================================================
 #  NEXDROID GOONER - COMPLETE EDITION
-#  (Modular + Auto-Patcher + NexPackage)
+#  (Modular + Auto-Patcher + NexPackage + Bash GApps)
 # =========================================================
 
 set +e 
@@ -80,10 +80,9 @@ if [[ "$NEX_PACKAGE_LINK" == *"drive.google.com"* ]]; then
     fi
 fi
 
-# Ensure nexpackage.sh is executable
-if [ -f "$GITHUB_WORKSPACE/nexpackage.sh" ]; then
-    chmod +x "$GITHUB_WORKSPACE/nexpackage.sh"
-fi
+# Ensure scripts are executable
+chmod +x "$GITHUB_WORKSPACE/nexpackage.sh" 2>/dev/null
+chmod +x "$GITHUB_WORKSPACE/inject_gapps.sh" 2>/dev/null
 
 # 4. DOWNLOAD ROM
 echo "⬇️  Downloading ROM..."
@@ -152,22 +151,26 @@ for part in $LOGICALS; do
         rmdir "mnt_point"
         rm "$IMAGES_DIR/${part}.img"
         
-        # A. PYTHON INJECTOR (GAPPS/PROPS)
-        if [ -f "$GITHUB_WORKSPACE/inject_gapps.py" ]; then
-             python3 "$GITHUB_WORKSPACE/inject_gapps.py" "${part}_dump"
-        fi
-
-        # B. RUN NEX-PACKAGE HANDLER (STANDALONE FILE)
-        if [ -f "$GITHUB_WORKSPACE/nexpackage.sh" ]; then
-             "$GITHUB_WORKSPACE/nexpackage.sh" "${part}_dump" "$part" "$TEMP_DIR"
+        # A. GAPPS INJECTOR (Bash Version)
+        if [ -f "$GITHUB_WORKSPACE/inject_gapps.sh" ]; then
+             bash "$GITHUB_WORKSPACE/inject_gapps.sh" "${part}_dump"
         else
-             echo "⚠️  nexpackage.sh not found in repo!"
+             echo "⚠️  inject_gapps.sh not found!"
         fi
 
-        # C. AUTO-PATCHER (NEW: Modify APKs)
-        # This runs after everything else to ensure we patch the final version of the APK
+        # B. NEX-PACKAGE HANDLER
+        if [ -f "$GITHUB_WORKSPACE/nexpackage.sh" ]; then
+             bash "$GITHUB_WORKSPACE/nexpackage.sh" "${part}_dump" "$part" "$TEMP_DIR"
+        else
+             echo "⚠️  nexpackage.sh not found!"
+        fi
+
+        # C. AUTO-PATCHER (Modify APKs)
+        # This runs last to patch the final version of any APKs
         if [ -f "$GITHUB_WORKSPACE/auto_patcher.py" ]; then
              python3 "$GITHUB_WORKSPACE/auto_patcher.py" "${part}_dump"
+        else
+             echo "⚠️  auto_patcher.py not found!"
         fi
         
         # REPACK
