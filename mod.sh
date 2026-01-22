@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - STABILITY EDITION
+#  NEXDROID GOONER - STABILITY EDITION (FIXED)
 #  (Unsigned + Resource Saver + Upload Fallback)
 # =========================================================
 
@@ -26,6 +26,8 @@ TEMP_DIR="$GITHUB_WORKSPACE/temp"
 # --- APPS & PROPS ---
 PRODUCT_APP="GoogleTTS SoundPickerGoogle LatinImeGoogle MiuiBiometric GeminiShell Wizard"
 PRODUCT_PRIV="AndroidAutoStub GoogleRestore GooglePartnerSetup Assistant HotwordEnrollmentYGoogleRISCV_WIDEBAND Velvet Phonesky MIUIPackageInstaller"
+
+# FIXED: Ensure this variable is properly quoted and closed
 PROPS_CONTENT='
 ro.miui.support_super_clipboard=1
 persist.sys.support_super_clipboard=1
@@ -67,7 +69,6 @@ mkdir -p "$IMAGES_DIR" "$SUPER_DIR" "$TEMP_DIR" "$BIN_DIR"
 export PATH="$BIN_DIR:$PATH"
 
 sudo apt-get update -y
-# Minimal install to save time/space
 sudo apt-get install -y python3 python3-pip erofs-utils erofsfuse jq aria2 zip unzip liblz4-tool p7zip-full apktool
 pip3 install gdown --break-system-packages
 
@@ -190,4 +191,101 @@ for part in $LOGICALS; do
                     sed -i -E 's/sget-boolean ([vp][0-9]+), Lmiui\/os\/Build;->IS_INTERNATIONAL_BUILD:Z/const\/4 \1, 0x1/g' "$smali_file"
                 done
             fi
-            apktool b "prov_
+            apktool b "prov_temp" -o "$PROV_APK" > /dev/null 2>&1
+            rm -rf "prov_temp"
+            echo "         ✅ Patch Applied (Unsigned)."
+        fi
+
+        # C. NEXPACKAGE
+        if [ -f "$TEMP_DIR/MiuiHome_Latest.apk" ]; then
+            TARGET=$(find "$DUMP_DIR" -name "MiuiHome.apk" -type f -print -quit)
+            if [ ! -z "$TARGET" ]; then
+                cp "$TEMP_DIR/MiuiHome_Latest.apk" "$TARGET"
+                chmod 644 "$TARGET"
+                echo "      📱 Launcher Updated."
+            fi
+        fi
+        if [ -d "$GITHUB_WORKSPACE/nex_pkg" ]; then
+            MEDIA_DIR=$(find "$DUMP_DIR" -type d -name "media" -print -quit)
+            if [ ! -z "$MEDIA_DIR" ]; then
+                [ -f "$GITHUB_WORKSPACE/nex_pkg/bootanimation.zip" ] && cp "$GITHUB_WORKSPACE/nex_pkg/bootanimation.zip" "$MEDIA_DIR/"
+                [ -d "$GITHUB_WORKSPACE/nex_pkg/walls" ] && mkdir -p "$MEDIA_DIR/wallpaper/wallpaper_group" && cp -r "$GITHUB_WORKSPACE/nex_pkg/walls/"* "$MEDIA_DIR/wallpaper/wallpaper_group/" 2>/dev/null
+            fi
+        fi
+        
+        # D. PROPS
+        find "$DUMP_DIR" -name "build.prop" | while read prop; do echo "$PROPS_CONTENT" >> "$prop"; done
+
+        # REPACK
+        mkfs.erofs -zlz4 "$SUPER_DIR/${part}.img" "$DUMP_DIR" > /dev/null
+        rm -rf "$DUMP_DIR" # CLEANUP DUMP IMMEDIATELY
+    fi
+done
+
+# =========================================================
+#  5. COMPRESSION & UPLOAD
+# =========================================================
+echo "📦  Zipping Super..."
+cd "$SUPER_DIR"
+SUPER_ZIP="Super_Images_${DEVICE_CODE}.zip"
+# Optimized Compression
+7z a -tzip -mx1 -mmt=$(nproc) "$SUPER_ZIP" *.img > /dev/null
+mv "$SUPER_ZIP" "$OUTPUT_DIR/"
+
+echo "📦  Zipping Firmware..."
+cd "$OUTPUT_DIR"
+mkdir -p FirmwarePack/images
+find "$IMAGES_DIR" -maxdepth 1 -type f -name "*.img" -exec mv {} FirmwarePack/images/ \;
+
+cat <<EOF > FirmwarePack/flash_rom.bat
+@echo off
+fastboot set_active a
+for %%f in (images\*.img) do fastboot flash %%~nf "%%f"
+fastboot flash cust images\cust.img
+fastboot flash super images\super.img
+fastboot erase userdata
+fastboot reboot
+EOF
+
+cd FirmwarePack && zip -r -q "../Firmware_Flasher.zip" .
+
+echo "☁️  Uploading..."
+cd "$OUTPUT_DIR"
+
+# ROBUST UPLOAD FUNCTION
+upload() {
+    local file=$1
+    [ ! -f "$file" ] && return
+    
+    echo "   ⬆️ Uploading $file (Attempt 1: PixelDrain)..."
+    if [ -z "$PIXELDRAIN_KEY" ]; then
+        LINK=$(curl -s -T "$file" "https://pixeldrain.com/api/file/" | jq -r '"https://pixeldrain.com/u/" + .id')
+    else
+        LINK=$(curl -s -T "$file" -u :$PIXELDRAIN_KEY "https://pixeldrain.com/api/file/" | jq -r '"https://pixeldrain.com/u/" + .id')
+    fi
+
+    if [[ "$LINK" == *"pixeldrain.com"* ]] && [[ "$LINK" != *"null"* ]]; then
+        echo "$LINK"
+        return
+    fi
+
+    echo "   ⚠️ PixelDrain failed. Attempt 2: Transfer.sh..."
+    curl -s --upload-file "$file" "https://transfer.sh/$(basename "$file")"
+}
+
+LINK_FW=$(upload "Firmware_Flasher.zip")
+LINK_SUPER=$(upload "$SUPER_ZIP")
+
+if [ ! -z "$TELEGRAM_TOKEN" ]; then
+    MSG="✅ *Build Done!*
+📱 *Device:* $DEVICE_CODE
+📦 [Firmware]($LINK_FW)
+📦 [Super]($LINK_SUPER)"
+    
+    if [[ -z "$LINK_SUPER" ]] || [[ "$LINK_SUPER" == *"null"* ]]; then
+        MSG="⚠️ *Build Finished but Upload Failed!*
+Check GitHub Actions Artifacts."
+    fi
+
+    curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" -d chat_id="$CHAT_ID" -d parse_mode="Markdown" -d text="$MSG" > /dev/null
+fi
