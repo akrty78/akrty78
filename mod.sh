@@ -2,7 +2,7 @@
 
 # =========================================================
 #  NEXDROID GOONER - ALL-IN-ONE EDITION
-#  (Integrates Debloater + Smali Patcher + GApps + Build)
+#  (Integrates Debloater + Smali Patcher + GApps + Permissions + Build)
 # =========================================================
 
 set +e 
@@ -171,12 +171,15 @@ for part in $LOGICALS; do
         done
 
         # -----------------------------
-        # B. GAPPS INJECTION (Product Only)
+        # B. GAPPS & PERMISSIONS (Product Only)
         # -----------------------------
         if [ "$part" == "product" ] && [ -d "$GITHUB_WORKSPACE/gapps_src" ]; then
-            echo "      🔵 Injecting GApps..."
+            echo "      🔵 Injecting GApps & Permissions..."
+            
+            # 1. Inject APKs
             APP_DIR=$(find "$DUMP_DIR" -type d -name "app" -print -quit)
             PRIV_DIR=$(find "$DUMP_DIR" -type d -name "priv-app" -print -quit)
+            
             inject_app() {
                 local list=$1; local dest=$2
                 [ -z "$dest" ] && return
@@ -191,10 +194,27 @@ for part in $LOGICALS; do
             inject_app "$PRODUCT_APP" "$APP_DIR"
             inject_app "$PRODUCT_PRIV" "$PRIV_DIR"
             
+            # 2. Inject Permissions
             ETC_DIR=$(find "$DUMP_DIR" -type d -name "etc" -print -quit)
             if [ ! -z "$ETC_DIR" ]; then
+                
+                # A. Standard XMLs from Repo -> etc/permissions
+                if [ -d "$GITHUB_WORKSPACE/permissions" ]; then
+                    echo "         📂 Copying Standard Permissions..."
+                    find "$GITHUB_WORKSPACE/permissions" -maxdepth 1 -name "*.xml" -exec cp {} "$ETC_DIR/permissions/" \; 2>/dev/null
+                fi
+
+                # B. Special Default Permissions -> etc/default-permissions
+                DEF_PERM_SRC="$GITHUB_WORKSPACE/permissions/default-permissions/default-permissions-google.xml"
+                if [ -f "$DEF_PERM_SRC" ]; then
+                    echo "         📂 Injecting default-permissions-google.xml..."
+                    mkdir -p "$ETC_DIR/default-permissions"
+                    cp "$DEF_PERM_SRC" "$ETC_DIR/default-permissions/"
+                    chmod 644 "$ETC_DIR/default-permissions/default-permissions-google.xml"
+                fi
+                
+                # C. GApps Zip Fallback
                 find "$GITHUB_WORKSPACE/gapps_src" -name "*.xml" | while read xml; do
-                    [ -d "$ETC_DIR/permissions" ] && cp "$xml" "$ETC_DIR/permissions/" 2>/dev/null
                     [ -d "$ETC_DIR/sysconfig" ] && cp "$xml" "$ETC_DIR/sysconfig/" 2>/dev/null
                 done
             fi
@@ -241,7 +261,6 @@ for part in $LOGICALS; do
         # -----------------------------
         find "$DUMP_DIR" -name "build.prop" | while read prop; do echo "$PROPS_CONTENT" >> "$prop"; done
         
-        # 
         mkfs.erofs -zlz4 "$SUPER_DIR/${part}.img" "$DUMP_DIR" > /dev/null
         rm -rf "$DUMP_DIR"
     fi
