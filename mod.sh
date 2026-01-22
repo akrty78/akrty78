@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - STABILITY EDITION (FIXED)
-#  (Unsigned + Resource Saver + Upload Fallback)
+#  NEXDROID GOONER - MODULAR EDITION
+#  (Main Script - Orchestrator)
 # =========================================================
 
 set +e 
@@ -27,7 +27,6 @@ TEMP_DIR="$GITHUB_WORKSPACE/temp"
 PRODUCT_APP="GoogleTTS SoundPickerGoogle LatinImeGoogle MiuiBiometric GeminiShell Wizard"
 PRODUCT_PRIV="AndroidAutoStub GoogleRestore GooglePartnerSetup Assistant HotwordEnrollmentYGoogleRISCV_WIDEBAND Velvet Phonesky MIUIPackageInstaller"
 
-# FIXED: Ensure this variable is properly quoted and closed
 PROPS_CONTENT='
 ro.miui.support_super_clipboard=1
 persist.sys.support_super_clipboard=1
@@ -109,6 +108,9 @@ if [ ! -z "$LAUNCHER_URL" ] && [ "$LAUNCHER_URL" != "null" ]; then
     rm -rf l_ext l.zip
 fi
 
+# Make scripts executable
+chmod +x "$GITHUB_WORKSPACE/smali_patcher.sh" 2>/dev/null
+
 # =========================================================
 #  3. DOWNLOAD & EXTRACT ROM
 # =========================================================
@@ -116,11 +118,11 @@ echo "⬇️  Downloading ROM..."
 cd "$TEMP_DIR"
 aria2c -x 16 -s 16 --file-allocation=none -o "rom.zip" "$ROM_URL"
 if [ ! -f "rom.zip" ]; then echo "❌ Download Failed"; exit 1; fi
-unzip -o "rom.zip" payload.bin && rm "rom.zip" # CLEANUP IMMEDIATELY
+unzip -o "rom.zip" payload.bin && rm "rom.zip" 
 
 echo "🔍 Extracting Firmware..."
 payload-dumper-go -o "$IMAGES_DIR" payload.bin > /dev/null 2>&1
-rm payload.bin # CLEANUP IMMEDIATELY
+rm payload.bin
 
 # Detect Device
 DEVICE_CODE="unknown"
@@ -149,7 +151,7 @@ for part in $LOGICALS; do
         erofsfuse "$IMAGES_DIR/${part}.img" "mnt"
         cp -a "mnt/." "${part}_dump/"
         fusermount -uz "mnt"
-        rm "$IMAGES_DIR/${part}.img" # CLEANUP INPUT IMAGE IMMEDIATELY
+        rm "$IMAGES_DIR/${part}.img"
         
         DUMP_DIR="${part}_dump"
 
@@ -181,19 +183,9 @@ for part in $LOGICALS; do
             fi
         fi
 
-        # B. SMALI PATCHER (Unsigned)
-        PROV_APK=$(find "$DUMP_DIR" -name "Provision.apk" -type f -print -quit)
-        if [ ! -z "$PROV_APK" ]; then
-            echo "      🔧 Patching Provision.apk..."
-            apktool d -r -f "$PROV_APK" -o "prov_temp" > /dev/null 2>&1
-            if [ -d "prov_temp" ]; then
-                grep -r "IS_INTERNATIONAL_BUILD" "prov_temp" | cut -d: -f1 | while read smali_file; do
-                    sed -i -E 's/sget-boolean ([vp][0-9]+), Lmiui\/os\/Build;->IS_INTERNATIONAL_BUILD:Z/const\/4 \1, 0x1/g' "$smali_file"
-                done
-            fi
-            apktool b "prov_temp" -o "$PROV_APK" > /dev/null 2>&1
-            rm -rf "prov_temp"
-            echo "         ✅ Patch Applied (Unsigned)."
+        # B. SMALI PATCHER (EXTERNAL CALL)
+        if [ -f "$GITHUB_WORKSPACE/smali_patcher.sh" ]; then
+             bash "$GITHUB_WORKSPACE/smali_patcher.sh" "$DUMP_DIR"
         fi
 
         # C. NEXPACKAGE
@@ -218,7 +210,7 @@ for part in $LOGICALS; do
 
         # REPACK
         mkfs.erofs -zlz4 "$SUPER_DIR/${part}.img" "$DUMP_DIR" > /dev/null
-        rm -rf "$DUMP_DIR" # CLEANUP DUMP IMMEDIATELY
+        rm -rf "$DUMP_DIR"
     fi
 done
 
@@ -228,7 +220,6 @@ done
 echo "📦  Zipping Super..."
 cd "$SUPER_DIR"
 SUPER_ZIP="Super_Images_${DEVICE_CODE}.zip"
-# Optimized Compression
 7z a -tzip -mx1 -mmt=$(nproc) "$SUPER_ZIP" *.img > /dev/null
 mv "$SUPER_ZIP" "$OUTPUT_DIR/"
 
@@ -252,7 +243,6 @@ cd FirmwarePack && zip -r -q "../Firmware_Flasher.zip" .
 echo "☁️  Uploading..."
 cd "$OUTPUT_DIR"
 
-# ROBUST UPLOAD FUNCTION
 upload() {
     local file=$1
     [ ! -f "$file" ] && return
