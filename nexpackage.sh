@@ -1,6 +1,6 @@
 #!/bin/bash
 # =========================================================
-#  NEX-PACKAGE HANDLER
+#  NEX-PACKAGE HANDLER (FIXED PATHING)
 #  (Injects Bootanim, Walls, Overlays, and Modded APKs)
 # =========================================================
 
@@ -9,11 +9,17 @@ PARTITION_NAME="$2"
 TEMP_DIR="$3"
 NEX_DIR="nex-package"
 
+# --- HELPER: Find folder dynamically ---
+# Returns the first matching directory path found inside the partition root
+find_folder() {
+    find "$PARTITION_ROOT" -type d -name "$1" -print -quit
+}
+
 # --- PART 1: PRODUCT PARTITION MODS ---
 if [ "$PARTITION_NAME" == "product" ]; then
     echo "      📦 Processing Product Mods..."
     
-    # 1. Inject Downloaded MiuiHome (From GitHub Auto-Update)
+    # 1. Inject Downloaded MiuiHome (High Priority)
     if [ -f "$TEMP_DIR/MiuiHome_Latest.apk" ]; then
         # Find existing MiuiHome to replace it accurately
         TARGET=$(find "$PARTITION_ROOT" -name "MiuiHome.apk" -type f 2>/dev/null | head -n 1)
@@ -29,11 +35,16 @@ if [ "$PARTITION_NAME" == "product" ]; then
 
     # 2. Nex-Package (Media/Overlay)
     if [ -d "$NEX_DIR" ]; then
-        # Bootanimation
-        MEDIA_DIR=""
-        [ -d "$PARTITION_ROOT/media" ] && MEDIA_DIR="$PARTITION_ROOT/media"
-        [ -d "$PARTITION_ROOT/product/media" ] && MEDIA_DIR="$PARTITION_ROOT/product/media"
         
+        # DYNAMICALLY FIND TARGET FOLDERS
+        # This fixes the issue where folders might be at root/media or root/product/media
+        MEDIA_DIR=$(find_folder "media")
+        OVERLAY_DIR=$(find_folder "overlay")
+
+        echo "         > Target Media: $MEDIA_DIR"
+        echo "         > Target Overlay: $OVERLAY_DIR"
+
+        # Bootanimation
         if [ -f "$NEX_DIR/bootanimation.zip" ] && [ ! -z "$MEDIA_DIR" ]; then
             echo "         - Replacing Bootanimation..."
             cp "$NEX_DIR/bootanimation.zip" "$MEDIA_DIR/bootanimation.zip"
@@ -43,15 +54,12 @@ if [ "$PARTITION_NAME" == "product" ]; then
         # Wallpapers
         if [ -d "$NEX_DIR/walls" ] && [ ! -z "$MEDIA_DIR" ]; then
             echo "         - Adding Wallpapers..."
+            # Ensure the wallpaper_group folder exists inside the found media dir
             mkdir -p "$MEDIA_DIR/wallpaper/wallpaper_group"
             cp -r "$NEX_DIR/walls/"* "$MEDIA_DIR/wallpaper/wallpaper_group/" 2>/dev/null
         fi
         
         # Overlays
-        OVERLAY_DIR=""
-        [ -d "$PARTITION_ROOT/overlay" ] && OVERLAY_DIR="$PARTITION_ROOT/overlay"
-        [ -d "$PARTITION_ROOT/product/overlay" ] && OVERLAY_DIR="$PARTITION_ROOT/product/overlay"
-        
         if [ -d "$NEX_DIR/overlays" ] && [ ! -z "$OVERLAY_DIR" ]; then
             echo "         - Injecting Overlays..."
             cp -r "$NEX_DIR/overlays/"* "$OVERLAY_DIR/"
