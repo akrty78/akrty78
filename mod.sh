@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - ROOT POWER EDITION v7
-#  (Feature: Dynamic Zip Naming based on build.prop)
+#  NEXDROID GOONER - ROOT POWER EDITION v10
+#  (Feature: Direct Injection of Lock Wallpaper to Theme Default)
 # =========================================================
 
 set +e 
@@ -10,9 +10,34 @@ set +e
 # --- INPUTS ---
 ROM_URL="$1"
 
+# --- 1. INSTANT METADATA EXTRACTION ---
+FILENAME=$(basename "$ROM_URL" | cut -d'?' -f1)
+
+echo "🔍 Analyzing OTA Link..."
+
+# Extract Device Code
+DEVICE_CODE=$(echo "$FILENAME" | awk -F'-ota_full' '{print $1}')
+
+# Extract OS Version
+OS_VER=$(echo "$FILENAME" | awk -F'ota_full-' '{print $2}' | awk -F'-user' '{print $1}')
+
+# Extract Android Version
+ANDROID_VER=$(echo "$FILENAME" | awk -F'user-' '{print $2}' | cut -d'-' -f1)
+
+# Fallbacks
+[ -z "$DEVICE_CODE" ] && DEVICE_CODE="UnknownDevice"
+[ -z "$OS_VER" ] && OS_VER="UnknownOS"
+[ -z "$ANDROID_VER" ] && ANDROID_VER="0.0"
+
+echo "   > Device:  $DEVICE_CODE"
+echo "   > OS Ver:  $OS_VER"
+echo "   > Android: $ANDROID_VER"
+echo "   > Target:  ota-nexdroid-${OS_VER}_${DEVICE_CODE}_${ANDROID_VER}.zip"
+
 # --- CONFIGURATION ---
 GAPPS_LINK="https://drive.google.com/file/d/1soDPsc9dhdXbuHLSx4t2L3u7x0fOlx_8/view?usp=drive_link"
-NEX_PACKAGE_LINK="https://drive.google.com/file/d/YOUR_NEX_PACKAGE_LINK/view?usp=sharing"
+# [UPDATED] NexPackage Link
+NEX_PACKAGE_LINK="https://drive.google.com/file/d/1y2-7qEk_wkjLdkz93ydq1ReMLlCY5Deu/view?usp=sharing"
 LAUNCHER_REPO="Mods-Center/HyperOS-Launcher"
 
 # --- DIRECTORIES ---
@@ -22,12 +47,6 @@ OUTPUT_DIR="$GITHUB_WORKSPACE/NexMod_Output"
 IMAGES_DIR="$OUTPUT_DIR/images"
 SUPER_DIR="$OUTPUT_DIR/super"
 TEMP_DIR="$GITHUB_WORKSPACE/temp"
-
-# --- VARIABLES FOR NAMING ---
-# We initialize these as "Unknown" and fill them during the loop
-OS_VER=""
-DEVICE_CODE=""
-ANDROID_VER=""
 
 # --- BLOATWARE LIST (BY PACKAGE NAME) ---
 BLOAT_LIST="
@@ -49,31 +68,6 @@ com.android.vending com.miui.fm com.miui.voiceassistProxy
 # --- APPS CONFIGURATION ---
 PRODUCT_APP="SoundPickerGoogle MiuiBiometric LatinImeGoogle GoogleTTS GooglePartnerSetup GeminiShell"
 PRODUCT_PRIV="Wizard Velvet Phonesky MIUIPackageInstaller GoogleRestore GooglePartnerSetup Assistant AndroidAutoStub"
-
-# --- PERMISSIONS CONFIGURATION ---
-PERM_FILE_LIST="
-cn.google.services.xml
-com.android.vending.xml
-com.google.android.apps.googleassistant.xml
-com.google.android.googlequicksearchbox.xml
-com.google.android.setupwizard.xml
-cross_device_services.xml
-gemini_shell.xml
-google-initial-package-stopped-states.xml
-google-staged-installer-whitelist.xml
-google.xml
-google_build.xml
-google_exclusives_enable.xml
-initial-package-stopped-states-aosp.xml
-microsoft.xml
-preinstalled-packages-platform-overlays.xml
-preinstalled-packages-platform-telephony-product.xml
-privapp-permissions-deviceintegrationservice.xml
-privapp-permissions-gms-international-product.xml
-privapp-permissions-microsoft-product.xml
-privapp-permissions-miui-product.xml
-split-permissions-google.xml
-"
 
 PROPS_CONTENT='
 ro.miui.support_super_clipboard=1
@@ -109,7 +103,7 @@ ro.miui.has_gmscore=1
 '
 
 # =========================================================
-#  1. SETUP & TOOLS
+#  2. SETUP & TOOLS
 # =========================================================
 echo "🛠️  Setting up Environment..."
 mkdir -p "$IMAGES_DIR" "$SUPER_DIR" "$TEMP_DIR" "$BIN_DIR"
@@ -120,7 +114,7 @@ sudo apt-get install -y python3 python3-pip erofs-utils erofsfuse jq aria2 zip u
 pip3 install gdown --break-system-packages
 
 # =========================================================
-#  2. DOWNLOAD RESOURCES
+#  3. DOWNLOAD RESOURCES
 # =========================================================
 if [ ! -f "$BIN_DIR/payload-dumper-go" ]; then
     wget -q -O pd.tar.gz https://github.com/ssut/payload-dumper-go/releases/download/1.2.2/payload-dumper-go_1.2.2_linux_amd64.tar.gz
@@ -136,7 +130,8 @@ if [ ! -d "gapps_src" ]; then
     unzip -q gapps.zip -d gapps_src && rm gapps.zip
 fi
 
-if [[ "$NEX_PACKAGE_LINK" == *"drive.google.com"* ]]; then
+# Download and extract NexPackage
+if [ ! -d "nex_pkg" ]; then
     echo "⬇️  Downloading NexPackage..."
     gdown "$NEX_PACKAGE_LINK" -O nex.zip --fuzzy
     unzip -q nex.zip -d nex_pkg && rm nex.zip
@@ -153,7 +148,7 @@ if [ ! -z "$LAUNCHER_URL" ] && [ "$LAUNCHER_URL" != "null" ]; then
 fi
 
 # =========================================================
-#  3. DOWNLOAD & EXTRACT ROM
+#  4. DOWNLOAD & EXTRACT ROM
 # =========================================================
 echo "⬇️  Downloading ROM..."
 cd "$TEMP_DIR"
@@ -170,7 +165,7 @@ echo "🛡️  Patching VBMeta..."
 python3 -c "import sys; open(sys.argv[1], 'r+b').write(b'\x03', 123) if __name__=='__main__' else None" "$IMAGES_DIR/vbmeta.img" 2>/dev/null
 
 # =========================================================
-#  4. PARTITION MODIFICATION LOOP
+#  5. PARTITION MODIFICATION LOOP
 # =========================================================
 echo "🔄 Processing Partitions..."
 LOGICALS="system system_ext product mi_ext vendor odm"
@@ -189,37 +184,6 @@ for part in $LOGICALS; do
             sudo fusermount -uz "mnt"
             continue
         fi
-
-        # --- DYNAMIC INFO EXTRACTION ---
-        # We try to find build.prop and extract info if we haven't found it yet
-        PROP_FILE=""
-        if [ -f "mnt/etc/build.prop" ]; then PROP_FILE="mnt/etc/build.prop"; fi
-        if [ -f "mnt/system/build.prop" ]; then PROP_FILE="mnt/system/build.prop"; fi
-        
-        if [ ! -z "$PROP_FILE" ]; then
-            # 1. Android Version (ro.build.version.release)
-            if [ -z "$ANDROID_VER" ]; then
-                TMP=$(sudo grep "ro.build.version.release=" "$PROP_FILE" | head -1 | cut -d= -f2 | tr -d '\r')
-                [ ! -z "$TMP" ] && ANDROID_VER="$TMP" && echo "      ℹ️  Android Ver: $ANDROID_VER"
-            fi
-            
-            # 2. OS Version (ro.mi.os.version.incremental)
-            if [ -z "$OS_VER" ]; then
-                TMP=$(sudo grep "ro.mi.os.version.incremental=" "$PROP_FILE" | head -1 | cut -d= -f2 | tr -d '\r')
-                [ ! -z "$TMP" ] && OS_VER="$TMP" && echo "      ℹ️  OS Ver: $OS_VER"
-            fi
-
-            # 3. Device Code (ro.product.mod_device or ro.product.device)
-            if [ -z "$DEVICE_CODE" ]; then
-                TMP=$(sudo grep "ro.product.mod_device=" "$PROP_FILE" | head -1 | cut -d= -f2 | cut -d_ -f1 | tr -d '\r')
-                # Fallback to standard device if mod_device is missing
-                if [ -z "$TMP" ]; then
-                     TMP=$(sudo grep "ro.product.device=" "$PROP_FILE" | head -1 | cut -d= -f2 | tr -d '\r')
-                fi
-                [ ! -z "$TMP" ] && DEVICE_CODE="$TMP" && echo "      ℹ️  Device: $DEVICE_CODE"
-            fi
-        fi
-        # -------------------------------
 
         # 3. Copy
         sudo cp -a "mnt/." "${part}_dump/"
@@ -249,16 +213,14 @@ for part in $LOGICALS; do
         done
 
         # -----------------------------
-        # B. GAPPS & PERMISSIONS (FIXED PATHS)
+        # B. GAPPS INJECTION
         # -----------------------------
         if [ "$part" == "product" ] && [ -d "$GITHUB_WORKSPACE/gapps_src" ]; then
             echo "      🔵 Injecting GApps into Product..."
             
             APP_ROOT="$DUMP_DIR/app"
             PRIV_ROOT="$DUMP_DIR/priv-app"
-            ETC_ROOT="$DUMP_DIR/etc"
-            
-            mkdir -p "$APP_ROOT" "$PRIV_ROOT" "$ETC_ROOT"
+            mkdir -p "$APP_ROOT" "$PRIV_ROOT"
 
             install_gapp_logic() {
                 local app_list="$1"
@@ -282,35 +244,6 @@ for part in $LOGICALS; do
 
             install_gapp_logic "$PRODUCT_PRIV" "$PRIV_ROOT" "priv-app"
             install_gapp_logic "$PRODUCT_APP" "$APP_ROOT" "app"
-
-            if [ -d "$GITHUB_WORKSPACE/permissions" ]; then
-                echo "      -> Injecting Permissions XMLs..."
-                TARGET_PERM_DIR="$ETC_ROOT/permissions"
-                mkdir -p "$TARGET_PERM_DIR"
-                
-                for xml in $PERM_FILE_LIST; do
-                    local src_xml="$GITHUB_WORKSPACE/permissions/$xml"
-                    if [ -f "$src_xml" ]; then
-                        cp "$src_xml" "$TARGET_PERM_DIR/"
-                        chmod 644 "$TARGET_PERM_DIR/$xml"
-                        echo "          + Perm: $xml"
-                    else
-                        echo "          ⚠️  Missing Perm XML: $xml"
-                    fi
-                done
-
-                TARGET_DEF_DIR="$ETC_ROOT/default-permissions"
-                mkdir -p "$TARGET_DEF_DIR"
-                local def_xml="default-permissions-google.xml"
-                local src_def="$GITHUB_WORKSPACE/permissions/$def_xml"
-                if [ -f "$src_def" ]; then
-                    cp "$src_def" "$TARGET_DEF_DIR/"
-                    chmod 644 "$TARGET_DEF_DIR/$def_xml"
-                    echo "          + Default Perm: $def_xml"
-                else
-                    echo "          ⚠️  Missing Default Perm XML: $def_xml"
-                fi
-            fi
         fi
 
         # -----------------------------
@@ -331,71 +264,59 @@ for part in $LOGICALS; do
         fi
 
         # -----------------------------
-        # D. NEXPACKAGE (EXTENDED)
+        # D. NEXPACKAGE INJECTION (DIRECT)
         # -----------------------------
-        # 1. Launcher Update
-        if [ -f "$TEMP_DIR/MiuiHome_Latest.apk" ]; then
-            TARGET=$(find "$DUMP_DIR" -name "MiuiHome.apk" -type f -print -quit)
-            if [ ! -z "$TARGET" ]; then
-                cp "$TEMP_DIR/MiuiHome_Latest.apk" "$TARGET"
-                chmod 644 "$TARGET"
-                echo "      📱 Launcher Updated."
-            fi
-        fi
-        
-        # 2. MEDIA ASSETS (Bootanimation & Walls)
         if [ "$part" == "product" ] && [ -d "$GITHUB_WORKSPACE/nex_pkg" ]; then
-            echo "      🎨 Injecting Media Assets..."
-            MEDIA_DIR="$DUMP_DIR/media"
-            mkdir -p "$MEDIA_DIR"
+            echo "      📦 Injecting NexPackage Assets..."
             
-            # Bootanimation
+            # Define Targets
+            PERM_DIR="$DUMP_DIR/etc/permissions"
+            OVERLAY_DIR="$DUMP_DIR/overlay"
+            MEDIA_DIR="$DUMP_DIR/media"
+            THEME_DIR="$DUMP_DIR/media/theme/default"
+            
+            # Create Directories
+            mkdir -p "$PERM_DIR" "$OVERLAY_DIR" "$MEDIA_DIR" "$THEME_DIR"
+            
+            # 1. Inject Permissions (XMLs)
+            echo "         -> Injecting XMLs..."
+            cp "$GITHUB_WORKSPACE/nex_pkg/"*.xml "$PERM_DIR/" 2>/dev/null
+            if ls "$PERM_DIR/"*.xml 1> /dev/null 2>&1; then
+                chmod 644 "$PERM_DIR/"*.xml
+                echo "            + Permissions installed."
+            else
+                 echo "            ! No XMLs found."
+            fi
+
+            # 2. Inject Overlays (APKs)
+            echo "         -> Injecting Overlays..."
+            cp "$GITHUB_WORKSPACE/nex_pkg/"*.apk "$OVERLAY_DIR/" 2>/dev/null
+            if ls "$OVERLAY_DIR/"*.apk 1> /dev/null 2>&1; then
+                chmod 644 "$OVERLAY_DIR/"*.apk
+                echo "            + Overlays installed."
+            else
+                 echo "            ! No APKs found."
+            fi
+
+            # 3. Inject Bootanimation
+            echo "         -> Injecting Bootanimation..."
             BOOT_SRC="$GITHUB_WORKSPACE/nex_pkg/bootanimation.zip"
             if [ -f "$BOOT_SRC" ]; then
                  cp "$BOOT_SRC" "$MEDIA_DIR/bootanimation.zip"
                  chmod 644 "$MEDIA_DIR/bootanimation.zip"
-                 echo "          + Bootanimation Updated"
+                 echo "            + Bootanimation installed."
             fi
-            
-            # Wallpapers
-            WALLS_SRC="$GITHUB_WORKSPACE/nex_pkg/walls"
-            if [ -d "$WALLS_SRC" ]; then
-                 WALL_DEST="$MEDIA_DIR/wallpaper/wallpaper_group"
-                 mkdir -p "$WALL_DEST"
-                 cp -r "$WALLS_SRC/"* "$WALL_DEST/" 2>/dev/null
-                 echo "          + Wallpapers Injected"
-            fi
-        fi
 
-        # 3. OVERLAYS INJECTION
-        if [ "$part" == "product" ] && [ -d "$GITHUB_WORKSPACE/nex_pkg/overlays" ]; then
-            echo "      🎨 Injecting Overlays from NexPackage..."
-            
-            OVERLAY_DIR="$DUMP_DIR/overlay"
-            mkdir -p "$OVERLAY_DIR"
-            
-            cp "$GITHUB_WORKSPACE/nex_pkg/overlays/"*.apk "$OVERLAY_DIR/" 2>/dev/null
-            
-            if ls "$OVERLAY_DIR/"*.apk 1> /dev/null 2>&1; then
-                chmod 644 "$OVERLAY_DIR/"*.apk
-                echo "          + Overlays installed to product/overlay"
+            # 4. Inject Lock Wallpaper (Strictly to Theme Default)
+            echo "         -> Injecting Lock Wallpaper..."
+            LOCK_SRC="$GITHUB_WORKSPACE/nex_pkg/lock_wallpaper"
+            if [ -f "$LOCK_SRC" ]; then
+                 cp "$LOCK_SRC" "$THEME_DIR/lock_wallpaper"
+                 chmod 644 "$THEME_DIR/lock_wallpaper"
+                 echo "            + Lock Wallpaper installed."
             else
-                echo "          ! No APKs found in overlays folder."
+                 echo "            ! lock_wallpaper not found in zip."
             fi
-        fi
-
-        # 4. LOCK WALLPAPER INJECTION
-        LOCK_SRC="$GITHUB_WORKSPACE/nex_pkg/overlays/lock_wallpaper"
-        if [ "$part" == "product" ] && [ -f "$LOCK_SRC" ]; then
-            echo "      🖼️ Injecting Lock Screen Wallpaper..."
-            
-            LOCK_DEST="$DUMP_DIR/media/theme/default"
-            mkdir -p "$LOCK_DEST"
-            
-            cp "$LOCK_SRC" "$LOCK_DEST/"
-            chmod 644 "$LOCK_DEST/lock_wallpaper"
-            
-            echo "          + Lock Wallpaper installed to media/theme/default/"
         fi
         
         # -----------------------------
@@ -418,17 +339,12 @@ for part in $LOGICALS; do
 done
 
 # =========================================================
-#  5. COMPRESSION & UPLOAD
+#  6. COMPRESSION & UPLOAD
 # =========================================================
 echo "📦  Zipping Super..."
 cd "$SUPER_DIR"
 
-# --- DYNAMIC NAMING LOGIC ---
-# Fallbacks if extraction failed
-[ -z "$OS_VER" ] && OS_VER="Unknown-Ver"
-[ -z "$DEVICE_CODE" ] && DEVICE_CODE="Unknown-Device"
-[ -z "$ANDROID_VER" ] && ANDROID_VER="00"
-
+# Using Variables from Step 1
 SUPER_ZIP="ota-nexdroid-${OS_VER}_${DEVICE_CODE}_${ANDROID_VER}.zip"
 
 echo "   > Filename: $SUPER_ZIP"
