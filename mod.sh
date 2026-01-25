@@ -23,15 +23,29 @@ IMAGES_DIR="$OUTPUT_DIR/images"
 SUPER_DIR="$OUTPUT_DIR/super"
 TEMP_DIR="$GITHUB_WORKSPACE/temp"
 
-# --- BLOATWARE LIST ---
+# --- BLOATWARE LIST (BY PACKAGE NAME) ---
 BLOAT_LIST="
-MSA Miuidaemon MiuiDaemon HybridAccessory Joyose SoterService AnalyticsCore 
-Facebook Netflix MiCoin MiPay MiCredit Updater MiBrowser
+com.xiaomi.aiasst.vision com.miui.carlink com.bsp.catchlog com.miui.nextpay
+com.xiaomi.aiasst.service com.miui.securityinputmethod com.xiaomi.market com.miui.greenguard
+com.mipay.wallet com.miui.systemAdSolution com.miui.bugreport com.xiaomi.migameservice
+com.xiaomi.payment com.sohu.inputmethod.sogou.xiaomi com.android.updater com.miui.voiceassist
+com.miui.voicetrigger com.xiaomi.xaee com.xiaomi.aireco com.baidu.input_mi com.mi.health
+com.mfashiongallery.emag com.duokan.reader com.android.email com.xiaomi.gamecenter
+com.miui.huanji com.miui.newmidrive com.miui.newhome com.miui.virtualsim
+com.xiaomi.mibrain.speech com.xiaomi.youpin com.xiaomi.shop com.xiaomi.vipaccount
+com.xiaomi.smarthome com.iflytek.inputmethod.miui
+com.miui.miservice com.android.browser com.miui.player
+com.miui.yellowpage com.xiaomi.gamecenter.sdk.service
+cn.wps.moffice_eng.xiaomi.lite com.miui.tsmclient com.unionpay.tsmservice.mi com.xiaomi.ab
+com.android.vending com.miui.fm com.miui.voiceassistProxy
 "
 
-# --- APPS & PROPS ---
-PRODUCT_APP="GoogleTTS SoundPickerGoogle LatinImeGoogle MiuiBiometric GeminiShell Wizard"
-PRODUCT_PRIV="AndroidAutoStub GoogleRestore GooglePartnerSetup Assistant HotwordEnrollmentYGoogleRISCV_WIDEBAND Velvet Phonesky MIUIPackageInstaller"
+# --- APPS & PROPS (UPDATED PER REQUEST) ---
+# Standard /product/app/
+PRODUCT_APP="SoundPickerGoogle MiuiBiometric LatinImeGoogle GoogleTTS GooglePartnerSetup GeminiShell"
+
+# Privileged /product/priv-app/
+PRODUCT_PRIV="Wizard Velvet Phonesky MIUIPackageInstaller GoogleRestore GooglePartnerSetup Assistant AndroidAutoStub"
 
 PROPS_CONTENT='
 ro.miui.support_super_clipboard=1
@@ -74,7 +88,7 @@ mkdir -p "$IMAGES_DIR" "$SUPER_DIR" "$TEMP_DIR" "$BIN_DIR"
 export PATH="$BIN_DIR:$PATH"
 
 sudo apt-get update -y
-sudo apt-get install -y python3 python3-pip erofs-utils erofsfuse jq aria2 zip unzip liblz4-tool p7zip-full apktool
+sudo apt-get install -y python3 python3-pip erofs-utils erofsfuse jq aria2 zip unzip liblz4-tool p7zip-full apktool aapt
 pip3 install gdown --break-system-packages
 
 # =========================================================
@@ -173,51 +187,86 @@ for part in $LOGICALS; do
         DUMP_DIR="${part}_dump"
 
         # -----------------------------
-        # A. DEBLOATER
+        # A. DEBLOATER (PACKAGE NAME EDITION)
         # -----------------------------
-        echo "      🗑️  Debloating..."
-        for app in $BLOAT_LIST; do
-            found=$(find "$DUMP_DIR" -type d -iname "$app" -print -quit)
-            if [ ! -z "$found" ]; then
-                rm -rf "$found"
-                echo "         🔥 Nuked: $app"
+        echo "      🗑️  Debloating by Package Name..."
+        
+        # Create temp list for grep
+        echo "$BLOAT_LIST" | tr ' ' '\n' | grep -v "^\s*$" > "$TEMP_DIR/bloat_target_list.txt"
+
+        # Find all APKs
+        find "$DUMP_DIR" -type f -name "*.apk" | while read apk_file; do
+            # Read internal package name
+            pkg_name=$(aapt dump badging "$apk_file" 2>/dev/null | grep "package: name=" | cut -d"'" -f2)
+
+            if [ ! -z "$pkg_name" ]; then
+                # Check if matches target list
+                if grep -Fxq "$pkg_name" "$TEMP_DIR/bloat_target_list.txt"; then
+                    # Get parent directory
+                    app_dir=$(dirname "$apk_file")
+                    
+                    # Safety check to ensure we are deleting a dir
+                    if [ -d "$app_dir" ]; then
+                        rm -rf "$app_dir"
+                        echo "          🔥 Nuked: $pkg_name"
+                        echo "             └─ Path: $app_dir"
+                    fi
+                fi
             fi
         done
 
         # -----------------------------
-        # B. GAPPS INJECTION & PERMISSIONS
+        # B. GAPPS INJECTION & PERMISSIONS (INTEGRATED)
         # -----------------------------
         if [ "$part" == "product" ] && [ -d "$GITHUB_WORKSPACE/gapps_src" ]; then
-            echo "      🔵 Injecting GApps..."
+            echo "      🔵 Injecting GApps into Product..."
             
-            APP_DIR=$(find "$DUMP_DIR" -type d -name "app" -print -quit)
-            PRIV_DIR=$(find "$DUMP_DIR" -type d -name "priv-app" -print -quit)
+            APP_ROOT=$(find "$DUMP_DIR" -type d -name "app" -print -quit)
+            PRIV_ROOT=$(find "$DUMP_DIR" -type d -name "priv-app" -print -quit)
             
-            if [ -z "$APP_DIR" ] || [ -z "$PRIV_DIR" ]; then
-                echo "      ⚠️  WARNING: Could not find app/priv-app folders in Product!"
-            else
-                inject_app() {
-                    local list=$1; local dest=$2
-                    [ -z "$dest" ] && return
-                    for app in $list; do
-                        src=$(find "$GITHUB_WORKSPACE/gapps_src" -name "${app}.apk" -print -quit)
-                        if [ -f "$src" ]; then
-                            mkdir -p "$dest/$app"
-                            cp "$src" "$dest/$app/"
-                            # VERIFICATION
-                            if [ -f "$dest/$app/${app}.apk" ]; then
-                                echo "         + $app (Verified)"
-                            else
-                                echo "         ❌ FAILED TO COPY: $app"
-                            fi
-                        fi
-                    done
-                }
-                inject_app "$PRODUCT_APP" "$APP_DIR"
-                inject_app "$PRODUCT_PRIV" "$PRIV_DIR"
-            fi
+            # --- HELPER FUNCTION FOR INJECTION ---
+            install_gapp_logic() {
+                local app_list="$1"
+                local target_root="$2"
+                local type_label="$3"
 
-            # Permissions
+                if [ -z "$target_root" ]; then
+                    echo "      ⚠️  Warning: $type_label folder not found!"
+                    return
+                fi
+
+                for app in $app_list; do
+                    local src_apk=$(find "$GITHUB_WORKSPACE/gapps_src" -name "${app}.apk" -print -quit)
+                    
+                    if [ -f "$src_apk" ]; then
+                        local dest_path="$target_root/$app"
+                        
+                        # 1. Create specific folder for the app
+                        mkdir -p "$dest_path"
+                        
+                        # 2. Copy the APK
+                        cp "$src_apk" "$dest_path/${app}.apk"
+                        
+                        # 3. Set Permissions (0755 Dir, 0644 File)
+                        chmod 755 "$dest_path"
+                        chmod 644 "$dest_path/${app}.apk"
+                        
+                        echo "          + Installed $type_label: $app"
+                    else
+                        echo "          ! Missing Source: $app"
+                    fi
+                done
+            }
+
+            # Install Priv-Apps
+            echo "      -> Processing Priv-Apps..."
+            install_gapp_logic "$PRODUCT_PRIV" "$PRIV_ROOT" "priv-app"
+
+            # Install Standard Apps
+            echo "      -> Processing Standard Apps..."
+            install_gapp_logic "$PRODUCT_APP" "$APP_ROOT" "app"
+
+            # Permissions XMLs
             ETC_DIR=$(find "$DUMP_DIR" -type d -name "etc" -print -quit)
             if [ ! -z "$ETC_DIR" ]; then
                 if [ -d "$GITHUB_WORKSPACE/permissions" ]; then
@@ -227,8 +276,8 @@ for part in $LOGICALS; do
                 if [ -f "$DEF_PERM_SRC" ]; then
                     mkdir -p "$ETC_DIR/default-permissions"
                     cp "$DEF_PERM_SRC" "$ETC_DIR/default-permissions/"
-                    echo "         + Permissions Injected."
                 fi
+                # Copy any XMLs found in gapps source
                 find "$GITHUB_WORKSPACE/gapps_src" -name "*.xml" | while read xml; do
                     [ -d "$ETC_DIR/sysconfig" ] && cp "$xml" "$ETC_DIR/sysconfig/" 2>/dev/null
                 done
@@ -249,7 +298,7 @@ for part in $LOGICALS; do
             fi
             apktool b "prov_temp" -o "$PROV_APK" > /dev/null 2>&1
             rm -rf "prov_temp"
-            echo "         ✅ Patch Applied (Unsigned)."
+            echo "          ✅ Patch Applied (Unsigned)."
         fi
 
         # -----------------------------
@@ -287,7 +336,6 @@ for part in $LOGICALS; do
         fi
         
         # USE SUDO TO REPACK (Ensures FS correctness)
-        # We removed > /dev/null to see errors
         sudo mkfs.erofs -zlz4 "$SUPER_DIR/${part}.img" "$DUMP_DIR"
         
         # Clean up with sudo
