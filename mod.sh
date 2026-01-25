@@ -170,10 +170,11 @@ rm payload.bin
 # Detect Device
 DEVICE_CODE="unknown"
 if [ -f "$IMAGES_DIR/mi_ext.img" ]; then
-    mkdir -p mnt; erofsfuse "$IMAGES_DIR/mi_ext.img" mnt
-    RAW=$(grep "ro.product.mod_device=" "mnt/etc/build.prop" 2>/dev/null | head -1 | cut -d'=' -f2)
+    mkdir -p mnt; sudo erofsfuse "$IMAGES_DIR/mi_ext.img" mnt
+    # Need sudo to read the mounted file now
+    RAW=$(sudo grep "ro.product.mod_device=" "mnt/etc/build.prop" 2>/dev/null | head -1 | cut -d'=' -f2)
     [ ! -z "$RAW" ] && DEVICE_CODE=$(echo "$RAW" | cut -d'_' -f1)
-    fusermount -uz mnt
+    sudo fusermount -uz mnt
 fi
 echo "   -> Device: $DEVICE_CODE"
 
@@ -192,22 +193,22 @@ for part in $LOGICALS; do
         echo "   -> Modding $part..."
         mkdir -p "${part}_dump" "mnt"
         
-        # USE SUDO FOR MOUNT/COPY (Fixes Permission Issues)
-        # 1. Mount
-        erofsfuse "$IMAGES_DIR/${part}.img" "mnt"
+        # [FIXED]: Use SUDO for mount so ROOT can read it
+        sudo erofsfuse "$IMAGES_DIR/${part}.img" "mnt"
         
-        # 2. Check if mount worked
+        # Check if mount worked
         if [ -z "$(ls -A mnt)" ]; then
             echo "      ❌ ERROR: Mount failed or empty image!"
-            fusermount -uz "mnt"
+            sudo fusermount -uz "mnt"
             continue
         fi
 
-        # 3. Copy with Permissions (sudo cp -a)
+        # Copy with Permissions (sudo cp -a)
         sudo cp -a "mnt/." "${part}_dump/"
         sudo chown -R $(whoami) "${part}_dump" # Reclaim ownership for editing
         
-        fusermount -uz "mnt"
+        # [FIXED]: Unmount with sudo
+        sudo fusermount -uz "mnt"
         rm "$IMAGES_DIR/${part}.img"
         
         DUMP_DIR="${part}_dump"
@@ -226,16 +227,11 @@ for part in $LOGICALS; do
             pkg_name=$(aapt dump badging "$apk_file" 2>/dev/null | grep "package: name=" | cut -d"'" -f2)
 
             if [ ! -z "$pkg_name" ]; then
-                # Check if matches target list
                 if grep -Fxq "$pkg_name" "$TEMP_DIR/bloat_target_list.txt"; then
-                    # Get parent directory
                     app_dir=$(dirname "$apk_file")
-                    
-                    # Safety check to ensure we are deleting a dir
                     if [ -d "$app_dir" ]; then
                         rm -rf "$app_dir"
                         echo "          🔥 Nuked: $pkg_name"
-                        echo "             └─ Path: $app_dir"
                     fi
                 fi
             fi
@@ -264,7 +260,6 @@ for part in $LOGICALS; do
 
                 for app in $app_list; do
                     local src_apk=$(find "$GITHUB_WORKSPACE/gapps_src" -name "${app}.apk" -print -quit)
-                    
                     if [ -f "$src_apk" ]; then
                         local dest_path="$target_root/$app"
                         mkdir -p "$dest_path"
@@ -290,9 +285,7 @@ for part in $LOGICALS; do
                 mkdir -p "$TARGET_PERM_DIR"
                 
                 for xml in $PERM_FILE_LIST; do
-                    # We look for the file in mainrepo/permissions/
                     local src_xml="$GITHUB_WORKSPACE/permissions/$xml"
-                    
                     if [ -f "$src_xml" ]; then
                         cp "$src_xml" "$TARGET_PERM_DIR/"
                         chmod 644 "$TARGET_PERM_DIR/$xml"
@@ -356,7 +349,7 @@ for part in $LOGICALS; do
         fi
         
         # -----------------------------
-        # E. REPACK (WITH SUDO)
+        # E. REPACK
         # -----------------------------
         find "$DUMP_DIR" -name "build.prop" | while read prop; do echo "$PROPS_CONTENT" >> "$prop"; done
         
@@ -370,10 +363,8 @@ for part in $LOGICALS; do
              fi
         fi
         
-        # USE SUDO TO REPACK (Ensures FS correctness)
+        # USE SUDO TO REPACK
         sudo mkfs.erofs -zlz4 "$SUPER_DIR/${part}.img" "$DUMP_DIR"
-        
-        # Clean up with sudo
         sudo rm -rf "$DUMP_DIR"
     fi
 done
