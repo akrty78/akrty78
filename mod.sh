@@ -41,14 +41,10 @@ com.android.vending com.miui.fm com.miui.voiceassistProxy
 "
 
 # --- APPS CONFIGURATION ---
-# Standard /product/app/
 PRODUCT_APP="SoundPickerGoogle MiuiBiometric LatinImeGoogle GoogleTTS GooglePartnerSetup GeminiShell"
-
-# Privileged /product/priv-app/
 PRODUCT_PRIV="Wizard Velvet Phonesky MIUIPackageInstaller GoogleRestore GooglePartnerSetup Assistant AndroidAutoStub"
 
 # --- PERMISSIONS CONFIGURATION ---
-# Source folder in your repo: permissions/
 PERM_FILE_LIST="
 cn.google.services.xml
 com.android.vending.xml
@@ -120,7 +116,6 @@ pip3 install gdown --break-system-packages
 # =========================================================
 #  2. DOWNLOAD RESOURCES
 # =========================================================
-# Payload Dumper
 if [ ! -f "$BIN_DIR/payload-dumper-go" ]; then
     wget -q -O pd.tar.gz https://github.com/ssut/payload-dumper-go/releases/download/1.2.2/payload-dumper-go_1.2.2_linux_amd64.tar.gz
     tar -xzf pd.tar.gz
@@ -129,21 +124,18 @@ if [ ! -f "$BIN_DIR/payload-dumper-go" ]; then
     rm pd.tar.gz
 fi
 
-# GApps
 if [ ! -d "gapps_src" ]; then
     echo "⬇️  Downloading GApps..."
     gdown "$GAPPS_LINK" -O gapps.zip --fuzzy
     unzip -q gapps.zip -d gapps_src && rm gapps.zip
 fi
 
-# NexPackage
 if [[ "$NEX_PACKAGE_LINK" == *"drive.google.com"* ]]; then
     echo "⬇️  Downloading NexPackage..."
     gdown "$NEX_PACKAGE_LINK" -O nex.zip --fuzzy
     unzip -q nex.zip -d nex_pkg && rm nex.zip
 fi
 
-# Launcher
 echo "⬇️  Fetching Launcher..."
 LAUNCHER_URL=$(curl -s "https://api.github.com/repos/$LAUNCHER_REPO/releases/latest" | jq -r '.assets[] | select(.name | endswith(".zip")) | .browser_download_url' | head -n 1)
 if [ ! -z "$LAUNCHER_URL" ] && [ "$LAUNCHER_URL" != "null" ]; then
@@ -171,7 +163,7 @@ rm payload.bin
 DEVICE_CODE="unknown"
 if [ -f "$IMAGES_DIR/mi_ext.img" ]; then
     mkdir -p mnt; sudo erofsfuse "$IMAGES_DIR/mi_ext.img" mnt
-    # Need sudo to read the mounted file now
+    # Fix: Use sudo grep because file is owned by root
     RAW=$(sudo grep "ro.product.mod_device=" "mnt/etc/build.prop" 2>/dev/null | head -1 | cut -d'=' -f2)
     [ ! -z "$RAW" ] && DEVICE_CODE=$(echo "$RAW" | cut -d'_' -f1)
     sudo fusermount -uz mnt
@@ -193,39 +185,32 @@ for part in $LOGICALS; do
         echo "   -> Modding $part..."
         mkdir -p "${part}_dump" "mnt"
         
-        # [FIXED]: Use SUDO for mount so ROOT can read it
+        # 1. Mount (as Root)
         sudo erofsfuse "$IMAGES_DIR/${part}.img" "mnt"
         
-        # Check if mount worked
-        if [ -z "$(ls -A mnt)" ]; then
+        # 2. Check if mount worked (MUST USE SUDO to read root mount)
+        if [ -z "$(sudo ls -A mnt)" ]; then
             echo "      ❌ ERROR: Mount failed or empty image!"
             sudo fusermount -uz "mnt"
             continue
         fi
 
-        # Copy with Permissions (sudo cp -a)
+        # 3. Copy with Permissions
         sudo cp -a "mnt/." "${part}_dump/"
-        sudo chown -R $(whoami) "${part}_dump" # Reclaim ownership for editing
+        sudo chown -R $(whoami) "${part}_dump" # Give ownership back to builder
         
-        # [FIXED]: Unmount with sudo
         sudo fusermount -uz "mnt"
         rm "$IMAGES_DIR/${part}.img"
         
         DUMP_DIR="${part}_dump"
 
         # -----------------------------
-        # A. DEBLOATER (PACKAGE NAME EDITION)
+        # A. DEBLOATER
         # -----------------------------
         echo "      🗑️  Debloating by Package Name..."
-        
-        # Create temp list for grep
         echo "$BLOAT_LIST" | tr ' ' '\n' | grep -v "^\s*$" > "$TEMP_DIR/bloat_target_list.txt"
-
-        # Find all APKs
         find "$DUMP_DIR" -type f -name "*.apk" | while read apk_file; do
-            # Read internal package name
             pkg_name=$(aapt dump badging "$apk_file" 2>/dev/null | grep "package: name=" | cut -d"'" -f2)
-
             if [ ! -z "$pkg_name" ]; then
                 if grep -Fxq "$pkg_name" "$TEMP_DIR/bloat_target_list.txt"; then
                     app_dir=$(dirname "$apk_file")
@@ -238,7 +223,7 @@ for part in $LOGICALS; do
         done
 
         # -----------------------------
-        # B. GAPPS & PERMISSIONS INJECTION
+        # B. GAPPS & PERMISSIONS
         # -----------------------------
         if [ "$part" == "product" ] && [ -d "$GITHUB_WORKSPACE/gapps_src" ]; then
             echo "      🔵 Injecting GApps into Product..."
@@ -247,7 +232,6 @@ for part in $LOGICALS; do
             PRIV_ROOT=$(find "$DUMP_DIR" -type d -name "priv-app" -print -quit)
             ETC_ROOT=$(find "$DUMP_DIR" -type d -name "etc" -print -quit)
             
-            # --- 1. APP INJECTION HELPER ---
             install_gapp_logic() {
                 local app_list="$1"
                 local target_root="$2"
@@ -276,14 +260,10 @@ for part in $LOGICALS; do
             install_gapp_logic "$PRODUCT_PRIV" "$PRIV_ROOT" "priv-app"
             install_gapp_logic "$PRODUCT_APP" "$APP_ROOT" "app"
 
-            # --- 2. PERMISSIONS INJECTION (XMLs) ---
             if [ ! -z "$ETC_ROOT" ] && [ -d "$GITHUB_WORKSPACE/permissions" ]; then
                 echo "      -> Injecting Permissions XMLs..."
-                
-                # A. Standard Permissions (product/etc/permissions/)
                 TARGET_PERM_DIR="$ETC_ROOT/permissions"
                 mkdir -p "$TARGET_PERM_DIR"
-                
                 for xml in $PERM_FILE_LIST; do
                     local src_xml="$GITHUB_WORKSPACE/permissions/$xml"
                     if [ -f "$src_xml" ]; then
@@ -295,13 +275,10 @@ for part in $LOGICALS; do
                     fi
                 done
 
-                # B. Default Permissions (product/etc/default-permissions/)
                 TARGET_DEF_DIR="$ETC_ROOT/default-permissions"
                 mkdir -p "$TARGET_DEF_DIR"
-                
                 local def_xml="default-permissions-google.xml"
                 local src_def="$GITHUB_WORKSPACE/permissions/$def_xml"
-                
                 if [ -f "$src_def" ]; then
                     cp "$src_def" "$TARGET_DEF_DIR/"
                     chmod 644 "$TARGET_DEF_DIR/$def_xml"
@@ -353,7 +330,6 @@ for part in $LOGICALS; do
         # -----------------------------
         find "$DUMP_DIR" -name "build.prop" | while read prop; do echo "$PROPS_CONTENT" >> "$prop"; done
         
-        # VERIFY BEFORE REPACKING
         if [ "$part" == "product" ]; then
              COUNT=$(find "$DUMP_DIR" -name "GoogleTTS.apk" | wc -l)
              if [ "$COUNT" -gt 0 ]; then
@@ -363,7 +339,6 @@ for part in $LOGICALS; do
              fi
         fi
         
-        # USE SUDO TO REPACK
         sudo mkfs.erofs -zlz4 "$SUPER_DIR/${part}.img" "$DUMP_DIR"
         sudo rm -rf "$DUMP_DIR"
     fi
