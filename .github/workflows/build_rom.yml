@@ -15,10 +15,8 @@ jobs:
       - name: ⬇️ Checkout Repo
         uses: actions/checkout@v4
 
-      # -------------------------------------------------
-      # Free disk space (CRITICAL for payload + super.img)
-      # -------------------------------------------------
-      - name: 🗑️ Free Disk Space
+      # 1. CRITICAL: Frees up ~30GB of space so the build doesn't crash
+      - name: 🗑️ Free Disk Space (Ubuntu)
         uses: jlumbroso/free-disk-space@main
         with:
           tool-cache: true
@@ -29,64 +27,45 @@ jobs:
           docker-images: true
           swap-storage: true
 
-      # -------------------------------------------------
-      # Environment setup (MATCHES mod.sh REQUIREMENTS)
-      # -------------------------------------------------
-      - name: 🛠️ Setup Build Environment
+      - name: 🛠️ Setup Environment
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            python3 python3-pip \
-            zip unzip \
-            aria2 jq \
-            erofs-utils fuse3 \
-            lz4 \
-            openjdk-17-jdk \
-            aapt apksigner
+          sudo apt-get install -y python3 python3-pip zip unzip aria2 jq erofs-utils
+          chmod +x bin/*
 
-          # Optional tools dir safety
-          mkdir -p bin
-          chmod +x bin/* || true
-
-      # -------------------------------------------------
-      # Run Modder Engine
-      # -------------------------------------------------
       - name: 🚀 Run Modder Engine
         id: build
         env:
+          # Passes your secrets to the script
           PIXELDRAIN_KEY: ${{ secrets.PIXELDRAIN_KEY }}
         run: |
-          set -e
-          bash mod.sh "${{ github.event.client_payload.rom_url }}" | tee build.log
-
-          LINK=$(grep -oE "https://pixeldrain.com/u/[A-Za-z0-9]+" build.log | tail -n 1)
-
+          # Run script and save logs
+          bash mod.sh "${{ github.event.client_payload.rom_url }}" > build.log 2>&1
+          
+          # Check for PixelDrain link in logs
+          LINK=$(grep "https://pixeldrain.com" build.log | tail -n 1)
+          
           if [ -z "$LINK" ]; then
-            echo "❌ No download link found"
+            echo "❌ No download link found. Build failed."
             exit 1
           fi
 
           echo "DOWNLOAD_LINK=$LINK" >> $GITHUB_ENV
 
-      # -------------------------------------------------
-      # Success notification
-      # -------------------------------------------------
       - name: ✅ Notify Success
         if: success()
         run: |
           curl -s -X POST https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage \
           -d chat_id=${{ secrets.CHAT_ID }} \
           -d parse_mode=Markdown \
-          -d text="✅ *Build Complete!*%0A%0A📦 [Download Here](${{ env.DOWNLOAD_LINK }})"
+          -d text="✅ *Build Complete!* %0A%0A📦 [Download Here](${{ env.DOWNLOAD_LINK }})"
 
-      # -------------------------------------------------
-      # Failure debugging
-      # -------------------------------------------------
-      - name: 🔍 Dump Build Logs
+      # --- DEBUGGING ---
+      - name: 🔍 Show Error Logs
         if: failure()
         run: |
-          echo "::error::Build Failed"
-          cat build.log || true
+          echo "::error::Build Failed! Dumping logs below:"
+          cat build.log
 
       - name: ❌ Notify Failure
         if: failure()
