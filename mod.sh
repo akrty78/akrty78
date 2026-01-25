@@ -40,12 +40,38 @@ cn.wps.moffice_eng.xiaomi.lite com.miui.tsmclient com.unionpay.tsmservice.mi com
 com.android.vending com.miui.fm com.miui.voiceassistProxy
 "
 
-# --- APPS & PROPS (UPDATED PER REQUEST) ---
+# --- APPS CONFIGURATION ---
 # Standard /product/app/
 PRODUCT_APP="SoundPickerGoogle MiuiBiometric LatinImeGoogle GoogleTTS GooglePartnerSetup GeminiShell"
 
 # Privileged /product/priv-app/
 PRODUCT_PRIV="Wizard Velvet Phonesky MIUIPackageInstaller GoogleRestore GooglePartnerSetup Assistant AndroidAutoStub"
+
+# --- PERMISSIONS CONFIGURATION ---
+# Source folder in your repo: permissions/
+PERM_FILE_LIST="
+cn.google.services.xml
+com.android.vending.xml
+com.google.android.apps.googleassistant.xml
+com.google.android.googlequicksearchbox.xml
+com.google.android.setupwizard.xml
+cross_device_services.xml
+gemini_shell.xml
+google-initial-package-stopped-states.xml
+google-staged-installer-whitelist.xml
+google.xml
+google_build.xml
+google_exclusives_enable.xml
+initial-package-stopped-states-aosp.xml
+microsoft.xml
+preinstalled-packages-platform-overlays.xml
+preinstalled-packages-platform-telephony-product.xml
+privapp-permissions-deviceintegrationservice.xml
+privapp-permissions-gms-international-product.xml
+privapp-permissions-microsoft-product.xml
+privapp-permissions-miui-product.xml
+split-permissions-google.xml
+"
 
 PROPS_CONTENT='
 ro.miui.support_super_clipboard=1
@@ -216,15 +242,16 @@ for part in $LOGICALS; do
         done
 
         # -----------------------------
-        # B. GAPPS INJECTION & PERMISSIONS (INTEGRATED)
+        # B. GAPPS & PERMISSIONS INJECTION
         # -----------------------------
         if [ "$part" == "product" ] && [ -d "$GITHUB_WORKSPACE/gapps_src" ]; then
             echo "      🔵 Injecting GApps into Product..."
             
             APP_ROOT=$(find "$DUMP_DIR" -type d -name "app" -print -quit)
             PRIV_ROOT=$(find "$DUMP_DIR" -type d -name "priv-app" -print -quit)
+            ETC_ROOT=$(find "$DUMP_DIR" -type d -name "etc" -print -quit)
             
-            # --- HELPER FUNCTION FOR INJECTION ---
+            # --- 1. APP INJECTION HELPER ---
             install_gapp_logic() {
                 local app_list="$1"
                 local target_root="$2"
@@ -240,17 +267,10 @@ for part in $LOGICALS; do
                     
                     if [ -f "$src_apk" ]; then
                         local dest_path="$target_root/$app"
-                        
-                        # 1. Create specific folder for the app
                         mkdir -p "$dest_path"
-                        
-                        # 2. Copy the APK
                         cp "$src_apk" "$dest_path/${app}.apk"
-                        
-                        # 3. Set Permissions (0755 Dir, 0644 File)
                         chmod 755 "$dest_path"
                         chmod 644 "$dest_path/${app}.apk"
-                        
                         echo "          + Installed $type_label: $app"
                     else
                         echo "          ! Missing Source: $app"
@@ -258,29 +278,44 @@ for part in $LOGICALS; do
                 done
             }
 
-            # Install Priv-Apps
-            echo "      -> Processing Priv-Apps..."
             install_gapp_logic "$PRODUCT_PRIV" "$PRIV_ROOT" "priv-app"
-
-            # Install Standard Apps
-            echo "      -> Processing Standard Apps..."
             install_gapp_logic "$PRODUCT_APP" "$APP_ROOT" "app"
 
-            # Permissions XMLs
-            ETC_DIR=$(find "$DUMP_DIR" -type d -name "etc" -print -quit)
-            if [ ! -z "$ETC_DIR" ]; then
-                if [ -d "$GITHUB_WORKSPACE/permissions" ]; then
-                    find "$GITHUB_WORKSPACE/permissions" -maxdepth 1 -name "*.xml" -exec cp {} "$ETC_DIR/permissions/" \; 2>/dev/null
-                fi
-                DEF_PERM_SRC="$GITHUB_WORKSPACE/permissions/default-permissions/default-permissions-google.xml"
-                if [ -f "$DEF_PERM_SRC" ]; then
-                    mkdir -p "$ETC_DIR/default-permissions"
-                    cp "$DEF_PERM_SRC" "$ETC_DIR/default-permissions/"
-                fi
-                # Copy any XMLs found in gapps source
-                find "$GITHUB_WORKSPACE/gapps_src" -name "*.xml" | while read xml; do
-                    [ -d "$ETC_DIR/sysconfig" ] && cp "$xml" "$ETC_DIR/sysconfig/" 2>/dev/null
+            # --- 2. PERMISSIONS INJECTION (XMLs) ---
+            if [ ! -z "$ETC_ROOT" ] && [ -d "$GITHUB_WORKSPACE/permissions" ]; then
+                echo "      -> Injecting Permissions XMLs..."
+                
+                # A. Standard Permissions (product/etc/permissions/)
+                TARGET_PERM_DIR="$ETC_ROOT/permissions"
+                mkdir -p "$TARGET_PERM_DIR"
+                
+                for xml in $PERM_FILE_LIST; do
+                    # We look for the file in mainrepo/permissions/
+                    local src_xml="$GITHUB_WORKSPACE/permissions/$xml"
+                    
+                    if [ -f "$src_xml" ]; then
+                        cp "$src_xml" "$TARGET_PERM_DIR/"
+                        chmod 644 "$TARGET_PERM_DIR/$xml"
+                        echo "          + Perm: $xml"
+                    else
+                        echo "          ⚠️  Missing Perm XML: $xml"
+                    fi
                 done
+
+                # B. Default Permissions (product/etc/default-permissions/)
+                TARGET_DEF_DIR="$ETC_ROOT/default-permissions"
+                mkdir -p "$TARGET_DEF_DIR"
+                
+                local def_xml="default-permissions-google.xml"
+                local src_def="$GITHUB_WORKSPACE/permissions/$def_xml"
+                
+                if [ -f "$src_def" ]; then
+                    cp "$src_def" "$TARGET_DEF_DIR/"
+                    chmod 644 "$TARGET_DEF_DIR/$def_xml"
+                    echo "          + Default Perm: $def_xml"
+                else
+                    echo "          ⚠️  Missing Default Perm XML: $def_xml"
+                fi
             fi
         fi
 
