@@ -28,7 +28,7 @@
     of a dedicated device, etc. This file contains only the latter exceptions.
     Fixed permissions cannot be controlled by the user and need a special
     approval. Typically these are to ensure either legally mandated functions
-    or the app is considered a part of the OS.
+    or the app is considered a part of thee OS.
 -->
 
 <exceptions>
