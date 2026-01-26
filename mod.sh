@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - ROOT POWER EDITION v29
-#  (Fix: Blindly Follow User's Patching Guide - No Regex Magic)
+#  NEXDROID GOONER - ROOT POWER EDITION v30
+#  (Fix: Implements User's 5-Part Patching Guide Exactly)
 # =========================================================
 
 set +e 
@@ -102,7 +102,7 @@ install_gapp_logic() {
     done
 }
 
-# --- EMBEDDED PYTHON PATCHER (STRICT USER LOGIC) ---
+# --- EMBEDDED PYTHON PATCHER (The 5-Part Logic) ---
 cat <<'EOF' > "$BIN_DIR/kaorios_patcher.py"
 import os
 import sys
@@ -115,10 +115,10 @@ def patch_file(file_path, target_method_re, code_to_insert, position, search_ter
     with open(file_path, 'r') as f:
         content = f.read()
     
-    # 1. Find Method
+    # 1. Find Method (Multi-line regex)
     method_match = re.search(target_method_re, content, re.MULTILINE | re.DOTALL)
     if not method_match:
-        print(f"   [FAIL] Method not found: {target_method_re[:50]}")
+        print(f"   [FAIL] Method not found in {os.path.basename(file_path)}")
         return False
 
     method_start = method_match.start()
@@ -134,36 +134,26 @@ def patch_file(file_path, target_method_re, code_to_insert, position, search_ter
     # 2. Apply Patch
     # A. Below .registers
     if position == 'registers':
-        # Simple regex to find .registers [num] or .locals [num]
-        reg_match = re.search(r'(\.registers|\.locals)\s+\d+', method_body)
+        reg_match = re.search(r'\.(registers|locals)\s+\d+', method_body)
         if reg_match:
             idx = reg_match.end()
             new_body = method_body[:idx] + "\n" + code_to_insert + method_body[idx:]
         else:
-            print("   [FAIL] .registers not found in method.")
+            print("   [FAIL] .registers not found.")
             return False
 
-    # B. Below specific search string
+    # B. Below specific search string (Robust)
     elif position == 'below_search' and search_term:
-        # Strict string finding (no regex escape needed if we do simple string find, 
-        # but to match loose spaces we normalize)
-        
-        # Clean up both body and search term to ignore multiple spaces
-        clean_body = re.sub(r'\s+', ' ', method_body)
-        clean_term = re.sub(r'\s+', ' ', search_term)
-        
-        # Find index in clean version, then map back? Too complex.
-        # Let's try direct Regex with escaped string but \s+ for spaces
-        
-        # Construct a regex from the user's string: escape it, then replace space with \s+
-        magic_regex = re.escape(search_term).replace(r'\ ', r'\s+')
-        search_match = re.search(magic_regex, method_body)
+        # Create regex to match the search term, allowing flexible whitespace
+        # Escape special chars, then replace space with \s+
+        search_re = re.escape(search_term).replace(r'\ ', r'\s+')
+        search_match = re.search(search_re, method_body)
         
         if search_match:
             idx = search_match.end()
             new_body = method_body[:idx] + "\n" + code_to_insert + method_body[idx:]
         else:
-            print(f"   [FAIL] Search string not found: '{search_term}'")
+            print(f"   [FAIL] String not found: '{search_term}'")
             return False
 
     # 3. Save
@@ -173,9 +163,9 @@ def patch_file(file_path, target_method_re, code_to_insert, position, search_ter
     print(f"   [OK] Patched: {os.path.basename(file_path)}")
     return True
 
-# --- PAYLOADS ---
+# --- PAYLOADS (Flattened to single-line where possible) ---
 
-# [PART 1] ApplicationPackageManager
+# [PART 1]
 p1_code = """
     invoke-static {}, Landroid/app/ActivityThread;->currentPackageName()Ljava/lang/String;
     move-result-object v0
@@ -196,19 +186,17 @@ p1_code = """
     :cond_kaori_override
 """
 
-# [PART 2] Instrumentation
+# [PART 2 & 3]
 p2_code = "    invoke-static {p1}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriProps(Landroid/content/Context;)V"
-
-# [PART 3] Instrumentation
 p3_code = "    invoke-static {p3}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriProps(Landroid/content/Context;)V"
 
-# [PART 4] KeyStore2
+# [PART 4]
 p4_code = """
     invoke-static {v0}, Lcom/android/internal/util/kaorios/KaoriKeyboxHooks;->KaoriGetKeyEntry(Landroid/system/keystore2/KeyEntryResponse;)Landroid/system/keystore2/KeyEntryResponse;
     move-result-object v0
 """
 
-# [PART 5] AndroidKeyStoreSpi
+# [PART 5]
 p5_code_1 = "    invoke-static {}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriGetCertificateChain()V"
 p5_code_2 = """
     invoke-static {v3}, Lcom/android/internal/util/kaorios/KaoriKeyboxHooks;->KaoriGetCertificateChain([Ljava/security/cert/Certificate;)[Ljava/security/cert/Certificate;
@@ -221,7 +209,6 @@ for r, d, f in os.walk(root_dir):
     # 1. ApplicationPackageManager
     if 'ApplicationPackageManager.smali' in f:
         path = os.path.join(r, 'ApplicationPackageManager.smali')
-        # Method: hasSystemFeature(Ljava/lang/String;I)Z
         meth = r'hasSystemFeature\(Ljava/lang/String;I\)Z'
         patch_file(path, meth, p1_code, 'registers')
 
@@ -229,13 +216,15 @@ for r, d, f in os.walk(root_dir):
     if 'Instrumentation.smali' in f:
         path = os.path.join(r, 'Instrumentation.smali')
         
-        # Method 1: newApplication(Class, Context)
+        # Method 1
         meth1 = r'newApplication\(Ljava/lang/Class;Landroid/content/Context;\)Landroid/app/Application;'
+        # STRICT Search Term from instructions
         search1 = r'invoke-virtual {v0, p1}, Landroid/app/Application;->attach(Landroid/content/Context;)V'
         patch_file(path, meth1, p2_code, 'below_search', search1)
         
-        # Method 2: newApplication(ClassLoader, String, Context)
+        # Method 2
         meth2 = r'newApplication\(Ljava/lang/ClassLoader;Ljava/lang/String;Landroid/content/Context;\)Landroid/app/Application;'
+        # STRICT Search Term
         search2 = r'invoke-virtual {v0, p3}, Landroid/app/Application;->attach(Landroid/content/Context;)V'
         patch_file(path, meth2, p3_code, 'below_search', search2)
 
@@ -243,6 +232,7 @@ for r, d, f in os.walk(root_dir):
     if 'KeyStore2.smali' in f:
         path = os.path.join(r, 'KeyStore2.smali')
         meth = r'getKeyEntry\(Landroid/system/keystore2/KeyDescriptor;\)Landroid/system/keystore2/KeyEntryResponse;'
+        # STRICT Search Term
         search = r'check-cast v0, Landroid/system/keystore2/KeyEntryResponse;'
         patch_file(path, meth, p4_code, 'below_search', search)
 
@@ -251,7 +241,7 @@ for r, d, f in os.walk(root_dir):
         path = os.path.join(r, 'AndroidKeyStoreSpi.smali')
         meth = r'engineGetCertificateChain\(Ljava/lang/String;\)\[Ljava/security/cert/Certificate;'
         
-        # Hook 1: Below .registers
+        # Hook 1: Below registers
         patch_file(path, meth, p5_code_1, 'registers')
         
         # Hook 2: Below specific line
