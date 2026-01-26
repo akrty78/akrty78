@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - ROOT POWER EDITION v27
-#  (Fix: New Patching Logic + Smart Register Matching)
+#  NEXDROID GOONER - ROOT POWER EDITION v28
+#  (Fix: Auto-Detect Registers for KeyStore + Looser Regex)
 # =========================================================
 
 set +e 
@@ -102,13 +102,13 @@ install_gapp_logic() {
     done
 }
 
-# --- EMBEDDED PYTHON PATCHER (Part 1-5 Implemented) ---
+# --- EMBEDDED PYTHON PATCHER (v28: Dynamic Registers) ---
 cat <<'EOF' > "$BIN_DIR/kaorios_patcher.py"
 import os
 import sys
 import re
 
-def patch_file(file_path, target_method_re, code_to_insert, position, search_term_re=None):
+def patch_file(file_path, target_method_re, code_template, position, search_term_re=None):
     if not os.path.exists(file_path):
         return False
     
@@ -118,7 +118,7 @@ def patch_file(file_path, target_method_re, code_to_insert, position, search_ter
     # 1. Find Method
     method_match = re.search(target_method_re, content, re.MULTILINE | re.DOTALL)
     if not method_match:
-        print(f"   [FAIL] Method not found: {target_method_re}")
+        print(f"   [FAIL] Method not found: {target_method_re[:50]}...")
         return False
 
     method_start = method_match.start()
@@ -132,23 +132,33 @@ def patch_file(file_path, target_method_re, code_to_insert, position, search_ter
     new_body = method_body
     
     # 2. Apply Patch
-    # Case A: Below .registers
+    
+    # Case A: Below .registers (Looser Regex)
     if position == 'registers':
-        reg_match = re.search(r'^\s*\.(registers|locals)\s+\d+', method_body, re.MULTILINE)
+        # Removed '^' anchor to match even if indented
+        reg_match = re.search(r'\.(registers|locals)\s+\d+', method_body)
         if reg_match:
             idx = reg_match.end()
-            new_body = method_body[:idx] + "\n" + code_to_insert + method_body[idx:]
+            # No dynamic registers needed for this case based on your input
+            new_body = method_body[:idx] + "\n" + code_template + method_body[idx:]
         else:
             print("   [FAIL] .registers not found.")
             return False
 
-    # Case B: Below Search Term
+    # Case B: Below Search Term (With Register Capture)
     elif position == 'below_search' and search_term_re:
-        # We clean spaces to make matching easier
         search_match = re.search(search_term_re, method_body)
         if search_match:
             idx = search_match.end()
-            new_body = method_body[:idx] + "\n" + code_to_insert + method_body[idx:]
+            
+            # Dynamic Register Replacement
+            # If the search regex captured a group (like the register name), replace it in the code
+            final_code = code_template
+            if search_match.groups():
+                captured_reg = search_match.group(1)
+                final_code = final_code.replace("{REG}", captured_reg)
+            
+            new_body = method_body[:idx] + "\n" + final_code + method_body[idx:]
         else:
             print(f"   [FAIL] Search term '{search_term_re}' not found.")
             return False
@@ -161,6 +171,7 @@ def patch_file(file_path, target_method_re, code_to_insert, position, search_ter
     return True
 
 # --- PAYLOADS ---
+
 # PART 1: ApplicationPackageManager
 p1_code = """
     invoke-static {}, Landroid/app/ActivityThread;->currentPackageName()Ljava/lang/String;
@@ -186,10 +197,10 @@ p1_code = """
 p2_code = "    invoke-static {p1}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriProps(Landroid/content/Context;)V"
 p3_code = "    invoke-static {p3}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriProps(Landroid/content/Context;)V"
 
-# PART 4: KeyStore2
+# PART 4: KeyStore2 (Uses {REG} placeholder)
 p4_code = """
-    invoke-static {v0}, Lcom/android/internal/util/kaorios/KaoriKeyboxHooks;->KaoriGetKeyEntry(Landroid/system/keystore2/KeyEntryResponse;)Landroid/system/keystore2/KeyEntryResponse;
-    move-result-object v0
+    invoke-static {{REG}}, Lcom/android/internal/util/kaorios/KaoriKeyboxHooks;->KaoriGetKeyEntry(Landroid/system/keystore2/KeyEntryResponse;)Landroid/system/keystore2/KeyEntryResponse;
+    move-result-object {REG}
 """
 
 # PART 5: AndroidKeyStoreSpi
@@ -214,22 +225,23 @@ for r, d, f in os.walk(root_dir):
         
         # Method 1
         meth1 = r'newApplication\(Ljava/lang/Class;Landroid/content/Context;\)Landroid/app/Application;'
-        # Search: invoke-virtual {v0, p1}, ...->attach(...)
         search1 = r'invoke-virtual\s+\{v0,\s*p1\},\s*Landroid/app/Application;->attach\(Landroid/content/Context;\)V'
         patch_file(path, meth1, p2_code, 'below_search', search1)
         
         # Method 2
         meth2 = r'newApplication\(Ljava/lang/ClassLoader;Ljava/lang/String;Landroid/content/Context;\)Landroid/app/Application;'
-        # Search: invoke-virtual {v0, p3}, ...->attach(...)
         search2 = r'invoke-virtual\s+\{v0,\s*p3\},\s*Landroid/app/Application;->attach\(Landroid/content/Context;\)V'
         patch_file(path, meth2, p3_code, 'below_search', search2)
 
-    # [PART 4] KeyStore2
+    # [PART 4] KeyStore2 - AUTO-DETECT REGISTER
     if 'KeyStore2.smali' in f:
         path = os.path.join(r, 'KeyStore2.smali')
         meth = r'getKeyEntry\(Landroid/system/keystore2/KeyDescriptor;\)Landroid/system/keystore2/KeyEntryResponse;'
-        # Search: check-cast v0, Landroid/system/keystore2/KeyEntryResponse;
-        search = r'check-cast\s+v0,\s+Landroid/system/keystore2/KeyEntryResponse;'
+        
+        # Search for: check-cast [ANY_REGISTER], ...KeyEntryResponse;
+        # We capture the register ([vp]\d+) in group 1
+        search = r'check-cast\s+([vp]\d+),\s+Landroid/system/keystore2/KeyEntryResponse;'
+        
         patch_file(path, meth, p4_code, 'below_search', search)
 
     # [PART 5] AndroidKeyStoreSpi
@@ -241,7 +253,6 @@ for r, d, f in os.walk(root_dir):
         patch_file(path, meth, p5_code_1, 'registers')
         
         # Hook 2: Below 'aput-object v2, v3, v4'
-        # We use regex to match ANY registers (v0-v9, p0-p9) just in case
         search = r'aput-object\s+[vp]\d+,\s*[vp]\d+,\s*[vp]\d+'
         patch_file(path, meth, p5_code_2, 'below_search', search)
 EOF
@@ -397,7 +408,7 @@ for part in $LOGICALS; do
             RAW_PATH=$(find "$DUMP_DIR" -name "framework.jar" -type f | head -n 1)
             FW_JAR=$(readlink -f "$RAW_PATH")
             
-            if [ ! -z "$FW_JAR" ] && [ -f "$KAORIOS_DIR/classes.dex" ]; then
+            if [ ! -z "$FW_JAR" ] && [ -s "$KAORIOS_DIR/classes.dex" ]; then
                 echo "         -> Target: $FW_JAR"
                 cp "$FW_JAR" "${FW_JAR}.bak"
                 
