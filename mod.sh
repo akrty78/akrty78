@@ -452,4 +452,80 @@ for part in $LOGICALS; do
                 done
             fi
             apktool b "prov_temp" -o "$PROV_APK" > /dev/null 2>&1
-            
+            rm -rf "prov_temp"
+        else
+            echo "      ⚠️ Provision.apk NOT FOUND in $part."
+        fi
+
+        # F. REPACK
+        find "$DUMP_DIR" -name "build.prop" | while read prop; do echo "$PROPS_CONTENT" >> "$prop"; done
+        sudo mkfs.erofs -zlz4 "$SUPER_DIR/${part}.img" "$DUMP_DIR"
+        sudo rm -rf "$DUMP_DIR"
+    fi
+done
+
+# =========================================================
+#  6. PACKAGING
+# =========================================================
+echo "📦  Creating Merged Pack..."
+PACK_DIR="$OUTPUT_DIR/Final_Pack"
+mkdir -p "$PACK_DIR/super" "$PACK_DIR/images"
+
+SUPER_TARGETS="system system_ext product mi_ext vendor odm system_dlkm vendor_dlkm"
+for img in $SUPER_TARGETS; do
+    if [ -f "$SUPER_DIR/${img}.img" ]; then
+        mv "$SUPER_DIR/${img}.img" "$PACK_DIR/super/"
+    elif [ -f "$IMAGES_DIR/${img}.img" ]; then
+        mv "$IMAGES_DIR/${img}.img" "$PACK_DIR/super/"
+    fi
+done
+
+find "$IMAGES_DIR" -maxdepth 1 -type f -name "*.img" -exec mv {} "$PACK_DIR/images/" \;
+
+cat <<'EOF' > "$PACK_DIR/flash_rom.bat"
+@echo off
+echo ========================================
+echo      NEXDROID FLASHER
+echo ========================================
+fastboot set_active a
+echo [1/3] Flashing Firmware...
+for %%f in (images\*.img) do fastboot flash %%~nf "%%f"
+echo [2/3] Flashing Super Partitions...
+for %%f in (super\*.img) do fastboot flash %%~nf "%%f"
+echo [3/3] Wiping Data...
+fastboot erase userdata
+fastboot reboot
+pause
+EOF
+
+cd "$PACK_DIR"
+SUPER_ZIP="ota-nexdroid-${OS_VER}_${DEVICE_CODE}_${ANDROID_VER}.zip"
+echo "   > Zipping: $SUPER_ZIP"
+7z a -tzip -mx1 -mmt=$(nproc) "$SUPER_ZIP" . > /dev/null
+mv "$SUPER_ZIP" "$OUTPUT_DIR/"
+
+# =========================================================
+#  7. UPLOAD
+# =========================================================
+echo "☁️  Uploading..."
+cd "$OUTPUT_DIR"
+
+upload() {
+    local file=$1; [ ! -f "$file" ] && return
+    echo "   ⬆️ Uploading $file..."
+    if [ -z "$PIXELDRAIN_KEY" ]; then
+        LINK=$(curl -s -T "$file" "https://pixeldrain.com/api/file/" | jq -r '"https://pixeldrain.com/u/" + .id')
+    else
+        LINK=$(curl -s -T "$file" -u :$PIXELDRAIN_KEY "https://pixeldrain.com/api/file/" | jq -r '"https://pixeldrain.com/u/" + .id')
+    fi
+    [ ! -z "$LINK" ] && [ "$LINK" != "null" ] && echo "$LINK" || echo "Upload Failed"
+}
+
+LINK_ZIP=$(upload "$SUPER_ZIP")
+
+if [ ! -z "$TELEGRAM_TOKEN" ]; then
+    MSG="✅ *Build Done!*
+📱 *Device:* $DEVICE_CODE
+📦 [ROM Zip]($LINK_ZIP)"
+    curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" -d chat_id="$CHAT_ID" -d parse_mode="Markdown" -d text="$MSG" > /dev/null
+fi
