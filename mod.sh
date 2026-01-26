@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - ROOT POWER EDITION v10
-#  (Feature: Direct Injection of Lock Wallpaper to Theme Default)
+#  NEXDROID GOONER - ROOT POWER EDITION v11
+#  (Fixed: default-permissions-google.xml injection path)
 # =========================================================
 
 set +e 
@@ -36,7 +36,7 @@ echo "   > Target:  ota-nexdroid-${OS_VER}_${DEVICE_CODE}_${ANDROID_VER}.zip"
 
 # --- CONFIGURATION ---
 GAPPS_LINK="https://drive.google.com/file/d/1soDPsc9dhdXbuHLSx4t2L3u7x0fOlx_8/view?usp=drive_link"
-# [UPDATED] NexPackage Link
+# NexPackage Link
 NEX_PACKAGE_LINK="https://drive.google.com/file/d/1y2-7qEk_wkjLdkz93ydq1ReMLlCY5Deu/view?usp=sharing"
 LAUNCHER_REPO="Mods-Center/HyperOS-Launcher"
 
@@ -264,58 +264,61 @@ for part in $LOGICALS; do
         fi
 
         # -----------------------------
-        # D. NEXPACKAGE INJECTION (DIRECT)
+        # D. NEXPACKAGE INJECTION (FIXED)
         # -----------------------------
         if [ "$part" == "product" ] && [ -d "$GITHUB_WORKSPACE/nex_pkg" ]; then
             echo "      📦 Injecting NexPackage Assets..."
             
             # Define Targets
             PERM_DIR="$DUMP_DIR/etc/permissions"
+            DEF_PERM_DIR="$DUMP_DIR/etc/default-permissions"
             OVERLAY_DIR="$DUMP_DIR/overlay"
             MEDIA_DIR="$DUMP_DIR/media"
             THEME_DIR="$DUMP_DIR/media/theme/default"
             
-            # Create Directories
-            mkdir -p "$PERM_DIR" "$OVERLAY_DIR" "$MEDIA_DIR" "$THEME_DIR"
+            # Create Directories (Ensure default-permissions exists!)
+            mkdir -p "$PERM_DIR" "$DEF_PERM_DIR" "$OVERLAY_DIR" "$MEDIA_DIR" "$THEME_DIR"
             
-            # 1. Inject Permissions (XMLs)
-            echo "         -> Injecting XMLs..."
-            cp "$GITHUB_WORKSPACE/nex_pkg/"*.xml "$PERM_DIR/" 2>/dev/null
-            if ls "$PERM_DIR/"*.xml 1> /dev/null 2>&1; then
-                chmod 644 "$PERM_DIR/"*.xml
-                echo "            + Permissions installed."
+            # 1. Inject Default Permissions (Special Handling)
+            # We strictly move default-permissions-google.xml to its specific folder
+            DEF_XML_NAME="default-permissions-google.xml"
+            DEF_XML_SRC="$GITHUB_WORKSPACE/nex_pkg/$DEF_XML_NAME"
+            
+            if [ -f "$DEF_XML_SRC" ]; then
+                 cp "$DEF_XML_SRC" "$DEF_PERM_DIR/"
+                 chmod 644 "$DEF_PERM_DIR/$DEF_XML_NAME"
+                 echo "         ✅ $DEF_XML_NAME -> etc/default-permissions/"
             else
-                 echo "            ! No XMLs found."
+                 echo "         ⚠️  Missing $DEF_XML_NAME in zip!"
             fi
 
-            # 2. Inject Overlays (APKs)
+            # 2. Inject General Permissions (All other XMLs)
+            echo "         -> Injecting Standard XMLs..."
+            # Find all XMLs EXCEPT the default permissions one, and copy them to etc/permissions
+            find "$GITHUB_WORKSPACE/nex_pkg" -maxdepth 1 -name "*.xml" ! -name "$DEF_XML_NAME" -exec cp {} "$PERM_DIR/" \;
+            chmod 644 "$PERM_DIR/"*.xml 2>/dev/null || true
+
+            # 3. Inject Overlays (APKs)
             echo "         -> Injecting Overlays..."
             cp "$GITHUB_WORKSPACE/nex_pkg/"*.apk "$OVERLAY_DIR/" 2>/dev/null
             if ls "$OVERLAY_DIR/"*.apk 1> /dev/null 2>&1; then
                 chmod 644 "$OVERLAY_DIR/"*.apk
-                echo "            + Overlays installed."
-            else
-                 echo "            ! No APKs found."
             fi
 
-            # 3. Inject Bootanimation
+            # 4. Inject Bootanimation
             echo "         -> Injecting Bootanimation..."
             BOOT_SRC="$GITHUB_WORKSPACE/nex_pkg/bootanimation.zip"
             if [ -f "$BOOT_SRC" ]; then
                  cp "$BOOT_SRC" "$MEDIA_DIR/bootanimation.zip"
                  chmod 644 "$MEDIA_DIR/bootanimation.zip"
-                 echo "            + Bootanimation installed."
             fi
 
-            # 4. Inject Lock Wallpaper (Strictly to Theme Default)
+            # 5. Inject Lock Wallpaper
             echo "         -> Injecting Lock Wallpaper..."
             LOCK_SRC="$GITHUB_WORKSPACE/nex_pkg/lock_wallpaper"
             if [ -f "$LOCK_SRC" ]; then
                  cp "$LOCK_SRC" "$THEME_DIR/lock_wallpaper"
                  chmod 644 "$THEME_DIR/lock_wallpaper"
-                 echo "            + Lock Wallpaper installed."
-            else
-                 echo "            ! lock_wallpaper not found in zip."
             fi
         fi
         
