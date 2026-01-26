@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - ROOT POWER EDITION v32
-#  (Fix: Handle 'whitelist' keyword & Strict Register Hook)
+#  NEXDROID GOONER - ROOT POWER EDITION v34
+#  (Fix: KeyStore2 Return-Hook + Reverted Provision Logic)
 # =========================================================
 
 set +e 
@@ -102,7 +102,7 @@ install_gapp_logic() {
     done
 }
 
-# --- EMBEDDED PYTHON PATCHER (v32: Strict Method Headers) ---
+# --- EMBEDDED PYTHON PATCHER (Fixed KeyStore2 Logic) ---
 cat <<'EOF' > "$BIN_DIR/kaorios_patcher.py"
 import os
 import sys
@@ -115,13 +115,10 @@ def patch_file(file_path, target_method_re, code_to_insert, position, search_ter
     with open(file_path, 'r') as f:
         content = f.read()
     
-    # 1. Find Method (Multi-line)
-    # Matches .method [anything] methodName(args)Ret
+    # 1. Find Method
     method_match = re.search(target_method_re, content, re.MULTILINE | re.DOTALL)
     if not method_match:
-        print(f"   [FAIL] Method not found in {os.path.basename(file_path)}")
-        # Debug: Print signature we tried
-        print(f"          Tried matching: {target_method_re[:50]}...")
+        print(f"   [FAIL] Method not found: {target_method_re[:50]}...")
         return False
 
     method_start = method_match.start()
@@ -135,8 +132,9 @@ def patch_file(file_path, target_method_re, code_to_insert, position, search_ter
     new_body = method_body
     
     # 2. Apply Patch
+    
+    # Case A: Below .registers
     if position == 'registers':
-        # Find .registers OR .locals followed by number
         reg_match = re.search(r'\.(registers|locals)\s+\d+', method_body)
         if reg_match:
             idx = reg_match.end()
@@ -145,20 +143,24 @@ def patch_file(file_path, target_method_re, code_to_insert, position, search_ter
             print("   [FAIL] .registers not found.")
             return False
 
+    # Case B: Below Search Term
     elif position == 'below_search' and search_term_re:
         search_match = re.search(search_term_re, method_body)
         if search_match:
             idx = search_match.end()
-            
-            final_code = code_to_insert
-            # Auto-replace register placeholders if captured
-            if search_match.groups():
-                reg_name = search_match.group(1)
-                final_code = final_code.replace("{REG}", reg_name)
-            
-            new_body = method_body[:idx] + "\n" + final_code + method_body[idx:]
+            new_body = method_body[:idx] + "\n" + code_to_insert + method_body[idx:]
         else:
-            print(f"   [FAIL] Search term regex not matched: {search_term_re}")
+            print(f"   [FAIL] Search term not found: {search_term_re}")
+            return False
+
+    # Case C: ABOVE Search Term (New for KeyStore2)
+    elif position == 'above_search' and search_term_re:
+        search_match = re.search(search_term_re, method_body)
+        if search_match:
+            idx = search_match.start()
+            new_body = method_body[:idx] + code_to_insert + "\n" + method_body[idx:]
+        else:
+            print(f"   [FAIL] Search term not found: {search_term_re}")
             return False
 
     # 3. Save
@@ -171,7 +173,6 @@ def patch_file(file_path, target_method_re, code_to_insert, position, search_ter
 # --- PAYLOADS ---
 
 # [PART 1] AppPkgMgr
-# Matches: .method [flags] hasSystemFeature(String, int) boolean
 p1_code = """
     invoke-static {}, Landroid/app/ActivityThread;->currentPackageName()Ljava/lang/String;
     move-result-object v0
@@ -196,10 +197,10 @@ p1_code = """
 p2_code = "    invoke-static {p1}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriProps(Landroid/content/Context;)V"
 p3_code = "    invoke-static {p3}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriProps(Landroid/content/Context;)V"
 
-# [PART 4] KeyStore2
+# [PART 4] KeyStore2 (Updated: Above return-object v0)
 p4_code = """
-    invoke-static {{REG}}, Lcom/android/internal/util/kaorios/KaoriKeyboxHooks;->KaoriGetKeyEntry(Landroid/system/keystore2/KeyEntryResponse;)Landroid/system/keystore2/KeyEntryResponse;
-    move-result-object {REG}
+    invoke-static {v0}, Lcom/android/internal/util/kaorios/KaoriKeyboxHooks;->KaoriGetKeyEntry(Landroid/system/keystore2/KeyEntryResponse;)Landroid/system/keystore2/KeyEntryResponse;
+    move-result-object v0
 """
 
 # [PART 5] AndroidKeyStoreSpi
@@ -215,9 +216,7 @@ for r, d, f in os.walk(root_dir):
     # 1. ApplicationPackageManager
     if 'ApplicationPackageManager.smali' in f:
         path = os.path.join(r, 'ApplicationPackageManager.smali')
-        # Robust Regex for Method Header:
-        # Matches: .method [any flags] hasSystemFeature(Ljava/lang/String;I)Z
-        meth = r'\.method.*hasSystemFeature\(Ljava/lang/String;I\)Z'
+        meth = r'hasSystemFeature\(Ljava/lang/String;I\)Z'
         patch_file(path, meth, p1_code, 'registers')
 
     # 2. Instrumentation
@@ -231,12 +230,15 @@ for r, d, f in os.walk(root_dir):
         search2 = r'invoke-virtual\s+\{v0,\s*p3\},\s*Landroid/app/Application;->attach\(Landroid/content/Context;\)V'
         patch_file(path, meth2, p3_code, 'below_search', search2)
 
-    # 3. KeyStore2
+    # 3. KeyStore2 - UPDATED LOGIC (Hook above Return)
     if 'KeyStore2.smali' in f:
         path = os.path.join(r, 'KeyStore2.smali')
         meth = r'getKeyEntry\(Landroid/system/keystore2/KeyDescriptor;\)Landroid/system/keystore2/KeyEntryResponse;'
-        search = r'check-cast\s+([vp]\d+),\s+Landroid/system/keystore2/KeyEntryResponse;'
-        patch_file(path, meth, p4_code, 'below_search', search)
+        
+        # New Search: return-object v0
+        search = r'return-object\s+v0'
+        # New Position: above_search
+        patch_file(path, meth, p4_code, 'above_search', search)
 
     # 4. AndroidKeyStoreSpi
     if 'AndroidKeyStoreSpi.smali' in f:
@@ -263,7 +265,7 @@ pip3 install gdown --break-system-packages
 # =========================================================
 #  3. DOWNLOAD RESOURCES
 # =========================================================
-# 1. SETUP APKTOOL 2.12.1 (Strict)
+# 1. SETUP APKTOOL 2.12.1
 if [ ! -f "$BIN_DIR/apktool.jar" ]; then
     echo "⬇️  Fetching Apktool v2.12.1..."
     APKTOOL_URL="https://github.com/iBotPeaches/Apktool/releases/download/v2.12.1/apktool_2.12.1.jar"
@@ -272,7 +274,8 @@ if [ ! -f "$BIN_DIR/apktool.jar" ]; then
     if [ -f "$BIN_DIR/apktool.jar" ]; then
         echo "   ✅ Installed Apktool v2.12.1"
         echo '#!/bin/bash' > "$BIN_DIR/apktool"
-        echo 'java -jar "'"$BIN_DIR"'/apktool.jar" "$@"' >> "$BIN_DIR/apktool"
+        # [RAM BOOST] -Xmx4G prevents freeze
+        echo 'java -Xmx4G -jar "'"$BIN_DIR"'/apktool.jar" "$@"' >> "$BIN_DIR/apktool"
         chmod +x "$BIN_DIR/apktool"
     else
         echo "   ❌ Failed to download Apktool! Falling back to apt..."
@@ -355,7 +358,6 @@ for part in $LOGICALS; do
     if [ -f "$IMAGES_DIR/${part}.img" ]; then
         echo "   -> Modding $part..."
         
-        # Absolute Path Logic
         DUMP_DIR="$GITHUB_WORKSPACE/${part}_dump"
         mkdir -p "$DUMP_DIR" "mnt"
         
@@ -404,12 +406,13 @@ for part in $LOGICALS; do
                 echo "         -> Target: $FW_JAR"
                 cp "$FW_JAR" "${FW_JAR}.bak"
                 
-                # Clean & Decompile
                 rm -rf "$TEMP_DIR/framework.jar" "$TEMP_DIR/fw_src" "$TEMP_DIR/framework_patched.jar"
-                echo "         -> Decompiling..."
+                echo "         -> Decompiling (No Res)..."
                 cp "$FW_JAR" "$TEMP_DIR/framework.jar"
                 cd "$TEMP_DIR"
-                if ! apktool d -r -f "framework.jar" -o "fw_src" >/dev/null 2>&1; then
+                
+                # [FIX] Added -r (no resources) and timeout for speed/stability
+                if ! timeout 5m apktool d -r -f "framework.jar" -o "fw_src" >/dev/null 2>&1; then
                     echo "         ❌ ERROR: Decompile Failed!"
                 else
                     # Patch
@@ -423,9 +426,6 @@ for part in $LOGICALS; do
                     if [ -f "framework_patched.jar" ]; then
                         # Inject Dex
                         echo "         -> Injecting classes.dex..."
-                        DEX_SIZE=$(du -h "$KAORIOS_DIR/classes.dex" | cut -f1)
-                        echo "            (Dex Source: $DEX_SIZE)"
-                        
                         DEX_COUNT=$(unzip -l "framework_patched.jar" | grep "classes.*\.dex" | wc -l)
                         NEXT_DEX="classes$((DEX_COUNT + 1)).dex"
                         if [ "$DEX_COUNT" -eq 1 ]; then NEXT_DEX="classes2.dex"; fi
@@ -475,11 +475,10 @@ for part in $LOGICALS; do
             fi
         fi
         
-        # E. PROVISION PATCHER
-        echo "      🔎 Searching for Provision.apk in $DUMP_DIR..."
+        # E. PROVISION PATCHER (Reverted to simple in-loop check)
         PROV_APK=$(find "$DUMP_DIR" -name "Provision.apk" -type f -print -quit)
         if [ ! -z "$PROV_APK" ]; then
-            echo "      🔧 Patching Provision.apk found at: $PROV_APK"
+            echo "      🔧 Patching Provision.apk..."
             apktool d -r -f "$PROV_APK" -o "prov_temp" > /dev/null 2>&1
             if [ -d "prov_temp" ]; then
                 grep -r "IS_INTERNATIONAL_BUILD" "prov_temp" | cut -d: -f1 | while read smali_file; do
@@ -488,8 +487,6 @@ for part in $LOGICALS; do
             fi
             apktool b "prov_temp" -o "$PROV_APK" > /dev/null 2>&1
             rm -rf "prov_temp"
-        else
-            echo "      ⚠️ Provision.apk NOT FOUND in $part."
         fi
 
         # F. REPACK
