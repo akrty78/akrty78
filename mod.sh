@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - ROOT POWER EDITION v20
-#  (FINAL: Embedded Patcher + Verified Smali Hooks)
+#  NEXDROID GOONER - ROOT POWER EDITION v21
+#  (Fix: Build Safety Checks, Restore on Fail, Verbose Logs)
 # =========================================================
 
 set +e 
@@ -89,7 +89,7 @@ persist.sys.kaorios=kousei
 ro.control_privapp_permissions=
 '
 
-# --- EMBEDDED PYTHON PATCHER (Matches your manual guide exactly) ---
+# --- EMBEDDED PYTHON PATCHER (Improved Matching) ---
 cat <<EOF > "$BIN_DIR/kaorios_patcher.py"
 import os
 import sys
@@ -105,11 +105,15 @@ def patch_file(file_path, target_method, code_to_insert, position='below', searc
     in_method = False
     patched = False
     
+    # Strip spaces for robust matching
+    clean_target = target_method.replace(" ", "")
+
     for line in lines:
         new_lines.append(line)
+        clean_line = line.strip().replace(" ", "")
         
-        # Method Detection
-        if line.strip().startswith('.method') and target_method in line:
+        # Method Detection (Loose Match)
+        if line.strip().startswith('.method') and clean_target in clean_line:
             in_method = True
             continue
         if line.strip().startswith('.end method'):
@@ -123,7 +127,7 @@ def patch_file(file_path, target_method, code_to_insert, position='below', searc
             
             # Logic for 'above search string'
             elif position == 'above' and search_str and search_str in line:
-                # Insert BEFORE the current line (which was just appended, so pop it)
+                # Insert BEFORE the current line
                 curr = new_lines.pop()
                 new_lines.append(code_to_insert + '\n')
                 new_lines.append(curr)
@@ -210,7 +214,6 @@ for r, d, f in os.walk(root_dir):
     if 'AndroidKeyStoreSpi.smali' in f:
         path = os.path.join(r, 'AndroidKeyStoreSpi.smali')
         patch_file(path, 'engineGetCertificateChain(Ljava/lang/String;)[Ljava/security/cert/Certificate;', code_cert_1, 'below_registers')
-        # We search for the unique aput-object line to insert below it
         patch_file(path, 'engineGetCertificateChain(Ljava/lang/String;)[Ljava/security/cert/Certificate;', code_cert_2, 'below', 'aput-object v2, v3, v4')
 EOF
 
@@ -308,7 +311,7 @@ for part in $LOGICALS; do
     if [ -f "$IMAGES_DIR/${part}.img" ]; then
         echo "   -> Modding $part..."
         
-        # [FIXED] Use ABSOLUTE PATH for DUMP_DIR to avoid losing it during cd
+        # Absolute Path Logic
         DUMP_DIR="$GITHUB_WORKSPACE/${part}_dump"
         mkdir -p "$DUMP_DIR" "mnt"
         
@@ -374,33 +377,51 @@ for part in $LOGICALS; do
             if [ ! -z "$FW_JAR" ] && [ -s "$KAORIOS_DIR/classes.dex" ]; then
                 echo "         -> Target: $FW_JAR"
                 
+                # Create Backup
+                cp "$FW_JAR" "${FW_JAR}.bak"
+                
                 # 1. DECOMPILE & PATCH
-                echo "         -> Decompiling & Patching Smali (This takes time)..."
+                echo "         -> Decompiling..."
+                
+                # Move FW to Temp
                 cp "$FW_JAR" "$TEMP_DIR/framework.jar"
                 cd "$TEMP_DIR"
-                apktool d -r -f "framework.jar" -o "fw_src" >/dev/null 2>&1
                 
-                # RUN THE EMBEDDED PATCHER
-                python3 "$BIN_DIR/kaorios_patcher.py" "fw_src"
-                
-                # RECOMPILE
-                echo "         -> Recompiling..."
-                apktool b -c "fw_src" -o "framework_patched.jar" >/dev/null 2>&1
-                
-                # 2. INJECT DEX
-                echo "         -> Injecting classes.dex..."
-                DEX_COUNT=$(unzip -l "framework_patched.jar" | grep "classes.*\.dex" | wc -l)
-                NEXT_DEX="classes$((DEX_COUNT + 1)).dex"
-                if [ "$DEX_COUNT" -eq 1 ]; then NEXT_DEX="classes2.dex"; fi
-                
-                cp "$KAORIOS_DIR/classes.dex" "$NEXT_DEX"
-                zip -u -q "framework_patched.jar" "$NEXT_DEX"
-                
-                # Move Back (Using Absolute Path)
-                mv "framework_patched.jar" "$FW_JAR"
+                # Decompile (Silent unless error)
+                if ! apktool d -r -f "framework.jar" -o "fw_src" >/dev/null 2>&1; then
+                    echo "         ❌ ERROR: Decompile Failed!"
+                else
+                    # Run Embedded Python Patcher
+                    echo "         -> Running Patcher..."
+                    python3 "$BIN_DIR/kaorios_patcher.py" "fw_src"
+                    
+                    # Recompile
+                    echo "         -> Recompiling..."
+                    # Capture output to log for debugging
+                    apktool b -c "fw_src" -o "framework_patched.jar" > build_log.txt 2>&1
+                    
+                    if [ -f "framework_patched.jar" ]; then
+                        # 2. INJECT DEX
+                        echo "         -> Injecting classes.dex..."
+                        DEX_COUNT=$(unzip -l "framework_patched.jar" | grep "classes.*\.dex" | wc -l)
+                        NEXT_DEX="classes$((DEX_COUNT + 1)).dex"
+                        if [ "$DEX_COUNT" -eq 1 ]; then NEXT_DEX="classes2.dex"; fi
+                        
+                        cp "$KAORIOS_DIR/classes.dex" "$NEXT_DEX"
+                        zip -u -q "framework_patched.jar" "$NEXT_DEX"
+                        
+                        # Move Back (Using Absolute Path)
+                        mv "framework_patched.jar" "$FW_JAR"
+                        echo "            ✅ Framework Patched & Injected!"
+                    else
+                        echo "         ❌ ERROR: Recompile Failed!"
+                        echo "         📜 LOGS (Last 20 lines):"
+                        tail -n 20 build_log.txt
+                        echo "         🔄 RESTORING ORIGINAL FRAMEWORK..."
+                        cp "${FW_JAR}.bak" "$FW_JAR"
+                    fi
+                fi
                 cd "$GITHUB_WORKSPACE"
-                
-                echo "            ✅ Framework Patched & Injected!"
             else
                 echo "         ! SKIPPED: framework.jar not found or classes.dex missing."
             fi
@@ -440,99 +461,4 @@ for part in $LOGICALS; do
             fi
         fi
         
-        # -----------------------------
-        # E. SMALI PATCHER (Provision.apk)
-        # -----------------------------
-        PROV_APK=$(find "$DUMP_DIR" -name "Provision.apk" -type f -print -quit)
-        if [ ! -z "$PROV_APK" ]; then
-            echo "      🔧 Patching Provision.apk..."
-            apktool d -r -f "$PROV_APK" -o "prov_temp" > /dev/null 2>&1
-            if [ -d "prov_temp" ]; then
-                grep -r "IS_INTERNATIONAL_BUILD" "prov_temp" | cut -d: -f1 | while read smali_file; do
-                    sed -i -E 's/sget-boolean ([vp][0-9]+), Lmiui\/os\/Build;->IS_INTERNATIONAL_BUILD:Z/const\/4 \1, 0x1/g' "$smali_file"
-                done
-            fi
-            apktool b "prov_temp" -o "$PROV_APK" > /dev/null 2>&1
-            rm -rf "prov_temp"
-        fi
-
-        # -----------------------------
-        # F. REPACK
-        # -----------------------------
-        find "$DUMP_DIR" -name "build.prop" | while read prop; do echo "$PROPS_CONTENT" >> "$prop"; done
-        
-        # Use explicit path
-        sudo mkfs.erofs -zlz4 "$SUPER_DIR/${part}.img" "$DUMP_DIR"
-        sudo rm -rf "$DUMP_DIR"
-    fi
-done
-
-# =========================================================
-#  6. MERGED PACKAGING & COMPRESSION
-# =========================================================
-echo "📦  Creating Merged Pack..."
-PACK_DIR="$OUTPUT_DIR/Final_Pack"
-mkdir -p "$PACK_DIR/super" "$PACK_DIR/images"
-
-# 1. MOVE SUPER PARTITIONS
-SUPER_TARGETS="system system_ext product mi_ext vendor odm system_dlkm vendor_dlkm"
-for img in $SUPER_TARGETS; do
-    if [ -f "$SUPER_DIR/${img}.img" ]; then
-        mv "$SUPER_DIR/${img}.img" "$PACK_DIR/super/"
-    elif [ -f "$IMAGES_DIR/${img}.img" ]; then
-        mv "$IMAGES_DIR/${img}.img" "$PACK_DIR/super/"
-    fi
-done
-
-# 2. MOVE REMAINING FIRMWARE
-find "$IMAGES_DIR" -maxdepth 1 -type f -name "*.img" -exec mv {} "$PACK_DIR/images/" \;
-
-# 3. CREATE FLASH SCRIPT
-cat <<EOF > "$PACK_DIR/flash_rom.bat"
-@echo off
-echo ========================================
-echo      NEXDROID FLASHER
-echo ========================================
-fastboot set_active a
-echo [1/3] Flashing Firmware...
-for %%f in (images\*.img) do fastboot flash %%~nf "%%f"
-echo [2/3] Flashing Super Partitions...
-for %%f in (super\*.img) do fastboot flash %%~nf "%%f"
-echo [3/3] Wiping Data...
-fastboot erase userdata
-fastboot reboot
-pause
-EOF
-
-# 4. ZIP IT UP
-cd "$PACK_DIR"
-SUPER_ZIP="ota-nexdroid-${OS_VER}_${DEVICE_CODE}_${ANDROID_VER}.zip"
-echo "   > Zipping: $SUPER_ZIP"
-7z a -tzip -mx1 -mmt=$(nproc) "$SUPER_ZIP" . > /dev/null
-mv "$SUPER_ZIP" "$OUTPUT_DIR/"
-
-# =========================================================
-#  7. UPLOAD
-# =========================================================
-echo "☁️  Uploading..."
-cd "$OUTPUT_DIR"
-
-upload() {
-    local file=$1; [ ! -f "$file" ] && return
-    echo "   ⬆️ Uploading $file..."
-    if [ -z "$PIXELDRAIN_KEY" ]; then
-        LINK=$(curl -s -T "$file" "https://pixeldrain.com/api/file/" | jq -r '"https://pixeldrain.com/u/" + .id')
-    else
-        LINK=$(curl -s -T "$file" -u :$PIXELDRAIN_KEY "https://pixeldrain.com/api/file/" | jq -r '"https://pixeldrain.com/u/" + .id')
-    fi
-    [ ! -z "$LINK" ] && [ "$LINK" != "null" ] && echo "$LINK" || echo "Upload Failed"
-}
-
-LINK_ZIP=$(upload "$SUPER_ZIP")
-
-if [ ! -z "$TELEGRAM_TOKEN" ]; then
-    MSG="✅ *Build Done!*
-📱 *Device:* $DEVICE_CODE
-📦 [ROM Zip]($LINK_ZIP)"
-    curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" -d chat_id="$CHAT_ID" -d parse_mode="Markdown" -d text="$MSG" > /dev/null
-fi
+        # ------------------
