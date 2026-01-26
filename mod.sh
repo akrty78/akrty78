@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID MANAGER - ROOT POWER EDITION v38
-#  (Fix: Pro Notifications + Inline Download Button)
+#  NEXDROID MANAGER - ROOT POWER EDITION v41
+#  (Fix: External apk-modder.sh Permission + Settings.apk Logic)
 # =========================================================
 
 set +e 
@@ -102,20 +102,18 @@ install_gapp_logic() {
     done
 }
 
-# --- EMBEDDED PYTHON PATCHER (v35 Verified Logic) ---
+# --- EMBEDDED PYTHON PATCHER (Framework) ---
 cat <<'EOF' > "$BIN_DIR/kaorios_patcher.py"
 import os
 import sys
 import re
 
 def patch_file(file_path, target_method_re, code_to_insert, position, search_term_re=None):
-    if not os.path.exists(file_path):
-        return False
+    if not os.path.exists(file_path): return False
     
     with open(file_path, 'r') as f:
         content = f.read()
     
-    # 1. Find Method
     method_match = re.search(target_method_re, content, re.MULTILINE | re.DOTALL)
     if not method_match:
         print(f"   [FAIL] Method not found: {target_method_re[:50]}")
@@ -131,9 +129,6 @@ def patch_file(file_path, target_method_re, code_to_insert, position, search_ter
     method_body = content[method_start:method_end]
     new_body = method_body
     
-    # 2. Apply Patch
-    
-    # Case A: Below .registers
     if position == 'registers':
         reg_match = re.search(r'\.(registers|locals)\s+\d+', method_body)
         if reg_match:
@@ -143,23 +138,19 @@ def patch_file(file_path, target_method_re, code_to_insert, position, search_ter
             print("   [FAIL] .registers not found.")
             return False
 
-    # Case B: Below Search Term
     elif position == 'below_search' and search_term_re:
         search_match = re.search(search_term_re, method_body)
         if search_match:
             idx = search_match.end()
-            
             final_code = code_to_insert
             if search_match.groups():
                 reg_name = search_match.group(1)
                 final_code = final_code.replace("{REG}", reg_name)
-            
             new_body = method_body[:idx] + "\n" + final_code + method_body[idx:]
         else:
             print(f"   [FAIL] Search term not found: {search_term_re}")
             return False
 
-    # Case C: ABOVE Search Term
     elif position == 'above_search' and search_term_re:
         search_match = re.search(search_term_re, method_body)
         if search_match:
@@ -169,16 +160,12 @@ def patch_file(file_path, target_method_re, code_to_insert, position, search_ter
             print(f"   [FAIL] Search term not found: {search_term_re}")
             return False
 
-    # 3. Save
     new_content = content[:method_start] + new_body + content[method_end:]
-    with open(file_path, 'w') as f:
-        f.write(new_content)
+    with open(file_path, 'w') as f: f.write(new_content)
     print(f"   [OK] Patched: {os.path.basename(file_path)}")
     return True
 
-# --- PAYLOADS ---
-
-# [PART 1] AppPkgMgr
+# PAYLOADS
 p1_code = """
     invoke-static {}, Landroid/app/ActivityThread;->currentPackageName()Ljava/lang/String;
     move-result-object v0
@@ -198,18 +185,12 @@ p1_code = """
     return p0
     :cond_kaori_override
 """
-
-# [PART 2 & 3] Instrumentation
 p2_code = "    invoke-static {p1}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriProps(Landroid/content/Context;)V"
 p3_code = "    invoke-static {p3}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriProps(Landroid/content/Context;)V"
-
-# [PART 4] KeyStore2
 p4_code = """
     invoke-static {v0}, Lcom/android/internal/util/kaorios/KaoriKeyboxHooks;->KaoriGetKeyEntry(Landroid/system/keystore2/KeyEntryResponse;)Landroid/system/keystore2/KeyEntryResponse;
     move-result-object v0
 """
-
-# [PART 5] AndroidKeyStoreSpi
 p5_code_1 = "    invoke-static {}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriGetCertificateChain()V"
 p5_code_2 = """
     invoke-static {v3}, Lcom/android/internal/util/kaorios/KaoriKeyboxHooks;->KaoriGetCertificateChain([Ljava/security/cert/Certificate;)[Ljava/security/cert/Certificate;
@@ -218,37 +199,30 @@ p5_code_2 = """
 
 root_dir = sys.argv[1]
 for r, d, f in os.walk(root_dir):
-    
-    # 1. ApplicationPackageManager (RESTORED FIX)
     if 'ApplicationPackageManager.smali' in f:
         path = os.path.join(r, 'ApplicationPackageManager.smali')
         meth = r'\.method.*hasSystemFeature\(Ljava/lang/String;I\)Z'
         patch_file(path, meth, p1_code, 'registers')
 
-    # 2. Instrumentation
     if 'Instrumentation.smali' in f:
         path = os.path.join(r, 'Instrumentation.smali')
         meth1 = r'newApplication\(Ljava/lang/Class;Landroid/content/Context;\)Landroid/app/Application;'
         search1 = r'invoke-virtual\s+\{v0,\s*p1\},\s*Landroid/app/Application;->attach\(Landroid/content/Context;\)V'
         patch_file(path, meth1, p2_code, 'below_search', search1)
-        
         meth2 = r'newApplication\(Ljava/lang/ClassLoader;Ljava/lang/String;Landroid/content/Context;\)Landroid/app/Application;'
         search2 = r'invoke-virtual\s+\{v0,\s*p3\},\s*Landroid/app/Application;->attach\(Landroid/content/Context;\)V'
         patch_file(path, meth2, p3_code, 'below_search', search2)
 
-    # 3. KeyStore2
     if 'KeyStore2.smali' in f:
         path = os.path.join(r, 'KeyStore2.smali')
         meth = r'getKeyEntry\(Landroid/system/keystore2/KeyDescriptor;\)Landroid/system/keystore2/KeyEntryResponse;'
         search = r'return-object\s+v0'
         patch_file(path, meth, p4_code, 'above_search', search)
 
-    # 4. AndroidKeyStoreSpi (Strict)
     if 'AndroidKeyStoreSpi.smali' in f:
         path = os.path.join(r, 'AndroidKeyStoreSpi.smali')
         meth = r'engineGetCertificateChain\(Ljava/lang/String;\)\[Ljava/security/cert/Certificate;'
         patch_file(path, meth, p5_code_1, 'registers')
-        
         search = r'aput-object\s+v2,\s*v3,\s*v4'
         patch_file(path, meth, p5_code_2, 'below_search', search)
 EOF
@@ -263,6 +237,11 @@ export PATH="$BIN_DIR:$PATH"
 sudo apt-get update -y
 sudo apt-get install -y python3 python3-pip erofs-utils erofsfuse jq aria2 zip unzip liblz4-tool p7zip-full aapt git openjdk-17-jre-headless
 pip3 install gdown --break-system-packages
+
+# [CRITICAL FIX] Ensure your repo's script is executable
+if [ -f "apk-modder.sh" ]; then
+    chmod +x apk-modder.sh
+fi
 
 # =========================================================
 #  3. DOWNLOAD RESOURCES
@@ -488,7 +467,16 @@ for part in $LOGICALS; do
             rm -rf "prov_temp"
         fi
 
-        # F. REPACK
+        # F. INTEGRATED APK MODDER (Settings.apk)
+        # We rely on 'apk-modder.sh' being present in the repo
+        SETTINGS_APK=$(find "$DUMP_DIR" -name "Settings.apk" -type f -print -quit)
+        if [ ! -z "$SETTINGS_APK" ]; then
+             echo "      💊 Modding Settings.apk (AI Support)..."
+             # Execute the pre-existing script
+             ./apk-modder.sh "$SETTINGS_APK" "com/android/settings/InternalDeviceUtils" "isAiSupported" "true"
+        fi
+
+        # G. REPACK
         find "$DUMP_DIR" -name "build.prop" | while read prop; do echo "$PROPS_CONTENT" >> "$prop"; done
         sudo mkfs.erofs -zlz4 "$SUPER_DIR/${part}.img" "$DUMP_DIR"
         sudo rm -rf "$DUMP_DIR"
@@ -557,7 +545,7 @@ LINK_ZIP=$(upload "$SUPER_ZIP")
 # 2. Check Link Validity
 if [ -z "$LINK_ZIP" ] || [ "$LINK_ZIP" == "null" ]; then
     echo "❌ Upload Failed."
-    LINK_ZIP="https://pixeldrain.com" # Fallback to home if fail
+    LINK_ZIP="https://pixeldrain.com"
     BTN_TEXT="Upload Failed"
 else
     echo "✅ Link: $LINK_ZIP"
@@ -568,7 +556,6 @@ fi
 if [ ! -z "$TELEGRAM_TOKEN" ]; then
     BUILD_DATE=$(date +"%Y-%m-%d %H:%M")
     
-    # Construct JSON using jq for safety
     JSON_PAYLOAD=$(jq -n \
         --arg chat_id "$CHAT_ID" \
         --arg text "*NexDroid Build Complete*
