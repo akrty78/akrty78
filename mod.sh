@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - ROOT POWER EDITION v22
-#  (Fix: Syntax Error, Moved Functions, Safe Heredocs)
+#  NEXDROID GOONER - ROOT POWER EDITION v23
+#  (Fix: Robust Smali Patcher - Ignores Whitespace)
 # =========================================================
 
 set +e 
@@ -102,7 +102,8 @@ install_gapp_logic() {
     done
 }
 
-# --- EMBEDDED PYTHON PATCHER (Safe Heredoc) ---
+# --- EMBEDDED PYTHON PATCHER (Improved Matching Logic) ---
+# We use 'EOF' (quoted) to prevent bash variables from expanding inside the python script
 cat <<'EOF' > "$BIN_DIR/kaorios_patcher.py"
 import os
 import sys
@@ -118,13 +119,16 @@ def patch_file(file_path, target_method, code_to_insert, position='below', searc
     in_method = False
     patched = False
     
-    # Strip spaces for robust matching
+    # Pre-clean search terms (remove all spaces) for robust matching
     clean_target = target_method.replace(" ", "")
+    clean_search = search_str.replace(" ", "") if search_str else None
 
     for line in lines:
         new_lines.append(line)
+        # Create a "clean" version of the line for matching (ignores indentation/spaces)
         clean_line = line.strip().replace(" ", "")
         
+        # Method Detection
         if line.strip().startswith('.method') and clean_target in clean_line:
             in_method = True
             continue
@@ -132,15 +136,20 @@ def patch_file(file_path, target_method, code_to_insert, position='below', searc
             in_method = False
             
         if in_method and not patched:
-            if position == 'below_registers' and '.registers' in line:
+            # 1. Below Registers
+            if position == 'below_registers' and '.registers' in clean_line:
                 new_lines.append(code_to_insert + '\n')
                 patched = True
-            elif position == 'above' and search_str and search_str in line:
+            
+            # 2. Above Search String (Robust)
+            elif position == 'above' and clean_search and clean_search in clean_line:
                 curr = new_lines.pop()
                 new_lines.append(code_to_insert + '\n')
                 new_lines.append(curr)
                 patched = True
-            elif position == 'below' and search_str and search_str in line:
+                
+            # 3. Below Search String (Robust)
+            elif position == 'below' and clean_search and clean_search in clean_line:
                 new_lines.append(code_to_insert + '\n')
                 patched = True
 
@@ -151,9 +160,12 @@ def patch_file(file_path, target_method, code_to_insert, position='below', searc
         return True
     else:
         print(f"   [FAIL] Could not match target in: {os.path.basename(file_path)}")
+        # Debug info for the user
+        if 'AndroidKeyStoreSpi' in file_path or 'ApplicationPackageManager' in file_path:
+             print(f"      -> Expected (Clean): {clean_search if clean_search else clean_target}")
         return False
 
-# Payloads
+# --- PAYLOADS ---
 code_app_pkg = """
     invoke-static {}, Landroid/app/ActivityThread;->currentPackageName()Ljava/lang/String;
     move-result-object v0
@@ -173,31 +185,51 @@ code_app_pkg = """
     return p0
     :cond_kaori_override
 """
+
 code_instr = "    invoke-static {p1}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriProps(Landroid/content/Context;)V"
 code_instr_2 = "    invoke-static {p3}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriProps(Landroid/content/Context;)V"
+
 code_keystore = """
     invoke-static {v0}, Lcom/android/internal/util/kaorios/KaoriKeyboxHooks;->KaoriGetKeyEntry(Landroid/system/keystore2/KeyEntryResponse;)Landroid/system/keystore2/KeyEntryResponse;
     move-result-object v0
 """
+
 code_cert_1 = "    invoke-static {}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriGetCertificateChain()V"
 code_cert_2 = """
     invoke-static {v3}, Lcom/android/internal/util/kaorios/KaoriKeyboxHooks;->KaoriGetCertificateChain([Ljava/security/cert/Certificate;)[Ljava/security/cert/Certificate;
     move-result-object v3
 """
 
-# Execution
+# --- EXECUTION ---
 root_dir = sys.argv[1]
+
 for r, d, f in os.walk(root_dir):
+    # 1. ApplicationPackageManager
     if 'ApplicationPackageManager.smali' in f:
-        patch_file(os.path.join(r, 'ApplicationPackageManager.smali'), 'hasSystemFeature(Ljava/lang/String;I)Z', code_app_pkg, 'below_registers')
+        patch_file(os.path.join(r, 'ApplicationPackageManager.smali'), 
+                   'hasSystemFeature(Ljava/lang/String;I)Z', 
+                   code_app_pkg, 'below_registers')
+
+    # 2. Instrumentation
     if 'Instrumentation.smali' in f:
-        patch_file(os.path.join(r, 'Instrumentation.smali'), 'newApplication(Ljava/lang/Class;Landroid/content/Context;)Landroid/app/Application;', code_instr, 'above', 'return-object v0')
-        patch_file(os.path.join(r, 'Instrumentation.smali'), 'newApplication(Ljava/lang/ClassLoader;Ljava/lang/String;Landroid/content/Context;)Landroid/app/Application;', code_instr_2, 'above', 'return-object v0')
+        patch_file(os.path.join(r, 'Instrumentation.smali'), 
+                   'newApplication(Ljava/lang/Class;Landroid/content/Context;)Landroid/app/Application;', 
+                   code_instr, 'above', 'return-object v0')
+        patch_file(os.path.join(r, 'Instrumentation.smali'), 
+                   'newApplication(Ljava/lang/ClassLoader;Ljava/lang/String;Landroid/content/Context;)Landroid/app/Application;', 
+                   code_instr_2, 'above', 'return-object v0')
+
+    # 3. KeyStore2
     if 'KeyStore2.smali' in f:
-        patch_file(os.path.join(r, 'KeyStore2.smali'), 'getKeyEntry(Landroid/system/keystore2/KeyDescriptor;)Landroid/system/keystore2/KeyEntryResponse;', code_keystore, 'above', 'return-object v0')
+        patch_file(os.path.join(r, 'KeyStore2.smali'), 
+                   'getKeyEntry(Landroid/system/keystore2/KeyDescriptor;)Landroid/system/keystore2/KeyEntryResponse;', 
+                   code_keystore, 'above', 'return-object v0')
+
+    # 4. AndroidKeyStoreSpi
     if 'AndroidKeyStoreSpi.smali' in f:
         path = os.path.join(r, 'AndroidKeyStoreSpi.smali')
         patch_file(path, 'engineGetCertificateChain(Ljava/lang/String;)[Ljava/security/cert/Certificate;', code_cert_1, 'below_registers')
+        # Robust match for aput-object (ignores spacing issues)
         patch_file(path, 'engineGetCertificateChain(Ljava/lang/String;)[Ljava/security/cert/Certificate;', code_cert_2, 'below', 'aput-object v2, v3, v4')
 EOF
 
@@ -238,7 +270,7 @@ if [ ! -d "nex_pkg" ]; then
     unzip -q nex.zip -d nex_pkg && rm nex.zip
 fi
 
-# Kaorios Assets
+# Kaorios Assets (Dynamic)
 echo "⬇️  Preparing Kaorios Assets..."
 if [ ! -f "$KAORIOS_DIR/classes.dex" ]; then
     echo "   -> Fetching Release Info..."
@@ -250,6 +282,12 @@ if [ ! -f "$KAORIOS_DIR/classes.dex" ]; then
     [ ! -z "$APK_URL" ] && [ "$APK_URL" != "null" ] && wget -q -O "$KAORIOS_DIR/KaoriosToolbox.apk" "$APK_URL"
     [ ! -z "$XML_URL" ] && [ "$XML_URL" != "null" ] && wget -q -O "$KAORIOS_DIR/kaorios_perm.xml" "$XML_URL"
     [ ! -z "$DEX_URL" ] && [ "$DEX_URL" != "null" ] && wget -q -O "$KAORIOS_DIR/classes.dex" "$DEX_URL"
+fi
+
+if [ ! -s "$KAORIOS_DIR/classes.dex" ]; then
+    echo "   ⚠️ WARNING: classes.dex failed to download! Kaorios patch will be skipped."
+else
+    echo "   ✅ Kaorios assets ready."
 fi
 
 # Launcher
@@ -290,6 +328,7 @@ for part in $LOGICALS; do
     if [ -f "$IMAGES_DIR/${part}.img" ]; then
         echo "   -> Modding $part..."
         
+        # Absolute Path Logic
         DUMP_DIR="$GITHUB_WORKSPACE/${part}_dump"
         mkdir -p "$DUMP_DIR" "mnt"
         
@@ -338,23 +377,19 @@ for part in $LOGICALS; do
                 echo "         -> Target: $FW_JAR"
                 cp "$FW_JAR" "${FW_JAR}.bak"
                 
-                # Decompile
                 echo "         -> Decompiling..."
                 cp "$FW_JAR" "$TEMP_DIR/framework.jar"
                 cd "$TEMP_DIR"
                 if ! apktool d -r -f "framework.jar" -o "fw_src" >/dev/null 2>&1; then
                     echo "         ❌ ERROR: Decompile Failed!"
                 else
-                    # Patch
                     echo "         -> Running Patcher..."
                     python3 "$BIN_DIR/kaorios_patcher.py" "fw_src"
                     
-                    # Recompile
                     echo "         -> Recompiling..."
                     apktool b -c "fw_src" -o "framework_patched.jar" > build_log.txt 2>&1
                     
                     if [ -f "framework_patched.jar" ]; then
-                        # Inject Dex
                         echo "         -> Injecting classes.dex..."
                         DEX_COUNT=$(unzip -l "framework_patched.jar" | grep "classes.*\.dex" | wc -l)
                         NEXT_DEX="classes$((DEX_COUNT + 1)).dex"
@@ -417,13 +452,4 @@ for part in $LOGICALS; do
                 done
             fi
             apktool b "prov_temp" -o "$PROV_APK" > /dev/null 2>&1
-            rm -rf "prov_temp"
-        else
-            echo "      ⚠️ Provision.apk NOT FOUND in $part."
-        fi
-
-        # F. REPACK
-        find "$DUMP_DIR" -name "build.prop" | while read prop; do echo "$PROPS_CONTENT" >> "$prop"; done
-        sudo mkfs.erofs -zlz4 "$SUPER_DIR/${part}.img" "$DUMP_DIR"
-        sudo rm -rf "$DUMP_DIR"
-        
+            
