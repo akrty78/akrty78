@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - ROOT POWER EDITION v19
-#  (Feature: Embedded Python Patcher + Absolute Paths)
+#  NEXDROID GOONER - ROOT POWER EDITION v20
+#  (FINAL: Embedded Patcher + Verified Smali Hooks)
 # =========================================================
 
 set +e 
@@ -89,12 +89,10 @@ persist.sys.kaorios=kousei
 ro.control_privapp_permissions=
 '
 
-# --- EMBEDDED PYTHON PATCHER (Saves file to bin) ---
-# This script implements the Smali edits from the guide safely
+# --- EMBEDDED PYTHON PATCHER (Matches your manual guide exactly) ---
 cat <<EOF > "$BIN_DIR/kaorios_patcher.py"
 import os
 import sys
-import re
 
 def patch_file(file_path, target_method, code_to_insert, position='below', search_str=None):
     if not os.path.exists(file_path):
@@ -145,7 +143,7 @@ def patch_file(file_path, target_method, code_to_insert, position='below', searc
         print(f"   [FAIL] Could not match target in: {os.path.basename(file_path)}")
         return False
 
-# --- DEFINITIONS ---
+# --- SMALI PAYLOADS ---
 code_app_pkg = """
     invoke-static {}, Landroid/app/ActivityThread;->currentPackageName()Ljava/lang/String;
     move-result-object v0
@@ -212,6 +210,7 @@ for r, d, f in os.walk(root_dir):
     if 'AndroidKeyStoreSpi.smali' in f:
         path = os.path.join(r, 'AndroidKeyStoreSpi.smali')
         patch_file(path, 'engineGetCertificateChain(Ljava/lang/String;)[Ljava/security/cert/Certificate;', code_cert_1, 'below_registers')
+        # We search for the unique aput-object line to insert below it
         patch_file(path, 'engineGetCertificateChain(Ljava/lang/String;)[Ljava/security/cert/Certificate;', code_cert_2, 'below', 'aput-object v2, v3, v4')
 EOF
 
@@ -255,8 +254,9 @@ fi
 # Kaorios Assets (Dynamic)
 echo "⬇️  Preparing Kaorios Assets..."
 if [ ! -f "$KAORIOS_DIR/classes.dex" ]; then
-    echo "   -> Fetching Release Info..."
+    echo "   -> Fetching Latest Release Info..."
     LATEST_JSON=$(curl -s "https://api.github.com/repos/Wuang26/Kaorios-Toolbox/releases/latest")
+    
     APK_URL=$(echo "$LATEST_JSON" | jq -r '.assets[] | select(.name | contains("KaoriosToolbox") and endswith(".apk")) | .browser_download_url')
     XML_URL=$(echo "$LATEST_JSON" | jq -r '.assets[] | select(.name | endswith(".xml")) | .browser_download_url')
     DEX_URL=$(echo "$LATEST_JSON" | jq -r '.assets[] | select(.name | contains("classes") and endswith(".dex")) | .browser_download_url')
@@ -266,16 +266,20 @@ if [ ! -f "$KAORIOS_DIR/classes.dex" ]; then
     [ ! -z "$DEX_URL" ] && [ "$DEX_URL" != "null" ] && wget -q -O "$KAORIOS_DIR/classes.dex" "$DEX_URL"
 fi
 
+if [ ! -s "$KAORIOS_DIR/classes.dex" ]; then
+    echo "   ⚠️ WARNING: classes.dex failed to download! Kaorios patch will be skipped."
+else
+    echo "   ✅ Kaorios assets ready."
+fi
+
 # Launcher
-if [ ! -f "$TEMP_DIR/MiuiHome_Latest.apk" ]; then
-    LAUNCHER_URL=$(curl -s "https://api.github.com/repos/$LAUNCHER_REPO/releases/latest" | jq -r '.assets[] | select(.name | endswith(".zip")) | .browser_download_url' | head -n 1)
-    if [ ! -z "$LAUNCHER_URL" ] && [ "$LAUNCHER_URL" != "null" ]; then
-        wget -q -O l.zip "$LAUNCHER_URL"
-        unzip -q l.zip -d l_ext
-        FOUND=$(find l_ext -name "MiuiHome.apk" -type f | head -n 1)
-        [ ! -z "$FOUND" ] && mv "$FOUND" "$TEMP_DIR/MiuiHome_Latest.apk"
-        rm -rf l_ext l.zip
-    fi
+LAUNCHER_URL=$(curl -s "https://api.github.com/repos/$LAUNCHER_REPO/releases/latest" | jq -r '.assets[] | select(.name | endswith(".zip")) | .browser_download_url' | head -n 1)
+if [ ! -z "$LAUNCHER_URL" ] && [ "$LAUNCHER_URL" != "null" ]; then
+    wget -q -O l.zip "$LAUNCHER_URL"
+    unzip -q l.zip -d l_ext
+    FOUND=$(find l_ext -name "MiuiHome.apk" -type f | head -n 1)
+    [ ! -z "$FOUND" ] && mv "$FOUND" "$TEMP_DIR/MiuiHome_Latest.apk"
+    rm -rf l_ext l.zip
 fi
 
 # =========================================================
@@ -372,18 +376,14 @@ for part in $LOGICALS; do
                 
                 # 1. DECOMPILE & PATCH
                 echo "         -> Decompiling & Patching Smali (This takes time)..."
-                
-                # Move FW to Temp
                 cp "$FW_JAR" "$TEMP_DIR/framework.jar"
                 cd "$TEMP_DIR"
-                
-                # Decompile (No Resources)
                 apktool d -r -f "framework.jar" -o "fw_src" >/dev/null 2>&1
                 
-                # Run Embedded Python Patcher
+                # RUN THE EMBEDDED PATCHER
                 python3 "$BIN_DIR/kaorios_patcher.py" "fw_src"
                 
-                # Recompile
+                # RECOMPILE
                 echo "         -> Recompiling..."
                 apktool b -c "fw_src" -o "framework_patched.jar" >/dev/null 2>&1
                 
@@ -396,7 +396,7 @@ for part in $LOGICALS; do
                 cp "$KAORIOS_DIR/classes.dex" "$NEXT_DEX"
                 zip -u -q "framework_patched.jar" "$NEXT_DEX"
                 
-                # Move Back
+                # Move Back (Using Absolute Path)
                 mv "framework_patched.jar" "$FW_JAR"
                 cd "$GITHUB_WORKSPACE"
                 
@@ -461,7 +461,7 @@ for part in $LOGICALS; do
         # -----------------------------
         find "$DUMP_DIR" -name "build.prop" | while read prop; do echo "$PROPS_CONTENT" >> "$prop"; done
         
-        # Use explicit path to avoid confusion
+        # Use explicit path
         sudo mkfs.erofs -zlz4 "$SUPER_DIR/${part}.img" "$DUMP_DIR"
         sudo rm -rf "$DUMP_DIR"
     fi
