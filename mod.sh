@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - ROOT POWER EDITION v21
-#  (Fix: Build Safety Checks, Restore on Fail, Verbose Logs)
+#  NEXDROID GOONER - ROOT POWER EDITION v22
+#  (Fix: Syntax Error, Moved Functions, Safe Heredocs)
 # =========================================================
 
 set +e 
@@ -89,8 +89,21 @@ persist.sys.kaorios=kousei
 ro.control_privapp_permissions=
 '
 
-# --- EMBEDDED PYTHON PATCHER (Improved Matching) ---
-cat <<EOF > "$BIN_DIR/kaorios_patcher.py"
+# --- FUNCTIONS ---
+install_gapp_logic() {
+    local app_list="$1"; local target_root="$2"
+    for app in $app_list; do
+        local src=$(find "$GITHUB_WORKSPACE/gapps_src" -name "${app}.apk" -print -quit)
+        if [ -f "$src" ]; then
+            mkdir -p "$target_root/$app"
+            cp "$src" "$target_root/$app/${app}.apk"
+            chmod 644 "$target_root/$app/${app}.apk"
+        fi
+    done
+}
+
+# --- EMBEDDED PYTHON PATCHER (Safe Heredoc) ---
+cat <<'EOF' > "$BIN_DIR/kaorios_patcher.py"
 import os
 import sys
 
@@ -112,7 +125,6 @@ def patch_file(file_path, target_method, code_to_insert, position='below', searc
         new_lines.append(line)
         clean_line = line.strip().replace(" ", "")
         
-        # Method Detection (Loose Match)
         if line.strip().startswith('.method') and clean_target in clean_line:
             in_method = True
             continue
@@ -120,20 +132,14 @@ def patch_file(file_path, target_method, code_to_insert, position='below', searc
             in_method = False
             
         if in_method and not patched:
-            # Logic for 'below registers'
             if position == 'below_registers' and '.registers' in line:
                 new_lines.append(code_to_insert + '\n')
                 patched = True
-            
-            # Logic for 'above search string'
             elif position == 'above' and search_str and search_str in line:
-                # Insert BEFORE the current line
                 curr = new_lines.pop()
                 new_lines.append(code_to_insert + '\n')
                 new_lines.append(curr)
                 patched = True
-                
-            # Logic for 'below search string'
             elif position == 'below' and search_str and search_str in line:
                 new_lines.append(code_to_insert + '\n')
                 patched = True
@@ -147,7 +153,7 @@ def patch_file(file_path, target_method, code_to_insert, position='below', searc
         print(f"   [FAIL] Could not match target in: {os.path.basename(file_path)}")
         return False
 
-# --- SMALI PAYLOADS ---
+# Payloads
 code_app_pkg = """
     invoke-static {}, Landroid/app/ActivityThread;->currentPackageName()Ljava/lang/String;
     move-result-object v0
@@ -167,50 +173,28 @@ code_app_pkg = """
     return p0
     :cond_kaori_override
 """
-
 code_instr = "    invoke-static {p1}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriProps(Landroid/content/Context;)V"
 code_instr_2 = "    invoke-static {p3}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriProps(Landroid/content/Context;)V"
-
 code_keystore = """
     invoke-static {v0}, Lcom/android/internal/util/kaorios/KaoriKeyboxHooks;->KaoriGetKeyEntry(Landroid/system/keystore2/KeyEntryResponse;)Landroid/system/keystore2/KeyEntryResponse;
     move-result-object v0
 """
-
 code_cert_1 = "    invoke-static {}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriGetCertificateChain()V"
 code_cert_2 = """
     invoke-static {v3}, Lcom/android/internal/util/kaorios/KaoriKeyboxHooks;->KaoriGetCertificateChain([Ljava/security/cert/Certificate;)[Ljava/security/cert/Certificate;
     move-result-object v3
 """
 
-# --- EXECUTION ---
+# Execution
 root_dir = sys.argv[1]
-
-# 1. ApplicationPackageManager
 for r, d, f in os.walk(root_dir):
     if 'ApplicationPackageManager.smali' in f:
-        patch_file(os.path.join(r, 'ApplicationPackageManager.smali'), 
-                   'hasSystemFeature(Ljava/lang/String;I)Z', 
-                   code_app_pkg, 'below_registers')
-
-# 2. Instrumentation
-for r, d, f in os.walk(root_dir):
+        patch_file(os.path.join(r, 'ApplicationPackageManager.smali'), 'hasSystemFeature(Ljava/lang/String;I)Z', code_app_pkg, 'below_registers')
     if 'Instrumentation.smali' in f:
-        patch_file(os.path.join(r, 'Instrumentation.smali'), 
-                   'newApplication(Ljava/lang/Class;Landroid/content/Context;)Landroid/app/Application;', 
-                   code_instr, 'above', 'return-object v0')
-        patch_file(os.path.join(r, 'Instrumentation.smali'), 
-                   'newApplication(Ljava/lang/ClassLoader;Ljava/lang/String;Landroid/content/Context;)Landroid/app/Application;', 
-                   code_instr_2, 'above', 'return-object v0')
-
-# 3. KeyStore2
-for r, d, f in os.walk(root_dir):
+        patch_file(os.path.join(r, 'Instrumentation.smali'), 'newApplication(Ljava/lang/Class;Landroid/content/Context;)Landroid/app/Application;', code_instr, 'above', 'return-object v0')
+        patch_file(os.path.join(r, 'Instrumentation.smali'), 'newApplication(Ljava/lang/ClassLoader;Ljava/lang/String;Landroid/content/Context;)Landroid/app/Application;', code_instr_2, 'above', 'return-object v0')
     if 'KeyStore2.smali' in f:
-        patch_file(os.path.join(r, 'KeyStore2.smali'), 
-                   'getKeyEntry(Landroid/system/keystore2/KeyDescriptor;)Landroid/system/keystore2/KeyEntryResponse;', 
-                   code_keystore, 'above', 'return-object v0')
-
-# 4. AndroidKeyStoreSpi
-for r, d, f in os.walk(root_dir):
+        patch_file(os.path.join(r, 'KeyStore2.smali'), 'getKeyEntry(Landroid/system/keystore2/KeyDescriptor;)Landroid/system/keystore2/KeyEntryResponse;', code_keystore, 'above', 'return-object v0')
     if 'AndroidKeyStoreSpi.smali' in f:
         path = os.path.join(r, 'AndroidKeyStoreSpi.smali')
         patch_file(path, 'engineGetCertificateChain(Ljava/lang/String;)[Ljava/security/cert/Certificate;', code_cert_1, 'below_registers')
@@ -254,12 +238,11 @@ if [ ! -d "nex_pkg" ]; then
     unzip -q nex.zip -d nex_pkg && rm nex.zip
 fi
 
-# Kaorios Assets (Dynamic)
+# Kaorios Assets
 echo "⬇️  Preparing Kaorios Assets..."
 if [ ! -f "$KAORIOS_DIR/classes.dex" ]; then
-    echo "   -> Fetching Latest Release Info..."
+    echo "   -> Fetching Release Info..."
     LATEST_JSON=$(curl -s "https://api.github.com/repos/Wuang26/Kaorios-Toolbox/releases/latest")
-    
     APK_URL=$(echo "$LATEST_JSON" | jq -r '.assets[] | select(.name | contains("KaoriosToolbox") and endswith(".apk")) | .browser_download_url')
     XML_URL=$(echo "$LATEST_JSON" | jq -r '.assets[] | select(.name | endswith(".xml")) | .browser_download_url')
     DEX_URL=$(echo "$LATEST_JSON" | jq -r '.assets[] | select(.name | contains("classes") and endswith(".dex")) | .browser_download_url')
@@ -269,20 +252,16 @@ if [ ! -f "$KAORIOS_DIR/classes.dex" ]; then
     [ ! -z "$DEX_URL" ] && [ "$DEX_URL" != "null" ] && wget -q -O "$KAORIOS_DIR/classes.dex" "$DEX_URL"
 fi
 
-if [ ! -s "$KAORIOS_DIR/classes.dex" ]; then
-    echo "   ⚠️ WARNING: classes.dex failed to download! Kaorios patch will be skipped."
-else
-    echo "   ✅ Kaorios assets ready."
-fi
-
 # Launcher
-LAUNCHER_URL=$(curl -s "https://api.github.com/repos/$LAUNCHER_REPO/releases/latest" | jq -r '.assets[] | select(.name | endswith(".zip")) | .browser_download_url' | head -n 1)
-if [ ! -z "$LAUNCHER_URL" ] && [ "$LAUNCHER_URL" != "null" ]; then
-    wget -q -O l.zip "$LAUNCHER_URL"
-    unzip -q l.zip -d l_ext
-    FOUND=$(find l_ext -name "MiuiHome.apk" -type f | head -n 1)
-    [ ! -z "$FOUND" ] && mv "$FOUND" "$TEMP_DIR/MiuiHome_Latest.apk"
-    rm -rf l_ext l.zip
+if [ ! -f "$TEMP_DIR/MiuiHome_Latest.apk" ]; then
+    LAUNCHER_URL=$(curl -s "https://api.github.com/repos/$LAUNCHER_REPO/releases/latest" | jq -r '.assets[] | select(.name | endswith(".zip")) | .browser_download_url' | head -n 1)
+    if [ ! -z "$LAUNCHER_URL" ] && [ "$LAUNCHER_URL" != "null" ]; then
+        wget -q -O l.zip "$LAUNCHER_URL"
+        unzip -q l.zip -d l_ext
+        FOUND=$(find l_ext -name "MiuiHome.apk" -type f | head -n 1)
+        [ ! -z "$FOUND" ] && mv "$FOUND" "$TEMP_DIR/MiuiHome_Latest.apk"
+        rm -rf l_ext l.zip
+    fi
 fi
 
 # =========================================================
@@ -311,11 +290,9 @@ for part in $LOGICALS; do
     if [ -f "$IMAGES_DIR/${part}.img" ]; then
         echo "   -> Modding $part..."
         
-        # Absolute Path Logic
         DUMP_DIR="$GITHUB_WORKSPACE/${part}_dump"
         mkdir -p "$DUMP_DIR" "mnt"
         
-        # Mount & Copy
         sudo erofsfuse "$IMAGES_DIR/${part}.img" "mnt"
         if [ -z "$(sudo ls -A mnt)" ]; then
             echo "      ❌ ERROR: Mount failed!"
@@ -327,9 +304,7 @@ for part in $LOGICALS; do
         sudo fusermount -uz "mnt"
         rm "$IMAGES_DIR/${part}.img"
 
-        # -----------------------------
         # A. DEBLOATER
-        # -----------------------------
         echo "      🗑️  Debloating..."
         echo "$BLOAT_LIST" | tr ' ' '\n' | grep -v "^\s*$" > "$TEMP_DIR/bloat_target_list.txt"
         find "$DUMP_DIR" -type f -name "*.apk" | while read apk_file; do
@@ -341,34 +316,19 @@ for part in $LOGICALS; do
             fi
         done
 
-        # -----------------------------
         # B. GAPPS INJECTION
-        # -----------------------------
         if [ "$part" == "product" ] && [ -d "$GITHUB_WORKSPACE/gapps_src" ]; then
             echo "      🔵 Injecting GApps..."
             APP_ROOT="$DUMP_DIR/app"; PRIV_ROOT="$DUMP_DIR/priv-app"
             mkdir -p "$APP_ROOT" "$PRIV_ROOT"
             
-             install_gapp_logic() {
-                local app_list="$1"; local target_root="$2"
-                for app in $app_list; do
-                    local src=$(find "$GITHUB_WORKSPACE/gapps_src" -name "${app}.apk" -print -quit)
-                    if [ -f "$src" ]; then
-                        mkdir -p "$target_root/$app"
-                        cp "$src" "$target_root/$app/${app}.apk"
-                        chmod 644 "$target_root/$app/${app}.apk"
-                    fi
-                done
-            }
             P_APP="SoundPickerGoogle MiuiBiometric LatinImeGoogle GoogleTTS GooglePartnerSetup GeminiShell"
             P_PRIV="Wizard Velvet Phonesky MIUIPackageInstaller GoogleRestore GooglePartnerSetup Assistant AndroidAutoStub"
             install_gapp_logic "$P_PRIV" "$PRIV_ROOT"
             install_gapp_logic "$P_APP" "$APP_ROOT"
         fi
 
-        # -----------------------------
-        # C. KAORIOS TOOLBOX (SYSTEM FRAMEWORK)
-        # -----------------------------
+        # C. KAORIOS TOOLBOX
         if [ "$part" == "system" ]; then
             echo "      🌸 Kaorios: Patching Framework..."
             RAW_PATH=$(find "$DUMP_DIR" -name "framework.jar" -type f | head -n 1)
@@ -376,32 +336,25 @@ for part in $LOGICALS; do
             
             if [ ! -z "$FW_JAR" ] && [ -s "$KAORIOS_DIR/classes.dex" ]; then
                 echo "         -> Target: $FW_JAR"
-                
-                # Create Backup
                 cp "$FW_JAR" "${FW_JAR}.bak"
                 
-                # 1. DECOMPILE & PATCH
+                # Decompile
                 echo "         -> Decompiling..."
-                
-                # Move FW to Temp
                 cp "$FW_JAR" "$TEMP_DIR/framework.jar"
                 cd "$TEMP_DIR"
-                
-                # Decompile (Silent unless error)
                 if ! apktool d -r -f "framework.jar" -o "fw_src" >/dev/null 2>&1; then
                     echo "         ❌ ERROR: Decompile Failed!"
                 else
-                    # Run Embedded Python Patcher
+                    # Patch
                     echo "         -> Running Patcher..."
                     python3 "$BIN_DIR/kaorios_patcher.py" "fw_src"
                     
                     # Recompile
                     echo "         -> Recompiling..."
-                    # Capture output to log for debugging
                     apktool b -c "fw_src" -o "framework_patched.jar" > build_log.txt 2>&1
                     
                     if [ -f "framework_patched.jar" ]; then
-                        # 2. INJECT DEX
+                        # Inject Dex
                         echo "         -> Injecting classes.dex..."
                         DEX_COUNT=$(unzip -l "framework_patched.jar" | grep "classes.*\.dex" | wc -l)
                         NEXT_DEX="classes$((DEX_COUNT + 1)).dex"
@@ -410,14 +363,11 @@ for part in $LOGICALS; do
                         cp "$KAORIOS_DIR/classes.dex" "$NEXT_DEX"
                         zip -u -q "framework_patched.jar" "$NEXT_DEX"
                         
-                        # Move Back (Using Absolute Path)
                         mv "framework_patched.jar" "$FW_JAR"
                         echo "            ✅ Framework Patched & Injected!"
                     else
                         echo "         ❌ ERROR: Recompile Failed!"
-                        echo "         📜 LOGS (Last 20 lines):"
                         tail -n 20 build_log.txt
-                        echo "         🔄 RESTORING ORIGINAL FRAMEWORK..."
                         cp "${FW_JAR}.bak" "$FW_JAR"
                     fi
                 fi
@@ -427,12 +377,9 @@ for part in $LOGICALS; do
             fi
         fi
 
-        # -----------------------------
-        # D. NEXPACKAGE & KAORIOS ASSETS (PRODUCT)
-        # -----------------------------
+        # D. NEXPACKAGE
         if [ "$part" == "product" ]; then
-            echo "      📦 Injecting NexPackage & Kaorios Assets..."
-            
+            echo "      📦 Injecting NexPackage Assets..."
             PERM_DIR="$DUMP_DIR/etc/permissions"
             DEF_PERM_DIR="$DUMP_DIR/etc/default-permissions"
             OVERLAY_DIR="$DUMP_DIR/overlay"
@@ -442,11 +389,9 @@ for part in $LOGICALS; do
             
             mkdir -p "$PERM_DIR" "$DEF_PERM_DIR" "$OVERLAY_DIR" "$MEDIA_DIR" "$THEME_DIR" "$KAORIOS_PRIV"
             
-            # 1. Kaorios
             [ -f "$KAORIOS_DIR/KaoriosToolbox.apk" ] && cp "$KAORIOS_DIR/KaoriosToolbox.apk" "$KAORIOS_PRIV/"
             [ -f "$KAORIOS_DIR/kaorios_perm.xml" ] && cp "$KAORIOS_DIR/kaorios_perm.xml" "$PERM_DIR/"
 
-            # 2. NexPackage
             if [ -d "$GITHUB_WORKSPACE/nex_pkg" ]; then
                 DEF_XML="default-permissions-google.xml"
                 if [ -f "$GITHUB_WORKSPACE/nex_pkg/$DEF_XML" ]; then
@@ -455,10 +400,30 @@ for part in $LOGICALS; do
                 fi
                 find "$GITHUB_WORKSPACE/nex_pkg" -maxdepth 1 -name "*.xml" ! -name "$DEF_XML" -exec cp {} "$PERM_DIR/" \;
                 cp "$GITHUB_WORKSPACE/nex_pkg/"*.apk "$OVERLAY_DIR/" 2>/dev/null
-                chmod 644 "$OVERLAY_DIR/"*.apk 2>/dev/null || true
                 [ -f "$GITHUB_WORKSPACE/nex_pkg/bootanimation.zip" ] && cp "$GITHUB_WORKSPACE/nex_pkg/bootanimation.zip" "$MEDIA_DIR/"
                 [ -f "$GITHUB_WORKSPACE/nex_pkg/lock_wallpaper" ] && cp "$GITHUB_WORKSPACE/nex_pkg/lock_wallpaper" "$THEME_DIR/"
             fi
         fi
         
-        # ------------------
+        # E. PROVISION PATCHER
+        echo "      🔎 Searching for Provision.apk in $DUMP_DIR..."
+        PROV_APK=$(find "$DUMP_DIR" -name "Provision.apk" -type f -print -quit)
+        if [ ! -z "$PROV_APK" ]; then
+            echo "      🔧 Patching Provision.apk found at: $PROV_APK"
+            apktool d -r -f "$PROV_APK" -o "prov_temp" > /dev/null 2>&1
+            if [ -d "prov_temp" ]; then
+                grep -r "IS_INTERNATIONAL_BUILD" "prov_temp" | cut -d: -f1 | while read smali_file; do
+                    sed -i -E 's/sget-boolean ([vp][0-9]+), Lmiui\/os\/Build;->IS_INTERNATIONAL_BUILD:Z/const\/4 \1, 0x1/g' "$smali_file"
+                done
+            fi
+            apktool b "prov_temp" -o "$PROV_APK" > /dev/null 2>&1
+            rm -rf "prov_temp"
+        else
+            echo "      ⚠️ Provision.apk NOT FOUND in $part."
+        fi
+
+        # F. REPACK
+        find "$DUMP_DIR" -name "build.prop" | while read prop; do echo "$PROPS_CONTENT" >> "$prop"; done
+        sudo mkfs.erofs -zlz4 "$SUPER_DIR/${part}.img" "$DUMP_DIR"
+        sudo rm -rf "$DUMP_DIR"
+        
