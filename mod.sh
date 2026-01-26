@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - ROOT POWER EDITION v26
-#  (Fix: Regex-based Multi-line Smali Patcher)
+#  NEXDROID GOONER - ROOT POWER EDITION v27
+#  (Fix: New Patching Logic + Smart Register Matching)
 # =========================================================
 
 set +e 
@@ -102,87 +102,67 @@ install_gapp_logic() {
     done
 }
 
-# --- EMBEDDED PYTHON PATCHER (Multi-line Regex Support) ---
+# --- EMBEDDED PYTHON PATCHER (Part 1-5 Implemented) ---
 cat <<'EOF' > "$BIN_DIR/kaorios_patcher.py"
 import os
 import sys
 import re
 
-def patch_file(file_path, target_pattern, code_to_insert, position='below_registers', search_pattern=None):
+def patch_file(file_path, target_method_re, code_to_insert, position, search_term_re=None):
     if not os.path.exists(file_path):
         return False
     
     with open(file_path, 'r') as f:
         content = f.read()
     
-    # 1. FIND THE METHOD
-    # Matches ".method [access] name(args)ret" across newlines
-    method_regex = re.compile(target_pattern, re.MULTILINE | re.DOTALL)
-    match = method_regex.search(content)
-    
-    if not match:
-        print(f"   [FAIL] No match for pattern: {target_pattern[:50]}...")
-        # DIAGNOSTIC: Print existing methods to help debug
-        methods = re.findall(r'^\.method.*?$', content, re.MULTILINE)
-        print(f"          Found {len(methods)} methods. First 3:")
-        for m in methods[:3]: print(f"          - {m.strip()}")
+    # 1. Find Method
+    method_match = re.search(target_method_re, content, re.MULTILINE | re.DOTALL)
+    if not method_match:
+        print(f"   [FAIL] Method not found: {target_method_re}")
         return False
 
-    # 2. LOCATE INSERTION POINT
-    # We slice the content to only look INSIDE the found method body
-    method_start = match.start()
-    # Find the end of this method (.end method)
+    method_start = method_match.start()
     end_match = re.search(r'^\.end method', content[method_start:], re.MULTILINE)
     if not end_match:
-        print("   [FAIL] Could not find end of method.")
+        print("   [FAIL] Method end not found.")
         return False
     
     method_end = method_start + end_match.end()
     method_body = content[method_start:method_end]
-    
     new_body = method_body
     
-    # APPLY PATCH
-    if position == 'below_registers':
-        # Look for .registers or .locals
+    # 2. Apply Patch
+    # Case A: Below .registers
+    if position == 'registers':
         reg_match = re.search(r'^\s*\.(registers|locals)\s+\d+', method_body, re.MULTILINE)
         if reg_match:
-            insert_idx = reg_match.end()
-            new_body = method_body[:insert_idx] + "\n" + code_to_insert + method_body[insert_idx:]
+            idx = reg_match.end()
+            new_body = method_body[:idx] + "\n" + code_to_insert + method_body[idx:]
         else:
-            print("   [FAIL] No .registers found in method.")
+            print("   [FAIL] .registers not found.")
             return False
 
-    elif position == 'above' and search_pattern:
-        # Search inside body
-        s_match = re.search(re.escape(search_pattern), method_body)
-        if s_match:
-            insert_idx = s_match.start()
-            new_body = method_body[:insert_idx] + code_to_insert + "\n" + method_body[insert_idx:]
+    # Case B: Below Search Term
+    elif position == 'below_search' and search_term_re:
+        # We clean spaces to make matching easier
+        search_match = re.search(search_term_re, method_body)
+        if search_match:
+            idx = search_match.end()
+            new_body = method_body[:idx] + "\n" + code_to_insert + method_body[idx:]
         else:
-             print(f"   [FAIL] Search string '{search_pattern}' not found in method.")
-             return False
+            print(f"   [FAIL] Search term '{search_term_re}' not found.")
+            return False
 
-    elif position == 'below' and search_pattern:
-        s_match = re.search(re.escape(search_pattern), method_body)
-        if s_match:
-            insert_idx = s_match.end()
-            new_body = method_body[:insert_idx] + "\n" + code_to_insert + method_body[insert_idx:]
-        else:
-             print(f"   [FAIL] Search string '{search_pattern}' not found in method.")
-             return False
-
-    # 3. REPLACE IN ORIGINAL CONTENT
+    # 3. Save
     new_content = content[:method_start] + new_body + content[method_end:]
-    
     with open(file_path, 'w') as f:
         f.write(new_content)
-    
     print(f"   [OK] Patched: {os.path.basename(file_path)}")
     return True
 
-# Payloads
-code_app_pkg = """
+# --- PAYLOADS ---
+# PART 1: ApplicationPackageManager
+p1_code = """
     invoke-static {}, Landroid/app/ActivityThread;->currentPackageName()Ljava/lang/String;
     move-result-object v0
     :try_start_kaori_override
@@ -201,47 +181,69 @@ code_app_pkg = """
     return p0
     :cond_kaori_override
 """
-code_instr = "    invoke-static {p1}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriProps(Landroid/content/Context;)V"
-code_instr_2 = "    invoke-static {p3}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriProps(Landroid/content/Context;)V"
-code_keystore = """
+
+# PART 2 & 3: Instrumentation
+p2_code = "    invoke-static {p1}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriProps(Landroid/content/Context;)V"
+p3_code = "    invoke-static {p3}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriProps(Landroid/content/Context;)V"
+
+# PART 4: KeyStore2
+p4_code = """
     invoke-static {v0}, Lcom/android/internal/util/kaorios/KaoriKeyboxHooks;->KaoriGetKeyEntry(Landroid/system/keystore2/KeyEntryResponse;)Landroid/system/keystore2/KeyEntryResponse;
     move-result-object v0
 """
-code_cert_1 = "    invoke-static {}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriGetCertificateChain()V"
-code_cert_2 = """
+
+# PART 5: AndroidKeyStoreSpi
+p5_code_1 = "    invoke-static {}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriGetCertificateChain()V"
+p5_code_2 = """
     invoke-static {v3}, Lcom/android/internal/util/kaorios/KaoriKeyboxHooks;->KaoriGetCertificateChain([Ljava/security/cert/Certificate;)[Ljava/security/cert/Certificate;
     move-result-object v3
 """
 
-# Execution
 root_dir = sys.argv[1]
 for r, d, f in os.walk(root_dir):
-    # Regex patterns handle whitespace/newlines automatically (\s*)
     
+    # [PART 1] ApplicationPackageManager
     if 'ApplicationPackageManager.smali' in f:
-        # Matches: .method ... hasSystemFeature(Ljava/lang/String;I)Z
-        pat = r'\.method\s+.*hasSystemFeature\(Ljava/lang/String;I\)Z'
-        patch_file(os.path.join(r, 'ApplicationPackageManager.smali'), pat, code_app_pkg, 'below_registers')
+        path = os.path.join(r, 'ApplicationPackageManager.smali')
+        meth = r'hasSystemFeature\(Ljava/lang/String;I\)Z'
+        patch_file(path, meth, p1_code, 'registers')
 
+    # [PART 2 & 3] Instrumentation
     if 'Instrumentation.smali' in f:
-        pat1 = r'\.method\s+.*newApplication\(Ljava/lang/Class;Landroid/content/Context;\)Landroid/app/Application;'
-        patch_file(os.path.join(r, 'Instrumentation.smali'), pat1, code_instr, 'above', 'return-object v0')
+        path = os.path.join(r, 'Instrumentation.smali')
         
-        pat2 = r'\.method\s+.*newApplication\(Ljava/lang/ClassLoader;Ljava/lang/String;Landroid/content/Context;\)Landroid/app/Application;'
-        patch_file(os.path.join(r, 'Instrumentation.smali'), pat2, code_instr_2, 'above', 'return-object v0')
+        # Method 1
+        meth1 = r'newApplication\(Ljava/lang/Class;Landroid/content/Context;\)Landroid/app/Application;'
+        # Search: invoke-virtual {v0, p1}, ...->attach(...)
+        search1 = r'invoke-virtual\s+\{v0,\s*p1\},\s*Landroid/app/Application;->attach\(Landroid/content/Context;\)V'
+        patch_file(path, meth1, p2_code, 'below_search', search1)
+        
+        # Method 2
+        meth2 = r'newApplication\(Ljava/lang/ClassLoader;Ljava/lang/String;Landroid/content/Context;\)Landroid/app/Application;'
+        # Search: invoke-virtual {v0, p3}, ...->attach(...)
+        search2 = r'invoke-virtual\s+\{v0,\s*p3\},\s*Landroid/app/Application;->attach\(Landroid/content/Context;\)V'
+        patch_file(path, meth2, p3_code, 'below_search', search2)
 
+    # [PART 4] KeyStore2
     if 'KeyStore2.smali' in f:
-        pat = r'\.method\s+.*getKeyEntry\(Landroid/system/keystore2/KeyDescriptor;\)Landroid/system/keystore2/KeyEntryResponse;'
-        patch_file(os.path.join(r, 'KeyStore2.smali'), pat, code_keystore, 'above', 'return-object v0')
+        path = os.path.join(r, 'KeyStore2.smali')
+        meth = r'getKeyEntry\(Landroid/system/keystore2/KeyDescriptor;\)Landroid/system/keystore2/KeyEntryResponse;'
+        # Search: check-cast v0, Landroid/system/keystore2/KeyEntryResponse;
+        search = r'check-cast\s+v0,\s+Landroid/system/keystore2/KeyEntryResponse;'
+        patch_file(path, meth, p4_code, 'below_search', search)
 
+    # [PART 5] AndroidKeyStoreSpi
     if 'AndroidKeyStoreSpi.smali' in f:
         path = os.path.join(r, 'AndroidKeyStoreSpi.smali')
-        pat = r'\.method\s+.*engineGetCertificateChain\(Ljava/lang/String;\)\[Ljava/security/cert/Certificate;'
+        meth = r'engineGetCertificateChain\(Ljava/lang/String;\)\[Ljava/security/cert/Certificate;'
         
-        # Patch 1
-        patch_file(path, pat, code_cert_1, 'below_registers')
-        # Patch 2 (using search string)
-        patch_file(path, pat, code_cert_2, 'below', 'aput-object v2, v3, v4')
+        # Hook 1: Below registers
+        patch_file(path, meth, p5_code_1, 'registers')
+        
+        # Hook 2: Below 'aput-object v2, v3, v4'
+        # We use regex to match ANY registers (v0-v9, p0-p9) just in case
+        search = r'aput-object\s+[vp]\d+,\s*[vp]\d+,\s*[vp]\d+'
+        patch_file(path, meth, p5_code_2, 'below_search', search)
 EOF
 
 # =========================================================
@@ -395,7 +397,7 @@ for part in $LOGICALS; do
             RAW_PATH=$(find "$DUMP_DIR" -name "framework.jar" -type f | head -n 1)
             FW_JAR=$(readlink -f "$RAW_PATH")
             
-            if [ ! -z "$FW_JAR" ] && [ -s "$KAORIOS_DIR/classes.dex" ]; then
+            if [ ! -z "$FW_JAR" ] && [ -f "$KAORIOS_DIR/classes.dex" ]; then
                 echo "         -> Target: $FW_JAR"
                 cp "$FW_JAR" "${FW_JAR}.bak"
                 
@@ -418,6 +420,9 @@ for part in $LOGICALS; do
                     if [ -f "framework_patched.jar" ]; then
                         # Inject Dex
                         echo "         -> Injecting classes.dex..."
+                        DEX_SIZE=$(du -h "$KAORIOS_DIR/classes.dex" | cut -f1)
+                        echo "            (Dex Source: $DEX_SIZE)"
+                        
                         DEX_COUNT=$(unzip -l "framework_patched.jar" | grep "classes.*\.dex" | wc -l)
                         NEXT_DEX="classes$((DEX_COUNT + 1)).dex"
                         if [ "$DEX_COUNT" -eq 1 ]; then NEXT_DEX="classes2.dex"; fi
