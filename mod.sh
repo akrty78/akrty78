@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - ROOT POWER EDITION v16
-#  (Fix: Absolute Paths for Framework Patching & Safety)
+#  NEXDROID GOONER - ROOT POWER EDITION v18
+#  (Fix: Subshell logic to prevent 'directory lost' errors)
 # =========================================================
 
 set +e 
@@ -127,7 +127,7 @@ if [ ! -d "nex_pkg" ]; then
     unzip -q nex.zip -d nex_pkg && rm nex.zip
 fi
 
-# Kaorios Toolbox (Dynamic Asset Fetching)
+# Kaorios Toolbox
 echo "⬇️  Preparing Kaorios Toolbox..."
 if [ ! -d "$KAORIOS_DIR/repo" ]; then
     git clone --depth 1 "$KAORIOS_REPO" "$KAORIOS_DIR/repo" >/dev/null 2>&1
@@ -247,33 +247,31 @@ for part in $LOGICALS; do
         if [ "$part" == "system" ]; then
             echo "      🌸 Kaorios: Patching Framework..."
             
-            # [FIXED] USE ABSOLUTE PATH to prevent 'mv' errors when changing directories
-            # readlink -f will convert the relative path (system_dump/...) to absolute (/home/runner/...)
+            # [FIXED] Use absolute path to ensure we can move it even after changing dirs
             RAW_PATH=$(find "$DUMP_DIR" -name "framework.jar" -type f | head -n 1)
-            FW_JAR=$(readlink -f "$RAW_PATH")
             
-            if [ ! -z "$FW_JAR" ] && [ -s "$KAORIOS_DIR/classes.dex" ]; then
-                echo "         -> Target: $FW_JAR"
+            if [ ! -z "$RAW_PATH" ] && [ -s "$KAORIOS_DIR/classes.dex" ]; then
+                FW_JAR_ABS=$(readlink -f "$RAW_PATH")
+                echo "         -> Target: $FW_JAR_ABS"
                 
-                # 1. DEX INJECTION
+                # 1. DEX INJECTION (Using Subshell to stay safe)
                 echo "         -> Injecting classes.dex..."
-                DEX_COUNT=$(unzip -l "$FW_JAR" | grep "classes.*\.dex" | wc -l)
+                DEX_COUNT=$(unzip -l "$FW_JAR_ABS" | grep "classes.*\.dex" | wc -l)
                 NEXT_DEX="classes$((DEX_COUNT + 1)).dex"
                 if [ "$DEX_COUNT" -eq 1 ]; then NEXT_DEX="classes2.dex"; fi
                 
-                cp "$FW_JAR" "$TEMP_DIR/framework.jar"
+                # Copy to temp
+                cp "$FW_JAR_ABS" "$TEMP_DIR/framework.jar"
                 cp "$KAORIOS_DIR/classes.dex" "$TEMP_DIR/$NEXT_DEX"
                 
-                # Switch to temp to zip
-                cd "$TEMP_DIR"
-                zip -u -q "framework.jar" "$NEXT_DEX"
+                # [CRITICAL FIX] Use subshell ( ... ) to zip, so we never leave this directory context
+                (
+                    cd "$TEMP_DIR"
+                    zip -u -q "framework.jar" "$NEXT_DEX"
+                )
                 
-                # Move back using ABSOLUTE path
-                mv "framework.jar" "$FW_JAR"
-                
-                # IMPORTANT: Go back to workspace immediately
-                cd "$GITHUB_WORKSPACE"
-                
+                # Move back using absolute path
+                mv "$TEMP_DIR/framework.jar" "$FW_JAR_ABS"
                 echo "            + Added $NEXT_DEX"
 
                 # 2. SMALI PATCHER
@@ -281,7 +279,8 @@ for part in $LOGICALS; do
                 if [ ! -z "$PATCHER_SCRIPT" ]; then
                     echo "         -> Running Repo Patcher..."
                     set +e
-                    python3 "$PATCHER_SCRIPT" "$FW_JAR"
+                    # Pass the absolute path to the patcher
+                    python3 "$PATCHER_SCRIPT" "$FW_JAR_ABS"
                     if [ $? -eq 0 ]; then
                         echo "            ✅ Framework Patched Successfully!"
                     else
@@ -309,7 +308,7 @@ for part in $LOGICALS; do
             
             mkdir -p "$PERM_DIR" "$DEF_PERM_DIR" "$OVERLAY_DIR" "$MEDIA_DIR" "$THEME_DIR" "$KAORIOS_PRIV"
             
-            # 1. Kaorios App & Perms
+            # 1. Kaorios
             if [ -f "$KAORIOS_DIR/KaoriosToolbox.apk" ]; then
                 cp "$KAORIOS_DIR/KaoriosToolbox.apk" "$KAORIOS_PRIV/"
                 chmod 644 "$KAORIOS_PRIV/KaoriosToolbox.apk"
@@ -319,28 +318,18 @@ for part in $LOGICALS; do
                 chmod 644 "$PERM_DIR/"*.xml
             fi
 
-            # 2. NexPackage Logic
+            # 2. NexPackage
             if [ -d "$GITHUB_WORKSPACE/nex_pkg" ]; then
-                # A. Default Permissions (Strict Folder)
                 DEF_XML="default-permissions-google.xml"
                 if [ -f "$GITHUB_WORKSPACE/nex_pkg/$DEF_XML" ]; then
                      cp "$GITHUB_WORKSPACE/nex_pkg/$DEF_XML" "$DEF_PERM_DIR/"
                      chmod 644 "$DEF_PERM_DIR/$DEF_XML"
                      echo "         ✅ Default Perms Injected."
                 fi
-                
-                # B. Other Permissions
                 find "$GITHUB_WORKSPACE/nex_pkg" -maxdepth 1 -name "*.xml" ! -name "$DEF_XML" -exec cp {} "$PERM_DIR/" \;
-                chmod 644 "$PERM_DIR/"*.xml 2>/dev/null || true
-                
-                # C. Overlays
                 cp "$GITHUB_WORKSPACE/nex_pkg/"*.apk "$OVERLAY_DIR/" 2>/dev/null
                 chmod 644 "$OVERLAY_DIR/"*.apk 2>/dev/null || true
-                
-                # D. Bootanimation
                 [ -f "$GITHUB_WORKSPACE/nex_pkg/bootanimation.zip" ] && cp "$GITHUB_WORKSPACE/nex_pkg/bootanimation.zip" "$MEDIA_DIR/"
-                
-                # E. Lock Wallpaper
                 [ -f "$GITHUB_WORKSPACE/nex_pkg/lock_wallpaper" ] && cp "$GITHUB_WORKSPACE/nex_pkg/lock_wallpaper" "$THEME_DIR/"
             fi
         fi
@@ -365,37 +354,60 @@ for part in $LOGICALS; do
         # F. REPACK
         # -----------------------------
         find "$DUMP_DIR" -name "build.prop" | while read prop; do echo "$PROPS_CONTENT" >> "$prop"; done
+        
+        # Save to SUPER_DIR
         sudo mkfs.erofs -zlz4 "$SUPER_DIR/${part}.img" "$DUMP_DIR"
         sudo rm -rf "$DUMP_DIR"
     fi
 done
 
 # =========================================================
-#  6. COMPRESSION & UPLOAD
+#  6. MERGED PACKAGING & COMPRESSION
 # =========================================================
-echo "📦  Zipping Super..."
-cd "$SUPER_DIR"
-SUPER_ZIP="ota-nexdroid-${OS_VER}_${DEVICE_CODE}_${ANDROID_VER}.zip"
-7z a -tzip -mx1 -mmt=$(nproc) "$SUPER_ZIP" *.img > /dev/null
-mv "$SUPER_ZIP" "$OUTPUT_DIR/"
+echo "📦  Creating Merged Pack..."
+PACK_DIR="$OUTPUT_DIR/Final_Pack"
+mkdir -p "$PACK_DIR/super" "$PACK_DIR/images"
 
-echo "📦  Zipping Firmware..."
-cd "$OUTPUT_DIR"
-mkdir -p FirmwarePack/images
-find "$IMAGES_DIR" -maxdepth 1 -type f -name "*.img" -exec mv {} FirmwarePack/images/ \;
+# 1. MOVE SUPER PARTITIONS
+SUPER_TARGETS="system system_ext product mi_ext vendor odm system_dlkm vendor_dlkm"
+for img in $SUPER_TARGETS; do
+    if [ -f "$SUPER_DIR/${img}.img" ]; then
+        mv "$SUPER_DIR/${img}.img" "$PACK_DIR/super/"
+    elif [ -f "$IMAGES_DIR/${img}.img" ]; then
+        mv "$IMAGES_DIR/${img}.img" "$PACK_DIR/super/"
+    fi
+done
 
-cat <<EOF > FirmwarePack/flash_rom.bat
+# 2. MOVE REMAINING FIRMWARE
+find "$IMAGES_DIR" -maxdepth 1 -type f -name "*.img" -exec mv {} "$PACK_DIR/images/" \;
+
+# 3. CREATE FLASH SCRIPT
+cat <<EOF > "$PACK_DIR/flash_rom.bat"
 @echo off
+echo ========================================
+echo      NEXDROID FLASHER
+echo ========================================
 fastboot set_active a
+echo [1/3] Flashing Firmware...
 for %%f in (images\*.img) do fastboot flash %%~nf "%%f"
-fastboot flash cust images\cust.img
-fastboot flash super images\super.img
+echo [2/3] Flashing Super Partitions...
+for %%f in (super\*.img) do fastboot flash %%~nf "%%f"
+echo [3/3] Wiping Data...
 fastboot erase userdata
 fastboot reboot
+pause
 EOF
 
-cd FirmwarePack && zip -r -q "../Firmware_Flasher.zip" .
+# 4. ZIP IT UP
+cd "$PACK_DIR"
+SUPER_ZIP="ota-nexdroid-${OS_VER}_${DEVICE_CODE}_${ANDROID_VER}.zip"
+echo "   > Zipping: $SUPER_ZIP"
+7z a -tzip -mx1 -mmt=$(nproc) "$SUPER_ZIP" . > /dev/null
+mv "$SUPER_ZIP" "$OUTPUT_DIR/"
 
+# =========================================================
+#  7. UPLOAD
+# =========================================================
 echo "☁️  Uploading..."
 cd "$OUTPUT_DIR"
 
@@ -410,13 +422,11 @@ upload() {
     [ ! -z "$LINK" ] && [ "$LINK" != "null" ] && echo "$LINK" || echo "Upload Failed"
 }
 
-LINK_FW=$(upload "Firmware_Flasher.zip")
-LINK_SUPER=$(upload "$SUPER_ZIP")
+LINK_ZIP=$(upload "$SUPER_ZIP")
 
 if [ ! -z "$TELEGRAM_TOKEN" ]; then
     MSG="✅ *Build Done!*
 📱 *Device:* $DEVICE_CODE
-📦 [Firmware]($LINK_FW)
-📦 [Super]($LINK_SUPER)"
+📦 [ROM Zip]($LINK_ZIP)"
     curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" -d chat_id="$CHAT_ID" -d parse_mode="Markdown" -d text="$MSG" > /dev/null
 fi
