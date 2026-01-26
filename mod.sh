@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - ROOT POWER EDITION v37
-#  (Fix: Gold Master + Pro Notifications + Happy Exit Code)
+#  NEXDROID MANAGER - ROOT POWER EDITION v38
+#  (Fix: Pro Notifications + Inline Download Button)
 # =========================================================
 
 set +e 
@@ -219,7 +219,7 @@ p5_code_2 = """
 root_dir = sys.argv[1]
 for r, d, f in os.walk(root_dir):
     
-    # 1. ApplicationPackageManager
+    # 1. ApplicationPackageManager (RESTORED FIX)
     if 'ApplicationPackageManager.smali' in f:
         path = os.path.join(r, 'ApplicationPackageManager.smali')
         meth = r'\.method.*hasSystemFeature\(Ljava/lang/String;I\)Z'
@@ -243,11 +243,10 @@ for r, d, f in os.walk(root_dir):
         search = r'return-object\s+v0'
         patch_file(path, meth, p4_code, 'above_search', search)
 
-    # 4. AndroidKeyStoreSpi
+    # 4. AndroidKeyStoreSpi (Strict)
     if 'AndroidKeyStoreSpi.smali' in f:
         path = os.path.join(r, 'AndroidKeyStoreSpi.smali')
         meth = r'engineGetCertificateChain\(Ljava/lang/String;\)\[Ljava/security/cert/Certificate;'
-        
         patch_file(path, meth, p5_code_1, 'registers')
         
         search = r'aput-object\s+v2,\s*v3,\s*v4'
@@ -537,30 +536,62 @@ echo "   > Zipping: $SUPER_ZIP"
 mv "$SUPER_ZIP" "$OUTPUT_DIR/"
 
 # =========================================================
-#  7. UPLOAD
+#  7. UPLOAD & NOTIFY
 # =========================================================
 echo "☁️  Uploading..."
 cd "$OUTPUT_DIR"
 
+# 1. Upload Function
 upload() {
     local file=$1; [ ! -f "$file" ] && return
     echo "   ⬆️ Uploading $file..."
     if [ -z "$PIXELDRAIN_KEY" ]; then
-        LINK=$(curl -s -T "$file" "https://pixeldrain.com/api/file/" | jq -r '"https://pixeldrain.com/u/" + .id')
+        curl -s -T "$file" "https://pixeldrain.com/api/file/" | jq -r '"https://pixeldrain.com/u/" + .id'
     else
-        LINK=$(curl -s -T "$file" -u :$PIXELDRAIN_KEY "https://pixeldrain.com/api/file/" | jq -r '"https://pixeldrain.com/u/" + .id')
+        curl -s -T "$file" -u :$PIXELDRAIN_KEY "https://pixeldrain.com/api/file/" | jq -r '"https://pixeldrain.com/u/" + .id'
     fi
-    [ ! -z "$LINK" ] && [ "$LINK" != "null" ] && echo "$LINK" || echo "Upload Failed"
 }
 
 LINK_ZIP=$(upload "$SUPER_ZIP")
 
-if [ ! -z "$TELEGRAM_TOKEN" ]; then
-    MSG="✅ *Build Done!*
-📱 *Device:* $DEVICE_CODE
-📦 [ROM Zip]($LINK_ZIP)"
-    curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" -d chat_id="$CHAT_ID" -d parse_mode="Markdown" -d text="$MSG" > /dev/null
+# 2. Check Link Validity
+if [ -z "$LINK_ZIP" ] || [ "$LINK_ZIP" == "null" ]; then
+    echo "❌ Upload Failed."
+    LINK_ZIP="https://pixeldrain.com" # Fallback to home if fail
+    BTN_TEXT="Upload Failed"
+else
+    echo "✅ Link: $LINK_ZIP"
+    BTN_TEXT="Download ROM"
 fi
 
-# [HAPPY ENDING] FORCE SUCCESS EXIT CODE
+# 3. Send Professional Telegram Notification
+if [ ! -z "$TELEGRAM_TOKEN" ]; then
+    BUILD_DATE=$(date +"%Y-%m-%d %H:%M")
+    
+    # Construct JSON using jq for safety
+    JSON_PAYLOAD=$(jq -n \
+        --arg chat_id "$CHAT_ID" \
+        --arg text "*NexDroid Build Complete*
+---------------------------
+\`Device  : $DEVICE_CODE\`
+\`Version : $OS_VER\`
+\`Android : $ANDROID_VER\`
+\`Built   : $BUILD_DATE\`" \
+        --arg url "$LINK_ZIP" \
+        --arg btn "$BTN_TEXT" \
+        '{
+            chat_id: $chat_id,
+            parse_mode: "Markdown",
+            text: $text,
+            reply_markup: {
+                inline_keyboard: [[{text: $btn, url: $url}]]
+            }
+        }')
+
+    curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
+        -H "Content-Type: application/json" \
+        -d "$JSON_PAYLOAD" > /dev/null
+fi
+
+# [HAPPY ENDING]
 exit 0
