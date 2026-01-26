@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID MANAGER - ROOT POWER EDITION v41
-#  (Fix: External apk-modder.sh Permission + Settings.apk Logic)
+#  NEXDROID MANAGER - ROOT POWER EDITION v42
+#  (Fix: Robust Notifications + Debug Logging + Fallback)
 # =========================================================
 
 set +e 
@@ -101,6 +101,64 @@ install_gapp_logic() {
         fi
     done
 }
+
+# --- CREATE APK-MODDER.SH (Ensuring Permissions) ---
+cat <<'EOF' > "$GITHUB_WORKSPACE/apk-modder.sh"
+#!/bin/bash
+APK_PATH="$1"
+TARGET_CLASS="$2"
+TARGET_METHOD="$3"
+RETURN_VAL="$4"
+BIN_DIR="$(pwd)/bin"
+TEMP_MOD="temp_modder"
+export PATH="$BIN_DIR:$PATH"
+
+if [ ! -f "$APK_PATH" ]; then exit 1; fi
+echo "   [Modder] 💉 Patching $TARGET_METHOD..."
+
+rm -rf "$TEMP_MOD"
+apktool d -r -f "$APK_PATH" -o "$TEMP_MOD" >/dev/null 2>&1
+
+CLASS_PATH=$(echo "$TARGET_CLASS" | sed 's/\./\//g')
+SMALI_FILE=$(find "$TEMP_MOD" -type f -path "*/$CLASS_PATH.smali" | head -n 1)
+
+if [ -z "$SMALI_FILE" ]; then
+    echo "   [Modder] ⚠️ Class not found."
+    rm -rf "$TEMP_MOD"; exit 0
+fi
+
+cat <<PY > "$BIN_DIR/wiper.py"
+import sys, re
+file_path = sys.argv[1]; method_name = sys.argv[2]; ret_type = sys.argv[3]
+
+tpl_true = ".registers 1\n    const/4 v0, 0x1\n    return v0"
+tpl_false = ".registers 1\n    const/4 v0, 0x0\n    return v0"
+tpl_null = ".registers 1\n    const/4 v0, 0x0\n    return-object v0"
+tpl_void = ".registers 0\n    return-void"
+
+payload = tpl_void
+if ret_type.lower() == 'true': payload = tpl_true
+elif ret_type.lower() == 'false': payload = tpl_false
+elif ret_type.lower() == 'null': payload = tpl_null
+
+with open(file_path, 'r') as f: content = f.read()
+pattern = r'(\.method.* ' + re.escape(method_name) + r'\(.*)(?s:.*?)(\.end method)'
+new_content, count = re.subn(pattern, lambda m: m.group(1) + "\n" + payload + "\n" + m.group(2), content)
+
+if count > 0:
+    with open(file_path, 'w') as f: f.write(new_content)
+    print("PATCHED")
+PY
+
+RESULT=$(python3 "$BIN_DIR/wiper.py" "$SMALI_FILE" "$TARGET_METHOD" "$RETURN_VAL")
+
+if [ "$RESULT" == "PATCHED" ]; then
+    apktool b -c "$TEMP_MOD" -o "$APK_PATH" >/dev/null 2>&1
+    echo "   [Modder] ✅ Done."
+fi
+rm -rf "$TEMP_MOD" "$BIN_DIR/wiper.py"
+EOF
+chmod +x "$GITHUB_WORKSPACE/apk-modder.sh"
 
 # --- EMBEDDED PYTHON PATCHER (Framework) ---
 cat <<'EOF' > "$BIN_DIR/kaorios_patcher.py"
@@ -468,11 +526,9 @@ for part in $LOGICALS; do
         fi
 
         # F. INTEGRATED APK MODDER (Settings.apk)
-        # We rely on 'apk-modder.sh' being present in the repo
         SETTINGS_APK=$(find "$DUMP_DIR" -name "Settings.apk" -type f -print -quit)
         if [ ! -z "$SETTINGS_APK" ]; then
              echo "      💊 Modding Settings.apk (AI Support)..."
-             # Execute the pre-existing script
              ./apk-modder.sh "$SETTINGS_APK" "com/android/settings/InternalDeviceUtils" "isAiSupported" "true"
         fi
 
@@ -529,7 +585,6 @@ mv "$SUPER_ZIP" "$OUTPUT_DIR/"
 echo "☁️  Uploading..."
 cd "$OUTPUT_DIR"
 
-# 1. Upload Function
 upload() {
     local file=$1; [ ! -f "$file" ] && return
     echo "   ⬆️ Uploading $file..."
@@ -542,7 +597,9 @@ upload() {
 
 LINK_ZIP=$(upload "$SUPER_ZIP")
 
-# 2. Check Link Validity
+# 2. Check Validity & Debug Response
+echo "   > Raw Response: $LINK_ZIP"
+
 if [ -z "$LINK_ZIP" ] || [ "$LINK_ZIP" == "null" ]; then
     echo "❌ Upload Failed."
     LINK_ZIP="https://pixeldrain.com"
@@ -552,18 +609,23 @@ else
     BTN_TEXT="Download ROM"
 fi
 
-# 3. Send Professional Telegram Notification
-if [ ! -z "$TELEGRAM_TOKEN" ]; then
+# 3. Notification (Debug Edition)
+if [ ! -z "$TELEGRAM_TOKEN" ] && [ ! -z "$CHAT_ID" ]; then
+    echo "📣 Sending Telegram Notification..."
     BUILD_DATE=$(date +"%Y-%m-%d %H:%M")
     
-    JSON_PAYLOAD=$(jq -n \
-        --arg chat_id "$CHAT_ID" \
-        --arg text "*NexDroid Build Complete*
+    # Prepare text payload first to be safe
+    MSG_TEXT="*NexDroid Build Complete*
 ---------------------------
 \`Device  : $DEVICE_CODE\`
 \`Version : $OS_VER\`
 \`Android : $ANDROID_VER\`
-\`Built   : $BUILD_DATE\`" \
+\`Built   : $BUILD_DATE\`"
+
+    # Robust JSON Construction
+    JSON_PAYLOAD=$(jq -n \
+        --arg chat_id "$CHAT_ID" \
+        --arg text "$MSG_TEXT" \
         --arg url "$LINK_ZIP" \
         --arg btn "$BTN_TEXT" \
         '{
@@ -575,9 +637,22 @@ if [ ! -z "$TELEGRAM_TOKEN" ]; then
             }
         }')
 
-    curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
+    # Send & Capture Result
+    RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
         -H "Content-Type: application/json" \
-        -d "$JSON_PAYLOAD" > /dev/null
+        -d "$JSON_PAYLOAD")
+        
+    echo "   > Telegram API Response: $RESPONSE"
+    
+    # Fallback to Text-Only if JSON fails (e.g. 400 Bad Request)
+    if [[ "$RESPONSE" != *"200"* ]]; then
+        echo "   ⚠️ JSON Message Failed. Attempting Text Fallback..."
+        curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
+        -d chat_id="$CHAT_ID" \
+        -d text="✅ Build Done (Fallback): $LINK_ZIP" >/dev/null
+    fi
+else
+    echo "⚠️ Skipping Notification (Missing Token/ID)"
 fi
 
 # [HAPPY ENDING]
