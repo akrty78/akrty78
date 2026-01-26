@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - ROOT POWER EDITION v15
-#  (Fix: Dynamic Kaorios Asset Fetching from Latest Release)
+#  NEXDROID GOONER - ROOT POWER EDITION v16
+#  (Fix: Absolute Paths for Framework Patching & Safety)
 # =========================================================
 
 set +e 
@@ -137,27 +137,13 @@ if [ ! -f "$KAORIOS_DIR/classes.dex" ]; then
     echo "   -> Fetching Latest Release Info..."
     LATEST_JSON=$(curl -s "https://api.github.com/repos/Wuang26/Kaorios-Toolbox/releases/latest")
     
-    # Extract URLs dynamically using regex/contains because filenames have version numbers
-    # APK: Look for "KaoriosToolbox" and ".apk"
     APK_URL=$(echo "$LATEST_JSON" | jq -r '.assets[] | select(.name | contains("KaoriosToolbox") and endswith(".apk")) | .browser_download_url')
-    # XML: Look for ".xml"
     XML_URL=$(echo "$LATEST_JSON" | jq -r '.assets[] | select(.name | endswith(".xml")) | .browser_download_url')
-    # DEX: Look for "classes" and ".dex"
     DEX_URL=$(echo "$LATEST_JSON" | jq -r '.assets[] | select(.name | contains("classes") and endswith(".dex")) | .browser_download_url')
     
-    echo "      - APK URL: $APK_URL"
-    echo "      - XML URL: $XML_URL"
-    echo "      - DEX URL: $DEX_URL"
-
-    if [ ! -z "$APK_URL" ] && [ "$APK_URL" != "null" ]; then
-        wget -q -O "$KAORIOS_DIR/KaoriosToolbox.apk" "$APK_URL"
-    fi
-    if [ ! -z "$XML_URL" ] && [ "$XML_URL" != "null" ]; then
-        wget -q -O "$KAORIOS_DIR/kaorios_perm.xml" "$XML_URL"
-    fi
-    if [ ! -z "$DEX_URL" ] && [ "$DEX_URL" != "null" ]; then
-        wget -q -O "$KAORIOS_DIR/classes.dex" "$DEX_URL"
-    fi
+    [ ! -z "$APK_URL" ] && [ "$APK_URL" != "null" ] && wget -q -O "$KAORIOS_DIR/KaoriosToolbox.apk" "$APK_URL"
+    [ ! -z "$XML_URL" ] && [ "$XML_URL" != "null" ] && wget -q -O "$KAORIOS_DIR/kaorios_perm.xml" "$XML_URL"
+    [ ! -z "$DEX_URL" ] && [ "$DEX_URL" != "null" ] && wget -q -O "$KAORIOS_DIR/classes.dex" "$DEX_URL"
 fi
 
 if [ ! -s "$KAORIOS_DIR/classes.dex" ]; then
@@ -261,11 +247,13 @@ for part in $LOGICALS; do
         if [ "$part" == "system" ]; then
             echo "      🌸 Kaorios: Patching Framework..."
             
-            # [FIXED] AUTO-DETECT FRAMEWORK PATH
-            FW_JAR=$(find "$DUMP_DIR" -name "framework.jar" -type f | head -n 1)
+            # [FIXED] USE ABSOLUTE PATH to prevent 'mv' errors when changing directories
+            # readlink -f will convert the relative path (system_dump/...) to absolute (/home/runner/...)
+            RAW_PATH=$(find "$DUMP_DIR" -name "framework.jar" -type f | head -n 1)
+            FW_JAR=$(readlink -f "$RAW_PATH")
             
             if [ ! -z "$FW_JAR" ] && [ -s "$KAORIOS_DIR/classes.dex" ]; then
-                echo "         -> Found Framework at: $FW_JAR"
+                echo "         -> Target: $FW_JAR"
                 
                 # 1. DEX INJECTION
                 echo "         -> Injecting classes.dex..."
@@ -276,13 +264,19 @@ for part in $LOGICALS; do
                 cp "$FW_JAR" "$TEMP_DIR/framework.jar"
                 cp "$KAORIOS_DIR/classes.dex" "$TEMP_DIR/$NEXT_DEX"
                 
+                # Switch to temp to zip
                 cd "$TEMP_DIR"
                 zip -u -q "framework.jar" "$NEXT_DEX"
+                
+                # Move back using ABSOLUTE path
                 mv "framework.jar" "$FW_JAR"
+                
+                # IMPORTANT: Go back to workspace immediately
                 cd "$GITHUB_WORKSPACE"
+                
                 echo "            + Added $NEXT_DEX"
 
-                # 2. SMALI PATCHER (Using Repo)
+                # 2. SMALI PATCHER
                 PATCHER_SCRIPT=$(find "$KAORIOS_DIR/repo" -name "*.py" -path "*/Toolbox-patcher/*" | head -1)
                 if [ ! -z "$PATCHER_SCRIPT" ]; then
                     echo "         -> Running Repo Patcher..."
