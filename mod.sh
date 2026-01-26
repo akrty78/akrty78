@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - ROOT POWER EDITION v13
-#  (MERGED: Kaorios + Perms Fix + Lock Wall + NexPackage)
+#  NEXDROID GOONER - ROOT POWER EDITION v15
+#  (Fix: Dynamic Kaorios Asset Fetching from Latest Release)
 # =========================================================
 
 set +e 
@@ -127,20 +127,43 @@ if [ ! -d "nex_pkg" ]; then
     unzip -q nex.zip -d nex_pkg && rm nex.zip
 fi
 
-# Kaorios Toolbox (Assets & Repo)
+# Kaorios Toolbox (Dynamic Asset Fetching)
 echo "⬇️  Preparing Kaorios Toolbox..."
 if [ ! -d "$KAORIOS_DIR/repo" ]; then
     git clone --depth 1 "$KAORIOS_REPO" "$KAORIOS_DIR/repo" >/dev/null 2>&1
 fi
+
 if [ ! -f "$KAORIOS_DIR/classes.dex" ]; then
-    echo "   -> Fetching latest Kaorios Release Info..."
-    LATEST_JSON=$(curl -s https://api.github.com/repos/Wuang26/Kaorios-Toolbox/releases/latest)
+    echo "   -> Fetching Latest Release Info..."
+    LATEST_JSON=$(curl -s "https://api.github.com/repos/Wuang26/Kaorios-Toolbox/releases/latest")
+    
+    # Extract URLs dynamically using regex/contains because filenames have version numbers
+    # APK: Look for "KaoriosToolbox" and ".apk"
     APK_URL=$(echo "$LATEST_JSON" | jq -r '.assets[] | select(.name | contains("KaoriosToolbox") and endswith(".apk")) | .browser_download_url')
+    # XML: Look for ".xml"
     XML_URL=$(echo "$LATEST_JSON" | jq -r '.assets[] | select(.name | endswith(".xml")) | .browser_download_url')
+    # DEX: Look for "classes" and ".dex"
     DEX_URL=$(echo "$LATEST_JSON" | jq -r '.assets[] | select(.name | contains("classes") and endswith(".dex")) | .browser_download_url')
-    wget -q -O "$KAORIOS_DIR/KaoriosToolbox.apk" "$APK_URL"
-    wget -q -O "$KAORIOS_DIR/kaorios_perm.xml" "$XML_URL"
-    wget -q -O "$KAORIOS_DIR/classes.dex" "$DEX_URL"
+    
+    echo "      - APK URL: $APK_URL"
+    echo "      - XML URL: $XML_URL"
+    echo "      - DEX URL: $DEX_URL"
+
+    if [ ! -z "$APK_URL" ] && [ "$APK_URL" != "null" ]; then
+        wget -q -O "$KAORIOS_DIR/KaoriosToolbox.apk" "$APK_URL"
+    fi
+    if [ ! -z "$XML_URL" ] && [ "$XML_URL" != "null" ]; then
+        wget -q -O "$KAORIOS_DIR/kaorios_perm.xml" "$XML_URL"
+    fi
+    if [ ! -z "$DEX_URL" ] && [ "$DEX_URL" != "null" ]; then
+        wget -q -O "$KAORIOS_DIR/classes.dex" "$DEX_URL"
+    fi
+fi
+
+if [ ! -s "$KAORIOS_DIR/classes.dex" ]; then
+    echo "   ⚠️ WARNING: classes.dex failed to download! Kaorios patch will be skipped."
+else
+    echo "   ✅ Kaorios assets ready."
 fi
 
 # Launcher
@@ -237,9 +260,13 @@ for part in $LOGICALS; do
         # -----------------------------
         if [ "$part" == "system" ]; then
             echo "      🌸 Kaorios: Patching Framework..."
-            FW_JAR="$DUMP_DIR/framework/framework.jar"
             
-            if [ -f "$FW_JAR" ] && [ -f "$KAORIOS_DIR/classes.dex" ]; then
+            # [FIXED] AUTO-DETECT FRAMEWORK PATH
+            FW_JAR=$(find "$DUMP_DIR" -name "framework.jar" -type f | head -n 1)
+            
+            if [ ! -z "$FW_JAR" ] && [ -s "$KAORIOS_DIR/classes.dex" ]; then
+                echo "         -> Found Framework at: $FW_JAR"
+                
                 # 1. DEX INJECTION
                 echo "         -> Injecting classes.dex..."
                 DEX_COUNT=$(unzip -l "$FW_JAR" | grep "classes.*\.dex" | wc -l)
@@ -269,7 +296,7 @@ for part in $LOGICALS; do
                     set +e
                 fi
             else
-                echo "         ! Framework.jar or classes.dex missing."
+                echo "         ! SKIPPED: framework.jar not found or classes.dex missing."
             fi
         fi
 
@@ -298,7 +325,7 @@ for part in $LOGICALS; do
                 chmod 644 "$PERM_DIR/"*.xml
             fi
 
-            # 2. NexPackage Logic (Permissions + Overlays + Media)
+            # 2. NexPackage Logic
             if [ -d "$GITHUB_WORKSPACE/nex_pkg" ]; then
                 # A. Default Permissions (Strict Folder)
                 DEF_XML="default-permissions-google.xml"
