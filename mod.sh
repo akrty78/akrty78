@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID GOONER - ROOT POWER EDITION v25
-#  (Fix: Locked Apktool v2.12.1 + Robust Smali Patching)
+#  NEXDROID GOONER - ROOT POWER EDITION v26
+#  (Fix: Regex-based Multi-line Smali Patcher)
 # =========================================================
 
 set +e 
@@ -102,63 +102,84 @@ install_gapp_logic() {
     done
 }
 
-# --- EMBEDDED PYTHON PATCHER (Safe Heredoc + Robust Regex) ---
+# --- EMBEDDED PYTHON PATCHER (Multi-line Regex Support) ---
 cat <<'EOF' > "$BIN_DIR/kaorios_patcher.py"
 import os
 import sys
+import re
 
-def patch_file(file_path, target_method, code_to_insert, position='below', search_str=None):
+def patch_file(file_path, target_pattern, code_to_insert, position='below_registers', search_pattern=None):
     if not os.path.exists(file_path):
         return False
     
     with open(file_path, 'r') as f:
-        lines = f.readlines()
+        content = f.read()
     
-    new_lines = []
-    in_method = False
-    patched = False
+    # 1. FIND THE METHOD
+    # Matches ".method [access] name(args)ret" across newlines
+    method_regex = re.compile(target_pattern, re.MULTILINE | re.DOTALL)
+    match = method_regex.search(content)
     
-    # Strip spaces for robust matching
-    clean_target = target_method.replace(" ", "")
-    clean_search = search_str.replace(" ", "") if search_str else None
-
-    for line in lines:
-        new_lines.append(line)
-        clean_line = line.strip().replace(" ", "")
-        
-        # Method Detection
-        if line.strip().startswith('.method') and clean_target in clean_line:
-            in_method = True
-            continue
-        if line.strip().startswith('.end method'):
-            in_method = False
-            
-        if in_method and not patched:
-            # 1. Below Registers
-            if position == 'below_registers' and '.registers' in line:
-                new_lines.append(code_to_insert + '\n')
-                patched = True
-            
-            # 2. Above Search String
-            elif position == 'above' and clean_search and clean_search in clean_line:
-                curr = new_lines.pop()
-                new_lines.append(code_to_insert + '\n')
-                new_lines.append(curr)
-                patched = True
-                
-            # 3. Below Search String
-            elif position == 'below' and clean_search and clean_search in clean_line:
-                new_lines.append(code_to_insert + '\n')
-                patched = True
-
-    if patched:
-        with open(file_path, 'w') as f:
-            f.writelines(new_lines)
-        print(f"   [OK] Patched: {os.path.basename(file_path)}")
-        return True
-    else:
-        print(f"   [FAIL] Could not match target in: {os.path.basename(file_path)}")
+    if not match:
+        print(f"   [FAIL] No match for pattern: {target_pattern[:50]}...")
+        # DIAGNOSTIC: Print existing methods to help debug
+        methods = re.findall(r'^\.method.*?$', content, re.MULTILINE)
+        print(f"          Found {len(methods)} methods. First 3:")
+        for m in methods[:3]: print(f"          - {m.strip()}")
         return False
+
+    # 2. LOCATE INSERTION POINT
+    # We slice the content to only look INSIDE the found method body
+    method_start = match.start()
+    # Find the end of this method (.end method)
+    end_match = re.search(r'^\.end method', content[method_start:], re.MULTILINE)
+    if not end_match:
+        print("   [FAIL] Could not find end of method.")
+        return False
+    
+    method_end = method_start + end_match.end()
+    method_body = content[method_start:method_end]
+    
+    new_body = method_body
+    
+    # APPLY PATCH
+    if position == 'below_registers':
+        # Look for .registers or .locals
+        reg_match = re.search(r'^\s*\.(registers|locals)\s+\d+', method_body, re.MULTILINE)
+        if reg_match:
+            insert_idx = reg_match.end()
+            new_body = method_body[:insert_idx] + "\n" + code_to_insert + method_body[insert_idx:]
+        else:
+            print("   [FAIL] No .registers found in method.")
+            return False
+
+    elif position == 'above' and search_pattern:
+        # Search inside body
+        s_match = re.search(re.escape(search_pattern), method_body)
+        if s_match:
+            insert_idx = s_match.start()
+            new_body = method_body[:insert_idx] + code_to_insert + "\n" + method_body[insert_idx:]
+        else:
+             print(f"   [FAIL] Search string '{search_pattern}' not found in method.")
+             return False
+
+    elif position == 'below' and search_pattern:
+        s_match = re.search(re.escape(search_pattern), method_body)
+        if s_match:
+            insert_idx = s_match.end()
+            new_body = method_body[:insert_idx] + "\n" + code_to_insert + method_body[insert_idx:]
+        else:
+             print(f"   [FAIL] Search string '{search_pattern}' not found in method.")
+             return False
+
+    # 3. REPLACE IN ORIGINAL CONTENT
+    new_content = content[:method_start] + new_body + content[method_end:]
+    
+    with open(file_path, 'w') as f:
+        f.write(new_content)
+    
+    print(f"   [OK] Patched: {os.path.basename(file_path)}")
+    return True
 
 # Payloads
 code_app_pkg = """
@@ -195,17 +216,32 @@ code_cert_2 = """
 # Execution
 root_dir = sys.argv[1]
 for r, d, f in os.walk(root_dir):
+    # Regex patterns handle whitespace/newlines automatically (\s*)
+    
     if 'ApplicationPackageManager.smali' in f:
-        patch_file(os.path.join(r, 'ApplicationPackageManager.smali'), 'hasSystemFeature(Ljava/lang/String;I)Z', code_app_pkg, 'below_registers')
+        # Matches: .method ... hasSystemFeature(Ljava/lang/String;I)Z
+        pat = r'\.method\s+.*hasSystemFeature\(Ljava/lang/String;I\)Z'
+        patch_file(os.path.join(r, 'ApplicationPackageManager.smali'), pat, code_app_pkg, 'below_registers')
+
     if 'Instrumentation.smali' in f:
-        patch_file(os.path.join(r, 'Instrumentation.smali'), 'newApplication(Ljava/lang/Class;Landroid/content/Context;)Landroid/app/Application;', code_instr, 'above', 'return-object v0')
-        patch_file(os.path.join(r, 'Instrumentation.smali'), 'newApplication(Ljava/lang/ClassLoader;Ljava/lang/String;Landroid/content/Context;)Landroid/app/Application;', code_instr_2, 'above', 'return-object v0')
+        pat1 = r'\.method\s+.*newApplication\(Ljava/lang/Class;Landroid/content/Context;\)Landroid/app/Application;'
+        patch_file(os.path.join(r, 'Instrumentation.smali'), pat1, code_instr, 'above', 'return-object v0')
+        
+        pat2 = r'\.method\s+.*newApplication\(Ljava/lang/ClassLoader;Ljava/lang/String;Landroid/content/Context;\)Landroid/app/Application;'
+        patch_file(os.path.join(r, 'Instrumentation.smali'), pat2, code_instr_2, 'above', 'return-object v0')
+
     if 'KeyStore2.smali' in f:
-        patch_file(os.path.join(r, 'KeyStore2.smali'), 'getKeyEntry(Landroid/system/keystore2/KeyDescriptor;)Landroid/system/keystore2/KeyEntryResponse;', code_keystore, 'above', 'return-object v0')
+        pat = r'\.method\s+.*getKeyEntry\(Landroid/system/keystore2/KeyDescriptor;\)Landroid/system/keystore2/KeyEntryResponse;'
+        patch_file(os.path.join(r, 'KeyStore2.smali'), pat, code_keystore, 'above', 'return-object v0')
+
     if 'AndroidKeyStoreSpi.smali' in f:
         path = os.path.join(r, 'AndroidKeyStoreSpi.smali')
-        patch_file(path, 'engineGetCertificateChain(Ljava/lang/String;)[Ljava/security/cert/Certificate;', code_cert_1, 'below_registers')
-        patch_file(path, 'engineGetCertificateChain(Ljava/lang/String;)[Ljava/security/cert/Certificate;', code_cert_2, 'below', 'aput-object v2, v3, v4')
+        pat = r'\.method\s+.*engineGetCertificateChain\(Ljava/lang/String;\)\[Ljava/security/cert/Certificate;'
+        
+        # Patch 1
+        patch_file(path, pat, code_cert_1, 'below_registers')
+        # Patch 2 (using search string)
+        patch_file(path, pat, code_cert_2, 'below', 'aput-object v2, v3, v4')
 EOF
 
 # =========================================================
@@ -216,7 +252,6 @@ mkdir -p "$IMAGES_DIR" "$SUPER_DIR" "$TEMP_DIR" "$BIN_DIR" "$KAORIOS_DIR"
 export PATH="$BIN_DIR:$PATH"
 
 sudo apt-get update -y
-# Install OpenJDK 17 which is solid for Apktool 2.10+
 sudo apt-get install -y python3 python3-pip erofs-utils erofsfuse jq aria2 zip unzip liblz4-tool p7zip-full aapt git openjdk-17-jre-headless
 pip3 install gdown --break-system-packages
 
