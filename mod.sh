@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID MANAGER - ROOT POWER EDITION v57
-#  (Fix: v45 Base + Strict AppPkgMgr + Nuclear MiuiBooster)
+#  NEXDROID MANAGER - ROOT POWER EDITION v49
+#  (Fix: Absolute Strict AppPkgManager Targeting)
 # =========================================================
 
 set +e 
@@ -160,22 +160,18 @@ rm -rf "$TEMP_MOD" "$BIN_DIR/wiper.py"
 EOF
 chmod +x "$GITHUB_WORKSPACE/apk-modder.sh"
 
-# --- EMBEDDED PYTHON PATCHER (Logic Fixes Applied) ---
+# --- EMBEDDED PYTHON PATCHER (v49 - Precise Logic) ---
 cat <<'EOF' > "$BIN_DIR/kaorios_patcher.py"
-import os
-import sys
-import re
+import os, sys, re
 
 def patch_file(file_path, target_method_re, code_to_insert, position, search_term_re=None):
     if not os.path.exists(file_path): return False
+    with open(file_path, 'r') as f: content = f.read()
     
-    with open(file_path, 'r') as f:
-        content = f.read()
-    
-    # 1. Strictly find the Method Definition
+    # Locate the EXACT method block first
     method_match = re.search(target_method_re, content, re.MULTILINE | re.DOTALL)
     if not method_match:
-        print(f"   [FAIL] Method not found: {target_method_re[:50]}")
+        print(f"   [FAIL] Method not found: {target_method_re[:50]}...")
         return False
 
     method_start = method_match.start()
@@ -188,58 +184,51 @@ def patch_file(file_path, target_method_re, code_to_insert, position, search_ter
     method_body = content[method_start:method_end]
     new_body = method_body
     
-    # MODES
+    # 1. Inject AFTER .registers (for AppPkgManager)
     if position == 'registers':
+        # Find .registers within THIS specific method body
         reg_match = re.search(r'\.(registers|locals)\s+\d+', method_body)
         if reg_match:
             idx = reg_match.end()
             new_body = method_body[:idx] + "\n" + code_to_insert + method_body[idx:]
         else:
-            print("   [FAIL] .registers not found.")
+            print("   [FAIL] .registers not found inside target method.")
             return False
 
+    # 2. Inject BELOW a specific line
     elif position == 'below_search' and search_term_re:
         search_match = re.search(search_term_re, method_body)
         if search_match:
             idx = search_match.end()
             final_code = code_to_insert
-            if search_match.groups():
-                final_code = final_code.replace("{REG}", search_match.group(1))
+            if search_match.groups(): final_code = final_code.replace("{REG}", search_match.group(1))
             new_body = method_body[:idx] + "\n" + final_code + method_body[idx:]
         else:
-            print(f"   [FAIL] Search term not found: {search_term_re}")
+            print(f"   [FAIL] Search term '{search_term_re}' not found.")
             return False
 
+    # 3. Inject ABOVE a specific line
     elif position == 'above_search' and search_term_re:
         search_match = re.search(search_term_re, method_body)
         if search_match:
             idx = search_match.start()
             new_body = method_body[:idx] + code_to_insert + "\n" + method_body[idx:]
         else:
-            print(f"   [FAIL] Search term not found: {search_term_re}")
+            print(f"   [FAIL] Search term '{search_term_re}' not found.")
             return False
 
-    elif position == 'replace_full_method':
-        # Replaces the WHOLE method block (including tags if user provided them, but here we splice carefully)
-        # We replace from (method_start) to (method_end + length of '.end method')
-        # Actually, simpler: just construct new content using start and end indices
-        # We assume code_to_insert IS the full new method
-        
-        # NOTE: regex for end_match already matched '^\.end method'
-        full_end = method_start + end_match.end()
-        new_content = content[:method_start] + code_to_insert + content[full_end:]
-        
-        with open(file_path, 'w') as f: f.write(new_content)
-        print(f"   [OK] Patched: {os.path.basename(file_path)}")
-        return True
+    # 4. REPLACE WHOLE BODY
+    elif position == 'replace_body':
+        new_body = "\n" + code_to_insert + "\n"
 
     new_content = content[:method_start] + new_body + content[method_end:]
     with open(file_path, 'w') as f: f.write(new_content)
     print(f"   [OK] Patched: {os.path.basename(file_path)}")
     return True
 
-# PAYLOADS
-# [FIX] Strict AppPkgMgr Payload
+# --- PAYLOADS ---
+
+# [UPDATED] AppPkgMgr: Your requested block
 p1_code = """    invoke-static {}, Landroid/app/ActivityThread;->currentPackageName()Ljava/lang/String;
     move-result-object v0
     :try_start_kaori_override
@@ -268,51 +257,43 @@ p5_code_1 = "    invoke-static {}, Lcom/android/internal/util/kaorios/KaoriProps
 p5_code_2 = """    invoke-static {v3}, Lcom/android/internal/util/kaorios/KaoriKeyboxHooks;->KaoriGetCertificateChain([Ljava/security/cert/Certificate;)[Ljava/security/cert/Certificate;
     move-result-object v3"""
 
-# [FIX] MiuiBooster: Full Method Replacement
-p6_code = """.method public initDeviceLevel()V
-    .registers 2
+p6_code = """    .registers 2
     const-string v0, "v:1,c:3,g:3"
     .line 130
     invoke-direct {p0, v0}, Lcom/miui/performance/DeviceLevelUtils;->parseDeviceLevelList(Ljava/lang/String;)V
     .line 140
-    return-void
-.end method"""
+    return-void"""
 
 root_dir = sys.argv[1]
 for r, d, f in os.walk(root_dir):
-    # 1. AppPkgMgr: STRICT REGEX (Must include ';I)' to skip single-arg overload)
+    # 1. AppPkgMgr: STRICT REGEX to target ONLY (String, Int)
     if 'ApplicationPackageManager.smali' in f:
         path = os.path.join(r, 'ApplicationPackageManager.smali')
+        # This matches: .method public hasSystemFeature(Ljava/lang/String;I)Z
+        # The ';I)' is the key - it ensures we ignore the single-arg version.
         meth = r'\.method.+hasSystemFeature\(Ljava/lang/String;I\)Z'
         patch_file(path, meth, p1_code, 'registers')
-
+    
     # 2. Instrumentation
     if 'Instrumentation.smali' in f:
         path = os.path.join(r, 'Instrumentation.smali')
-        meth1 = r'newApplication\(Ljava/lang/Class;Landroid/content/Context;\)Landroid/app/Application;'
-        patch_file(path, meth1, p2_code, 'below_search', r'invoke-virtual\s+\{v0,\s*p1\},\s*Landroid/app/Application;->attach\(Landroid/content/Context;\)V')
-        meth2 = r'newApplication\(Ljava/lang/ClassLoader;Ljava/lang/String;Landroid/content/Context;\)Landroid/app/Application;'
-        patch_file(path, meth2, p3_code, 'below_search', r'invoke-virtual\s+\{v0,\s*p3\},\s*Landroid/app/Application;->attach\(Landroid/content/Context;\)V')
-
+        patch_file(path, r'newApplication\(Ljava/lang/Class;Landroid/content/Context;\)Landroid/app/Application;', p2_code, 'below_search', r'invoke-virtual\s+\{v0,\s*p1\},\s*Landroid/app/Application;->attach\(Landroid/content/Context;\)V')
+        patch_file(path, r'newApplication\(Ljava/lang/ClassLoader;Ljava/lang/String;Landroid/content/Context;\)Landroid/app/Application;', p3_code, 'below_search', r'invoke-virtual\s+\{v0,\s*p3\},\s*Landroid/app/Application;->attach\(Landroid/content/Context;\)V')
+    
     # 3. KeyStore2
     if 'KeyStore2.smali' in f:
         if 'android/security' in r.replace(os.sep, '/'):
-            path = os.path.join(r, 'KeyStore2.smali')
-            meth = r'\.method.+getKeyEntry\(Landroid/system/keystore2/KeyDescriptor;\)Landroid/system/keystore2/KeyEntryResponse;'
-            patch_file(path, meth, p4_code, 'above_search', r'return-object\s+v0')
-
+            patch_file(os.path.join(r, 'KeyStore2.smali'), r'\.method.+getKeyEntry\(Landroid/system/keystore2/KeyDescriptor;\)Landroid/system/keystore2/KeyEntryResponse;', p4_code, 'above_search', r'return-object\s+v0')
+    
     # 4. AndroidKeyStoreSpi
     if 'AndroidKeyStoreSpi.smali' in f:
         path = os.path.join(r, 'AndroidKeyStoreSpi.smali')
-        meth = r'engineGetCertificateChain\(Ljava/lang/String;\)\[Ljava/security/cert/Certificate;'
-        patch_file(path, meth, p5_code_1, 'registers')
-        patch_file(path, meth, p5_code_2, 'below_search', r'aput-object\s+v2,\s*v3,\s*v4')
-
-    # 5. [FIX] MiuiBooster: Check filename and replace full method
+        patch_file(path, r'engineGetCertificateChain\(Ljava/lang/String;\)\[Ljava/security/cert/Certificate;', p5_code_1, 'registers')
+        patch_file(path, r'engineGetCertificateChain\(Ljava/lang/String;\)\[Ljava/security/cert/Certificate;', p5_code_2, 'below_search', r'aput-object\s+v2,\s*v3,\s*v4')
+    
+    # 5. MiuiBooster
     if f == 'DeviceLevelUtils.smali':
-        path = os.path.join(r, f)
-        meth = r'\.method.+initDeviceLevel\(\)V'
-        patch_file(path, meth, p6_code, 'replace_full_method')
+        patch_file(os.path.join(r, f), r'\.method.+initDeviceLevel\(\)V', p6_code, 'replace_body')
 EOF
 
 # =========================================================
@@ -462,7 +443,7 @@ for part in $LOGICALS; do
             install_gapp_logic "$P_APP" "$APP_ROOT"
         fi
 
-        # C. SYSTEM MODS (Framework & MiuiBooster)
+        # C. KAORIOS TOOLBOX
         if [ "$part" == "system" ]; then
             echo "      🌸 Kaorios: Patching Framework..."
             RAW_PATH=$(find "$DUMP_DIR" -name "framework.jar" -type f | head -n 1)
@@ -471,13 +452,14 @@ for part in $LOGICALS; do
             if [ ! -z "$FW_JAR" ] && [ -s "$KAORIOS_DIR/classes.dex" ]; then
                 echo "         -> Target: $FW_JAR"
                 cp "$FW_JAR" "${FW_JAR}.bak"
-                rm -rf "$TEMP_DIR/framework.jar" "$TEMP_DIR/fw_src"
+                
+                rm -rf "$TEMP_DIR/framework.jar" "$TEMP_DIR/fw_src" "$TEMP_DIR/framework_patched.jar"
                 cp "$FW_JAR" "$TEMP_DIR/framework.jar"
                 cd "$TEMP_DIR"
                 
                 if timeout 5m apktool d -r -f "framework.jar" -o "fw_src" >/dev/null 2>&1; then
                     python3 "$BIN_DIR/kaorios_patcher.py" "fw_src"
-                    apktool b -c "fw_src" -o "framework_patched.jar" >/dev/null 2>&1
+                    apktool b -c "fw_src" -o "framework_patched.jar" > build_log.txt 2>&1
                     if [ -f "framework_patched.jar" ]; then
                         DEX_COUNT=$(unzip -l "framework_patched.jar" | grep "classes.*\.dex" | wc -l)
                         NEXT_DEX="classes$((DEX_COUNT + 1)).dex"
@@ -492,17 +474,16 @@ for part in $LOGICALS; do
             fi
         fi
 
+        # [NEW] MIUI BOOSTER
         if [ "$part" == "system_ext" ]; then
             echo "      🚀 Kaorios: Patching MiuiBooster..."
             BOOST_JAR=$(find "$DUMP_DIR" -name "MiuiBooster.jar" -type f | head -n 1)
-            
             if [ ! -z "$BOOST_JAR" ]; then
                 echo "         -> Target: $BOOST_JAR"
                 cp "$BOOST_JAR" "${BOOST_JAR}.bak"
                 rm -rf "$TEMP_DIR/boost.jar" "$TEMP_DIR/boost_src"
                 cp "$BOOST_JAR" "$TEMP_DIR/boost.jar"
                 cd "$TEMP_DIR"
-                
                 if timeout 3m apktool d -r -f "boost.jar" -o "boost_src" >/dev/null 2>&1; then
                     python3 "$BIN_DIR/kaorios_patcher.py" "boost_src"
                     apktool b -c "boost_src" -o "boost_patched.jar" >/dev/null 2>&1
@@ -513,6 +494,50 @@ for part in $LOGICALS; do
                 fi
                 cd "$GITHUB_WORKSPACE"
             fi
+        fi
+
+        # [NEW] MIUI-FRAMEWORK (BAIDU->GBOARD)
+        if [ "$part" == "system_ext" ]; then
+            echo "      ⌨️  Redirecting Baidu IME to Gboard..."
+            MF_JAR=$(find "$DUMP_DIR" -name "miui-framework.jar" -type f | head -n 1)
+            if [ ! -z "$MF_JAR" ]; then
+                cp "$MF_JAR" "${MF_JAR}.bak"
+                rm -rf "$TEMP_DIR/mf.jar" "$TEMP_DIR/mf_src"
+                cp "$MF_JAR" "$TEMP_DIR/mf.jar"
+                cd "$TEMP_DIR"
+                if timeout 5m apktool d -r -f "mf.jar" -o "mf_src" >/dev/null 2>&1; then
+                    grep -rl "com.baidu.input_mi" "mf_src" | while read f; do
+                        if [[ "$f" == *"InputMethodServiceInjector.smali"* ]]; then
+                            sed -i 's/com.baidu.input_mi/com.google.android.inputmethod.latin/g' "$f"
+                            echo "            ✅ Patched: InputMethodServiceInjector"
+                        fi
+                    done
+                    apktool b -c "mf_src" -o "mf_patched.jar" >/dev/null 2>&1
+                    [ -f "mf_patched.jar" ] && mv "mf_patched.jar" "$MF_JAR"
+                fi
+                cd "$GITHUB_WORKSPACE"
+            fi
+        fi
+
+        # [NEW] MIUI FREQUENT PHRASE (COLORS + GBOARD)
+        MFP_APK=$(find "$DUMP_DIR" -name "MIUIFrequentPhrase.apk" -type f -print -quit)
+        if [ ! -z "$MFP_APK" ]; then
+            echo "      🎨 Modding MIUIFrequentPhrase..."
+            rm -rf "$TEMP_DIR/mfp.apk" "$TEMP_DIR/mfp_src"
+            cp "$MFP_APK" "$TEMP_DIR/mfp.apk"
+            cd "$TEMP_DIR"
+            if timeout 5m apktool d -f "mfp.apk" -o "mfp_src" >/dev/null 2>&1; then
+                find "mfp_src" -name "InputMethodBottomManager.smali" -exec sed -i 's/com.baidu.input_mi/com.google.android.inputmethod.latin/g' {} +
+                sed -i 's|<color name="input_bottom_background_color">.*</color>|<color name="input_bottom_background_color">@android:color/system_neutral1_50</color>|g' "mfp_src/res/values/colors.xml"
+                sed -i 's|<color name="input_bottom_background_color">.*</color>|<color name="input_bottom_background_color">@android:color/system_neutral1_900</color>|g' "mfp_src/res/values-night/colors.xml"
+                
+                apktool b -c "mfp_src" -o "mfp_patched.apk" >/dev/null 2>&1
+                if [ -f "mfp_patched.apk" ]; then
+                    mv "mfp_patched.apk" "$MFP_APK"
+                    echo "            ✅ MIUIFrequentPhrase Patched!"
+                fi
+            fi
+            cd "$GITHUB_WORKSPACE"
         fi
 
         # D. NEXPACKAGE
@@ -572,7 +597,7 @@ for part in $LOGICALS; do
 done
 
 # =========================================================
-#  6. PACKAGING & UPLOAD (Standard)
+#  6. PACKAGING & UPLOAD
 # =========================================================
 echo "📦  Creating Merged Pack..."
 PACK_DIR="$OUTPUT_DIR/Final_Pack"
