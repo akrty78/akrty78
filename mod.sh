@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID MANAGER - ROOT POWER EDITION v50 (Strict Fix)
+#  NEXDROID MANAGER - ROOT POWER EDITION v51 (Strict Fail)
 # =========================================================
 
 set +e 
@@ -159,69 +159,22 @@ rm -rf "$TEMP_MOD" "$BIN_DIR/wiper.py"
 EOF
 chmod +x "$GITHUB_WORKSPACE/apk-modder.sh"
 
-# --- EMBEDDED PYTHON PATCHER (v50 - STRICT FIX) ---
+# --- EMBEDDED PYTHON PATCHER (v51 - FAIL-SAFE STATE MACHINE) ---
 cat <<'EOF' > "$BIN_DIR/kaorios_patcher.py"
 import os, sys, re
 
-def patch_file(file_path, target_method_re, code_to_insert, position, search_term_re=None):
-    if not os.path.exists(file_path): return False
-    with open(file_path, 'r') as f: content = f.read()
-    
-    # Locate the EXACT method block first
-    method_match = re.search(target_method_re, content, re.MULTILINE | re.DOTALL)
-    if not method_match:
-        # Silently fail or log if needed, but keeping output clean
-        return False
+# === CONFIGURATION ===
+checklist = {
+    'ApplicationPackageManager': False,
+    'Instrumentation': False,
+    'KeyStore2': False,
+    'AndroidKeyStoreSpi': False
+}
 
-    method_start = method_match.start()
-    end_match = re.search(r'^\.end method', content[method_start:], re.MULTILINE)
-    if not end_match:
-        return False
-    
-    method_end = method_start + end_match.end()
-    method_body = content[method_start:method_end]
-    new_body = method_body
-    
-    # 1. Inject AFTER .registers (for AppPkgManager)
-    if position == 'registers':
-        # Find .registers within THIS specific method body
-        reg_match = re.search(r'\.(registers|locals)\s+\d+', method_body)
-        if reg_match:
-            idx = reg_match.end()
-            new_body = method_body[:idx] + "\n" + code_to_insert + method_body[idx:]
-        else:
-            return False
+# === PAYLOADS ===
 
-    # 2. Inject BELOW a specific line
-    elif position == 'below_search' and search_term_re:
-        search_match = re.search(search_term_re, method_body)
-        if search_match:
-            idx = search_match.end()
-            final_code = code_to_insert
-            if search_match.groups(): final_code = final_code.replace("{REG}", search_match.group(1))
-            new_body = method_body[:idx] + "\n" + final_code + method_body[idx:]
-        else:
-            return False
-
-    # 3. Inject ABOVE a specific line
-    elif position == 'above_search' and search_term_re:
-        search_match = re.search(search_term_re, method_body)
-        if search_match:
-            idx = search_match.start()
-            new_body = method_body[:idx] + code_to_insert + "\n" + method_body[idx:]
-        else:
-            return False
-
-    new_content = content[:method_start] + new_body + content[method_end:]
-    with open(file_path, 'w') as f: f.write(new_content)
-    print(f"   [OK] Patched: {os.path.basename(file_path)}")
-    return True
-
-# --- PAYLOADS ---
-
-# [STRICT] ApplicationPackageManager.hasSystemFeature(String, Int)
-# Note: Indentation matches standard smali 4-space
-p1_code = """    invoke-static {}, Landroid/app/ActivityThread;->currentPackageName()Ljava/lang/String;
+# 1. AppPkgManager (STRICT)
+apm_code = """    invoke-static {}, Landroid/app/ActivityThread;->currentPackageName()Ljava/lang/String;
     move-result-object v0
     :try_start_kaori_override
     iget-object v1, p0, Landroid/app/ApplicationPackageManager;->mContext:Landroid/app/ContextImpl;
@@ -239,49 +192,161 @@ p1_code = """    invoke-static {}, Landroid/app/ActivityThread;->currentPackageN
     return p0
     :cond_kaori_override"""
 
-# Instrumentation (unchanged)
-p2_code = "    invoke-static {p1}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriProps(Landroid/content/Context;)V"
-p3_code = "    invoke-static {p3}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriProps(Landroid/content/Context;)V"
-
-# [STRICT] KeyStore2.getKeyEntry - Inject BEFORE return-object v0
-p4_code = """    invoke-static {v0}, Lcom/android/internal/util/kaorios/KaoriKeyboxHooks;->KaoriGetKeyEntry(Landroid/system/keystore2/KeyEntryResponse;)Landroid/system/keystore2/KeyEntryResponse;
+# 2. KeyStore2 (STRICT)
+ks2_code = """    invoke-static {v0}, Lcom/android/internal/util/kaorios/KaoriKeyboxHooks;->KaoriGetKeyEntry(Landroid/system/keystore2/KeyEntryResponse;)Landroid/system/keystore2/KeyEntryResponse;
     move-result-object v0"""
 
-# AndroidKeyStoreSpi (unchanged)
-p5_code_1 = "    invoke-static {}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriGetCertificateChain()V"
-p5_code_2 = """    invoke-static {v3}, Lcom/android/internal/util/kaorios/KaoriKeyboxHooks;->KaoriGetCertificateChain([Ljava/security/cert/Certificate;)[Ljava/security/cert/Certificate;
+# 3. Instrumentation
+inst_p2 = "    invoke-static {p1}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriProps(Landroid/content/Context;)V"
+inst_p3 = "    invoke-static {p3}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriProps(Landroid/content/Context;)V"
+
+# 4. AndroidKeyStoreSpi
+akss_reg = "    invoke-static {}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriGetCertificateChain()V"
+akss_inj = """    invoke-static {v3}, Lcom/android/internal/util/kaorios/KaoriKeyboxHooks;->KaoriGetCertificateChain([Ljava/security/cert/Certificate;)[Ljava/security/cert/Certificate;
     move-result-object v3"""
 
+def process_file_state_machine(filepath, target_key):
+    if not os.path.exists(filepath): return
+    
+    with open(filepath, 'r') as f:
+        lines = f.readlines()
+
+    new_lines = []
+    modified = False
+    state = "OUTSIDE" # OUTSIDE, INSIDE_METHOD
+    
+    # Signatures
+    apm_sig = "hasSystemFeature(Ljava/lang/String;I)Z" # STRICT: must match ;I)
+    ks2_sig = "getKeyEntry(Landroid/system/keystore2/KeyDescriptor;)Landroid/system/keystore2/KeyEntryResponse;"
+    inst_sig1 = "newApplication(Ljava/lang/Class;Landroid/content/Context;)Landroid/app/Application;"
+    inst_sig2 = "newApplication(Ljava/lang/ClassLoader;Ljava/lang/String;Landroid/content/Context;)Landroid/app/Application;"
+    akss_sig = "engineGetCertificateChain(Ljava/lang/String;)[Ljava/security/cert/Certificate;"
+    
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        trimmed = line.strip()
+        
+        # --- 1. ApplicationPackageManager ---
+        if target_key == 'ApplicationPackageManager':
+            if state == "OUTSIDE":
+                if ".method" in line and apm_sig in line:
+                    state = "INSIDE_APM"
+            elif state == "INSIDE_APM":
+                # Inject AFTER .registers / .locals
+                if trimmed.startswith(".registers") or trimmed.startswith(".locals"):
+                    new_lines.append(line)
+                    new_lines.append(apm_code + "\n")
+                    modified = True
+                    checklist['ApplicationPackageManager'] = True
+                    state = "DONE" # Single injection per method
+                    i += 1; continue
+                    
+        # --- 2. KeyStore2 ---
+        elif target_key == 'KeyStore2':
+            if state == "OUTSIDE":
+                if ".method" in line and ks2_sig in line:
+                    state = "INSIDE_KS2"
+            elif state == "INSIDE_KS2":
+                # Inject ABOVE return-object v0
+                if "return-object v0" in trimmed:
+                    new_lines.append(ks2_code + "\n")
+                    new_lines.append(line)
+                    modified = True
+                    checklist['KeyStore2'] = True
+                    state = "DONE"
+                    i += 1; continue
+
+        # --- 3. Instrumentation ---
+        elif target_key == 'Instrumentation':
+            if state == "OUTSIDE" or state == "DONE": # Allow multiple methods
+                if ".method" in line:
+                    if inst_sig1 in line: state = "INSIDE_INST1"
+                    elif inst_sig2 in line: state = "INSIDE_INST2"
+            elif state == "INSIDE_INST1":
+                # Search for attach call to inject below
+                if "->attach(Landroid/content/Context;)V" in line:
+                    new_lines.append(line)
+                    new_lines.append(inst_p2 + "\n")
+                    modified = True
+                    state = "DONE" # Exit this method state
+                    i += 1; continue
+            elif state == "INSIDE_INST2":
+                if "->attach(Landroid/content/Context;)V" in line:
+                    new_lines.append(line)
+                    new_lines.append(inst_p3 + "\n")
+                    modified = True
+                    checklist['Instrumentation'] = True # Mark done if at least one patched
+                    state = "DONE"
+                    i += 1; continue
+
+        # --- 4. AndroidKeyStoreSpi ---
+        elif target_key == 'AndroidKeyStoreSpi':
+            if state == "OUTSIDE":
+                if ".method" in line and akss_sig in line:
+                    state = "INSIDE_AKSS"
+            elif state == "INSIDE_AKSS":
+                if trimmed.startswith(".registers") or trimmed.startswith(".locals"):
+                    new_lines.append(line)
+                    new_lines.append(akss_reg + "\n")
+                elif "aput-object v2, v3, v4" in trimmed:
+                    new_lines.append(line)
+                    new_lines.append(akss_inj + "\n")
+                    modified = True
+                    checklist['AndroidKeyStoreSpi'] = True
+                    state = "DONE"
+                    i += 1; continue
+
+        # Reset state at end of method
+        if ".end method" in line:
+            state = "OUTSIDE"
+
+        new_lines.append(line)
+        i += 1
+    
+    if modified:
+        with open(filepath, 'w') as f:
+            f.writelines(new_lines)
+        print(f"   [SUCCESS] Patched {target_key} in {os.path.basename(filepath)}")
+
+# === MAIN SCANNER ===
 root_dir = sys.argv[1]
+
 for r, d, f in os.walk(root_dir):
-    
-    # 1. ApplicationPackageManager: STRICT MATCH hasSystemFeature(Ljava/lang/String;I)Z
+    # AppPkgMgr
     if 'ApplicationPackageManager.smali' in f:
-        path = os.path.join(r, 'ApplicationPackageManager.smali')
-        # Regex MUST match ";I)" to ensure Int arg, preventing injection into (String) overload
-        meth = r'\.method.+hasSystemFeature\(Ljava/lang/String;I\)Z'
-        patch_file(path, meth, p1_code, 'registers')
+        process_file_state_machine(os.path.join(r, 'ApplicationPackageManager.smali'), 'ApplicationPackageManager')
     
-    # 2. Instrumentation
-    if 'Instrumentation.smali' in f:
-        path = os.path.join(r, 'Instrumentation.smali')
-        patch_file(path, r'newApplication\(Ljava/lang/Class;Landroid/content/Context;\)Landroid/app/Application;', p2_code, 'below_search', r'invoke-virtual\s+\{v0,\s*p1\},\s*Landroid/app/Application;->attach\(Landroid/content/Context;\)V')
-        patch_file(path, r'newApplication\(Ljava/lang/ClassLoader;Ljava/lang/String;Landroid/content/Context;\)Landroid/app/Application;', p3_code, 'below_search', r'invoke-virtual\s+\{v0,\s*p3\},\s*Landroid/app/Application;->attach\(Landroid/content/Context;\)V')
-    
-    # 3. KeyStore2: STRICT MATCH getKeyEntry
+    # KeyStore2
     if 'KeyStore2.smali' in f:
-        # Check path to ensure we are in security/KeyStore2
+        # Extra verification for path
         if 'android/security' in r.replace(os.sep, '/'):
-            path = os.path.join(r, 'KeyStore2.smali')
-            meth = r'\.method.+getKeyEntry\(Landroid/system/keystore2/KeyDescriptor;\)Landroid/system/keystore2/KeyEntryResponse;'
-            # Inject ABOVE return-object v0
-            patch_file(path, meth, p4_code, 'above_search', r'return-object\s+v0')
-    
-    # 4. AndroidKeyStoreSpi
+            process_file_state_machine(os.path.join(r, 'KeyStore2.smali'), 'KeyStore2')
+
+    # Instrumentation
+    if 'Instrumentation.smali' in f:
+        process_file_state_machine(os.path.join(r, 'Instrumentation.smali'), 'Instrumentation')
+
+    # AndroidKeyStoreSpi
     if 'AndroidKeyStoreSpi.smali' in f:
-        path = os.path.join(r, 'AndroidKeyStoreSpi.smali')
-        patch_file(path, r'engineGetCertificateChain\(Ljava/lang/String;\)\[Ljava/security/cert/Certificate;', p5_code_1, 'registers')
-        patch_file(path, r'engineGetCertificateChain\(Ljava/lang/String;\)\[Ljava/security/cert/Certificate;', p5_code_2, 'below_search', r'aput-object\s+v2,\s*v3,\s*v4')
+        process_file_state_machine(os.path.join(r, 'AndroidKeyStoreSpi.smali'), 'AndroidKeyStoreSpi')
+
+# === FINAL VALIDATION ===
+print("-" * 30)
+failed = False
+for key, val in checklist.items():
+    if val:
+        print(f"[PASS] {key}")
+    else:
+        print(f"[FAIL] {key} - Patch NOT applied!")
+        failed = True
+print("-" * 30)
+
+if failed:
+    print("CRITICAL ERROR: One or more patches failed. Aborting build.")
+    sys.exit(1)
+else:
+    sys.exit(0)
 EOF
 
 # =========================================================
@@ -446,7 +511,15 @@ for part in $LOGICALS; do
                 cd "$TEMP_DIR"
                 
                 if timeout 5m apktool d -r -f "framework.jar" -o "fw_src" >/dev/null 2>&1; then
-                    python3 "$BIN_DIR/kaorios_patcher.py" "fw_src"
+                    
+                    # RUN KAORIOS PATCHER WITH FAIL-SAFE
+                    if python3 "$BIN_DIR/kaorios_patcher.py" "fw_src"; then
+                        echo "      ✅ Kaorios patches applied successfully."
+                    else
+                        echo "      ❌ CRITICAL: Kaorios patches FAILED. Aborting."
+                        exit 1
+                    fi
+                    
                     apktool b -c "fw_src" -o "framework_patched.jar" > build_log.txt 2>&1
                     if [ -f "framework_patched.jar" ]; then
                         DEX_COUNT=$(unzip -l "framework_patched.jar" | grep "classes.*\.dex" | wc -l)
@@ -455,8 +528,14 @@ for part in $LOGICALS; do
                         cp "$KAORIOS_DIR/classes.dex" "$NEXT_DEX"
                         zip -u -q "framework_patched.jar" "$NEXT_DEX"
                         mv "framework_patched.jar" "$FW_JAR"
-                        echo "            ✅ Framework Patched!"
+                        echo "            ✅ Framework Patched & Repacked!"
+                    else
+                        echo "      ❌ Framework Repack Failed (Check logs)"
+                        exit 1
                     fi
+                else
+                    echo "      ❌ Framework Decompile Failed."
+                    exit 1
                 fi
                 cd "$GITHUB_WORKSPACE"
             fi
