@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID MANAGER - ROOT POWER EDITION v46
-#  (Fix: Baidu->Gboard Redirect + IME Color Resources)
+#  NEXDROID MANAGER - ROOT POWER EDITION v48
+#  (Fix: Strict Regex for hasSystemFeature + Exact Payload)
 # =========================================================
 
 set +e 
@@ -160,7 +160,7 @@ rm -rf "$TEMP_MOD" "$BIN_DIR/wiper.py"
 EOF
 chmod +x "$GITHUB_WORKSPACE/apk-modder.sh"
 
-# --- EMBEDDED PYTHON PATCHER (Extended) ---
+# --- EMBEDDED PYTHON PATCHER (v48 - Strict Mode) ---
 cat <<'EOF' > "$BIN_DIR/kaorios_patcher.py"
 import os, sys, re
 
@@ -204,6 +204,9 @@ def patch_file(file_path, target_method_re, code_to_insert, position, search_ter
     print(f"   [OK] Patched: {os.path.basename(file_path)}")
     return True
 
+# --- PAYLOADS ---
+
+# [UPDATED] AppPkgMgr Payload (Exact copy from your request)
 p1_code = """    invoke-static {}, Landroid/app/ActivityThread;->currentPackageName()Ljava/lang/String;
     move-result-object v0
     :try_start_kaori_override
@@ -221,13 +224,17 @@ p1_code = """    invoke-static {}, Landroid/app/ActivityThread;->currentPackageN
     move-result p0
     return p0
     :cond_kaori_override"""
+
 p2_code = "    invoke-static {p1}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriProps(Landroid/content/Context;)V"
 p3_code = "    invoke-static {p3}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriProps(Landroid/content/Context;)V"
+
 p4_code = """    invoke-static {v0}, Lcom/android/internal/util/kaorios/KaoriKeyboxHooks;->KaoriGetKeyEntry(Landroid/system/keystore2/KeyEntryResponse;)Landroid/system/keystore2/KeyEntryResponse;
     move-result-object v0"""
+
 p5_code_1 = "    invoke-static {}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriGetCertificateChain()V"
 p5_code_2 = """    invoke-static {v3}, Lcom/android/internal/util/kaorios/KaoriKeyboxHooks;->KaoriGetCertificateChain([Ljava/security/cert/Certificate;)[Ljava/security/cert/Certificate;
     move-result-object v3"""
+
 p6_code = """    .registers 2
     const-string v0, "v:1,c:3,g:3"
     .line 130
@@ -237,20 +244,32 @@ p6_code = """    .registers 2
 
 root_dir = sys.argv[1]
 for r, d, f in os.walk(root_dir):
+    # 1. AppPkgMgr: STRICT REGEX to avoid single-param overload
     if 'ApplicationPackageManager.smali' in f:
-        patch_file(os.path.join(r, 'ApplicationPackageManager.smali'), r'\.method.+hasSystemFeature\(Ljava/lang/String;I\)Z', p1_code, 'registers')
+        path = os.path.join(r, 'ApplicationPackageManager.smali')
+        # Explicitly match ';I)' to ensure we target (String, Int) and NOT (String)
+        meth = r'\.method.+hasSystemFeature\(Ljava/lang/String;I\)Z'
+        patch_file(path, meth, p1_code, 'registers')
+    
+    # 2. Instrumentation
     if 'Instrumentation.smali' in f:
         path = os.path.join(r, 'Instrumentation.smali')
         patch_file(path, r'newApplication\(Ljava/lang/Class;Landroid/content/Context;\)Landroid/app/Application;', p2_code, 'below_search', r'invoke-virtual\s+\{v0,\s*p1\},\s*Landroid/app/Application;->attach\(Landroid/content/Context;\)V')
         patch_file(path, r'newApplication\(Ljava/lang/ClassLoader;Ljava/lang/String;Landroid/content/Context;\)Landroid/app/Application;', p3_code, 'below_search', r'invoke-virtual\s+\{v0,\s*p3\},\s*Landroid/app/Application;->attach\(Landroid/content/Context;\)V')
+    
+    # 3. KeyStore2
     if 'KeyStore2.smali' in f:
         if 'android/security' in r.replace(os.sep, '/'):
             patch_file(os.path.join(r, 'KeyStore2.smali'), r'\.method.+getKeyEntry\(Landroid/system/keystore2/KeyDescriptor;\)Landroid/system/keystore2/KeyEntryResponse;', p4_code, 'above_search', r'return-object\s+v0')
+    
+    # 4. AndroidKeyStoreSpi
     if 'AndroidKeyStoreSpi.smali' in f:
         path = os.path.join(r, 'AndroidKeyStoreSpi.smali')
         patch_file(path, r'engineGetCertificateChain\(Ljava/lang/String;\)\[Ljava/security/cert/Certificate;', p5_code_1, 'registers')
         patch_file(path, r'engineGetCertificateChain\(Ljava/lang/String;\)\[Ljava/security/cert/Certificate;', p5_code_2, 'below_search', r'aput-object\s+v2,\s*v3,\s*v4')
-    if f.endswith('.smali') and 'MiuiBooster' in root_dir:
+    
+    # 5. MiuiBooster
+    if f == 'DeviceLevelUtils.smali':
         patch_file(os.path.join(r, f), r'\.method.+initDeviceLevel\(\)V', p6_code, 'replace_body')
 EOF
 
@@ -484,15 +503,9 @@ for part in $LOGICALS; do
             rm -rf "$TEMP_DIR/mfp.apk" "$TEMP_DIR/mfp_src"
             cp "$MFP_APK" "$TEMP_DIR/mfp.apk"
             cd "$TEMP_DIR"
-            # DECOMPILE WITH RESOURCES
             if timeout 5m apktool d -f "mfp.apk" -o "mfp_src" >/dev/null 2>&1; then
-                # 1. Smali Patch (Baidu -> Gboard)
                 find "mfp_src" -name "InputMethodBottomManager.smali" -exec sed -i 's/com.baidu.input_mi/com.google.android.inputmethod.latin/g' {} +
-                
-                # 2. Colors Patch (Day)
                 sed -i 's|<color name="input_bottom_background_color">.*</color>|<color name="input_bottom_background_color">@android:color/system_neutral1_50</color>|g' "mfp_src/res/values/colors.xml"
-                
-                # 3. Colors Patch (Night)
                 sed -i 's|<color name="input_bottom_background_color">.*</color>|<color name="input_bottom_background_color">@android:color/system_neutral1_900</color>|g' "mfp_src/res/values-night/colors.xml"
                 
                 apktool b -c "mfp_src" -o "mfp_patched.apk" >/dev/null 2>&1
