@@ -275,13 +275,15 @@ for r, d, f in os.walk(root_dir):
         search2 = r'invoke-virtual\s+\{v0,\s*p3\},\s*Landroid/app/Application;->attach\(Landroid/content/Context;\)V'
         patch_file(path, meth2, p3_code, 'below_search', search2)
 
-    # 3. KeyStore2: Strict Method Definition + Above Return
+    # 3. KeyStore2: Strict Method Definition + Above Return + Strict Class Path
     if 'KeyStore2.smali' in f:
-        path = os.path.join(r, 'KeyStore2.smali')
-        # Matches: .method [flags] getKeyEntry(...)KeyEntryResponse;
-        meth = r'\.method.+getKeyEntry\(Landroid/system/keystore2/KeyDescriptor;\)Landroid/system/keystore2/KeyEntryResponse;'
-        search = r'return-object\s+v0'
-        patch_file(path, meth, p4_code, 'above_search', search)
+        # STRICT PATH CHECK: Must be in android/security
+        if 'android/security' in r.replace(os.sep, '/'):
+            path = os.path.join(r, 'KeyStore2.smali')
+            # Matches: .method [flags] getKeyEntry(...)KeyEntryResponse;
+            meth = r'\.method.+getKeyEntry\(Landroid/system/keystore2/KeyDescriptor;\)Landroid/system/keystore2/KeyEntryResponse;'
+            search = r'return-object\s+v0'
+            patch_file(path, meth, p4_code, 'above_search', search)
 
     # 4. AndroidKeyStoreSpi: Working as is
     if 'AndroidKeyStoreSpi.smali' in f:
