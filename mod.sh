@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID MANAGER - ROOT POWER EDITION v52 (Relocator)
+#  NEXDROID MANAGER - ROOT POWER EDITION v53 (Dex Allocator)
 # =========================================================
 
 set +e 
@@ -512,26 +512,42 @@ for part in $LOGICALS; do
                 
                 if timeout 5m apktool d -r -f "framework.jar" -o "fw_src" >/dev/null 2>&1; then
                     
-                    # --- AUTO RELOCATION LOGIC (FIX 64K LIMIT) ---
-                    echo "      📦 Relocating ApplicationPackageManager..."
+                    # --- AUTO DEX ALLOCATOR (REDIVISION) ---
+                    echo "      📦 Redividing Dex (Allocating new Smali bucket)..."
                     cd "fw_src"
-                    # Find highest smali folder (e.g. smali_classes5)
-                    LAST_SMALI=$(find . -maxdepth 1 -type d -name "smali_classes*" | sort -V | tail -n 1)
-                    [ -z "$LAST_SMALI" ] && LAST_SMALI="smali"
                     
-                    # Find APM source
-                    APM_SRC=$(find . -name "ApplicationPackageManager.smali" | head -n 1)
-                    if [ ! -z "$APM_SRC" ]; then
-                         APM_DIR=$(dirname "$APM_SRC")
-                         # Only move if not already in the last dir
-                         if [[ "$APM_DIR" != *"$LAST_SMALI"* ]]; then
-                             TARGET_DIR="$LAST_SMALI/android/app"
-                             mkdir -p "$TARGET_DIR"
-                             # Move APM and all its inner classes ($1.smali etc)
-                             mv "$APM_DIR/ApplicationPackageManager"* "$TARGET_DIR/"
-                             echo "          -> Moved to $LAST_SMALI"
-                         fi
-                    fi
+                    # 1. Identify current max smali folder (e.g., smali_classes5)
+                    MAX_NUM=1
+                    for dir in smali_classes*; do
+                        if [ -d "$dir" ]; then
+                            NUM=$(echo "$dir" | sed 's/smali_classes//')
+                            if [[ "$NUM" =~ ^[0-9]+$ ]] && [ "$NUM" -gt "$MAX_NUM" ]; then
+                                MAX_NUM=$NUM
+                            fi
+                        fi
+                    done
+                    
+                    # 2. Create NEW empty bucket (e.g., smali_classes6)
+                    NEW_NUM=$((MAX_NUM + 1))
+                    NEW_DIR="smali_classes${NEW_NUM}"
+                    mkdir -p "$NEW_DIR/android/app" "$NEW_DIR/android/security"
+                    echo "          -> Created $NEW_DIR"
+
+                    # 3. Move ApplicationPackageManager (and all inner classes) to new bucket
+                    # Note: We search in ALL smali folders
+                    find . -name "ApplicationPackageManager*.smali" | while read file; do
+                        # Preserve directory structure relative to smali_classesX root
+                        # But simpler: we know it belongs in android/app
+                        mv "$file" "$NEW_DIR/android/app/" 2>/dev/null
+                    done
+                    
+                    # 4. Move KeyStore2 (and all inner classes) to new bucket
+                    find . -name "KeyStore2*.smali" | while read file; do
+                        # Move to android/security
+                        mv "$file" "$NEW_DIR/android/security/" 2>/dev/null
+                    done
+                    
+                    echo "          -> Migrated heavy classes to $NEW_DIR"
                     cd ..
                     # ---------------------------------------------
 
