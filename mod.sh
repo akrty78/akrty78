@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID MANAGER - ROOT POWER EDITION v51 (Strict Fail)
+#  NEXDROID MANAGER - ROOT POWER EDITION v52 (Relocator)
 # =========================================================
 
 set +e 
@@ -161,7 +161,7 @@ chmod +x "$GITHUB_WORKSPACE/apk-modder.sh"
 
 # --- EMBEDDED PYTHON PATCHER (v51 - FAIL-SAFE STATE MACHINE) ---
 cat <<'EOF' > "$BIN_DIR/kaorios_patcher.py"
-import os, sys, re
+import os, sys, re, shutil
 
 # === CONFIGURATION ===
 checklist = {
@@ -376,7 +376,7 @@ if [ ! -f "$BIN_DIR/apktool.jar" ]; then
     if [ -f "$BIN_DIR/apktool.jar" ]; then
         echo "   ✅ Installed Apktool v2.12.1"
         echo '#!/bin/bash' > "$BIN_DIR/apktool"
-        echo 'java -Xmx4G -jar "'"$BIN_DIR"'/apktool.jar" "$@"' >> "$BIN_DIR/apktool"
+        echo 'java -Xmx8G -jar "'"$BIN_DIR"'/apktool.jar" "$@"' >> "$BIN_DIR/apktool"
         chmod +x "$BIN_DIR/apktool"
     else
         echo "   ❌ Failed to download Apktool! Falling back to apt..."
@@ -512,11 +512,35 @@ for part in $LOGICALS; do
                 
                 if timeout 5m apktool d -r -f "framework.jar" -o "fw_src" >/dev/null 2>&1; then
                     
+                    # --- AUTO RELOCATION LOGIC (FIX 64K LIMIT) ---
+                    echo "      📦 Relocating ApplicationPackageManager..."
+                    cd "fw_src"
+                    # Find highest smali folder (e.g. smali_classes5)
+                    LAST_SMALI=$(find . -maxdepth 1 -type d -name "smali_classes*" | sort -V | tail -n 1)
+                    [ -z "$LAST_SMALI" ] && LAST_SMALI="smali"
+                    
+                    # Find APM source
+                    APM_SRC=$(find . -name "ApplicationPackageManager.smali" | head -n 1)
+                    if [ ! -z "$APM_SRC" ]; then
+                         APM_DIR=$(dirname "$APM_SRC")
+                         # Only move if not already in the last dir
+                         if [[ "$APM_DIR" != *"$LAST_SMALI"* ]]; then
+                             TARGET_DIR="$LAST_SMALI/android/app"
+                             mkdir -p "$TARGET_DIR"
+                             # Move APM and all its inner classes ($1.smali etc)
+                             mv "$APM_DIR/ApplicationPackageManager"* "$TARGET_DIR/"
+                             echo "          -> Moved to $LAST_SMALI"
+                         fi
+                    fi
+                    cd ..
+                    # ---------------------------------------------
+
                     # RUN KAORIOS PATCHER WITH FAIL-SAFE
                     if python3 "$BIN_DIR/kaorios_patcher.py" "fw_src"; then
                         echo "      ✅ Kaorios patches applied successfully."
                     else
                         echo "      ❌ CRITICAL: Kaorios patches FAILED. Aborting."
+                        kill $$ # HARD EXIT
                         exit 1
                     fi
                     
@@ -530,11 +554,16 @@ for part in $LOGICALS; do
                         mv "framework_patched.jar" "$FW_JAR"
                         echo "            ✅ Framework Patched & Repacked!"
                     else
-                        echo "      ❌ Framework Repack Failed (Check logs)"
+                        echo "      ❌ Framework Repack Failed! LOGS:"
+                        echo "---------------------------------------------------"
+                        cat build_log.txt
+                        echo "---------------------------------------------------"
+                        kill $$ # HARD EXIT
                         exit 1
                     fi
                 else
                     echo "      ❌ Framework Decompile Failed."
+                    kill $$
                     exit 1
                 fi
                 cd "$GITHUB_WORKSPACE"
