@@ -450,7 +450,7 @@ for part in $LOGICALS; do
             FW_JAR=$(readlink -f "$RAW_PATH")
             
             if [ ! -z "$FW_JAR" ] && [ -s "$KAORIOS_DIR/classes.dex" ]; then
-                echo "         -> Target: $FW_JAR"
+                echo "          -> Target: $FW_JAR"
                 cp "$FW_JAR" "${FW_JAR}.bak"
                 
                 rm -rf "$TEMP_DIR/framework.jar" "$TEMP_DIR/fw_src" "$TEMP_DIR/framework_patched.jar"
@@ -474,25 +474,44 @@ for part in $LOGICALS; do
             fi
         fi
 
-        # [NEW] MIUI BOOSTER
+        # [NEW] MIUI BOOSTER (VIA MOD.SH)
         if [ "$part" == "system_ext" ]; then
-            echo "      🚀 Kaorios: Patching MiuiBooster..."
+            echo "      🚀 Kaorios: Patching MiuiBooster (via mod.sh)..."
             BOOST_JAR=$(find "$DUMP_DIR" -name "MiuiBooster.jar" -type f | head -n 1)
             if [ ! -z "$BOOST_JAR" ]; then
-                echo "         -> Target: $BOOST_JAR"
-                cp "$BOOST_JAR" "${BOOST_JAR}.bak"
-                rm -rf "$TEMP_DIR/boost.jar" "$TEMP_DIR/boost_src"
-                cp "$BOOST_JAR" "$TEMP_DIR/boost.jar"
+                echo "          -> Target: $BOOST_JAR"
+                
+                # 1. CREATE MOD.SH
+                cat <<'EOF_MOD' > "$TEMP_DIR/mod.sh"
+#!/bin/bash
+JAR="$1"
+[ ! -f "$JAR" ] && exit 1
+rm -rf "bst_tmp"
+apktool d -r -f "$JAR" -o "bst_tmp" >/dev/null 2>&1
+SMALI=$(find "bst_tmp" -name "DeviceLevelUtils.smali" -type f | head -n 1)
+if [ -f "$SMALI" ]; then
+    python3 -c '
+import sys, re
+f=sys.argv[1]
+with open(f,"r") as h: c=h.read()
+p=r"(\.method.+initDeviceLevel\(\)V)(.*?)(\.end method)"
+r=r"\1\n    .registers 2\n    const-string v0, \"v:1,c:3,g:3\"\n    invoke-direct {p0, v0}, Lcom/miui/performance/DeviceLevelUtils;->parseDeviceLevelList(Ljava/lang/String;)V\n    return-void\n\3"
+with open(f,"w") as h: h.write(re.sub(p, r, c, flags=re.DOTALL))
+' "$SMALI"
+    apktool b -c "bst_tmp" -o "patched.jar" >/dev/null 2>&1
+    [ -f "patched.jar" ] && mv "patched.jar" "$JAR"
+fi
+rm -rf "bst_tmp"
+EOF_MOD
+                chmod +x "$TEMP_DIR/mod.sh"
+                
+                # 2. EXECUTE MOD.SH
                 cd "$TEMP_DIR"
-                if timeout 3m apktool d -r -f "boost.jar" -o "boost_src" >/dev/null 2>&1; then
-                    python3 "$BIN_DIR/kaorios_patcher.py" "boost_src"
-                    apktool b -c "boost_src" -o "boost_patched.jar" >/dev/null 2>&1
-                    if [ -f "boost_patched.jar" ]; then
-                        mv "boost_patched.jar" "$BOOST_JAR"
-                        echo "            ✅ MiuiBooster Patched!"
-                    fi
-                fi
+                ./mod.sh "$BOOST_JAR"
+                rm "mod.sh"
                 cd "$GITHUB_WORKSPACE"
+                
+                echo "            ✅ MiuiBooster Patched!"
             fi
         fi
 
@@ -558,8 +577,8 @@ for part in $LOGICALS; do
             if [ -d "$GITHUB_WORKSPACE/nex_pkg" ]; then
                 DEF_XML="default-permissions-google.xml"
                 if [ -f "$GITHUB_WORKSPACE/nex_pkg/$DEF_XML" ]; then
-                     cp "$GITHUB_WORKSPACE/nex_pkg/$DEF_XML" "$DEF_PERM_DIR/"
-                     chmod 644 "$DEF_PERM_DIR/$DEF_XML"
+                      cp "$GITHUB_WORKSPACE/nex_pkg/$DEF_XML" "$DEF_PERM_DIR/"
+                      chmod 644 "$DEF_PERM_DIR/$DEF_XML"
                 fi
                 find "$GITHUB_WORKSPACE/nex_pkg" -maxdepth 1 -name "*.xml" ! -name "$DEF_XML" -exec cp {} "$PERM_DIR/" \;
                 cp "$GITHUB_WORKSPACE/nex_pkg/"*.apk "$OVERLAY_DIR/" 2>/dev/null
