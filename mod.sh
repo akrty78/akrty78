@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID MANAGER - ROOT POWER EDITION v52
-#  (Fix: Direct MiuiBooster Replace + Strict Phrase App Detection)
+#  NEXDROID MANAGER - ROOT POWER EDITION v53
+#  (Fix: Ultra-Strict Regex to Avoid Wrong Method Overload)
 # =========================================================
 
 set +e 
@@ -102,30 +102,31 @@ install_gapp_logic() {
     done
 }
 
-# --- GENERATE APK-MODDER.SH (For Settings.apk) ---
-# We keep this as it works well for the simple true/false patches
+# --- GENERATE APK-MODDER.SH (Settings.apk Tool) ---
 cat <<'EOF' > "$GITHUB_WORKSPACE/apk-modder.sh"
 #!/bin/bash
 APK_PATH="$1"; TARGET_CLASS="$2"; TARGET_METHOD="$3"; RETURN_VAL="$4"
 BIN_DIR="$(pwd)/bin"; TEMP_MOD="temp_modder"
 export PATH="$BIN_DIR:$PATH"
 [ ! -f "$APK_PATH" ] && exit 1
-echo "   [APK-Modder] 💉 Patching $TARGET_METHOD..."
+echo "   [Modder] 💉 Patching $TARGET_METHOD..."
 rm -rf "$TEMP_MOD"
 apktool d -r -f "$APK_PATH" -o "$TEMP_MOD" >/dev/null 2>&1
 CLASS_PATH=$(echo "$TARGET_CLASS" | sed 's/\./\//g')
 SMALI_FILE=$(find "$TEMP_MOD" -type f -path "*/$CLASS_PATH.smali" | head -n 1)
-[ -z "$SMALI_FILE" ] && { echo "   [APK-Modder] ⚠️ Class not found"; rm -rf "$TEMP_MOD"; exit 0; }
+[ -z "$SMALI_FILE" ] && { rm -rf "$TEMP_MOD"; exit 0; }
 
 cat <<PY > "$BIN_DIR/wiper.py"
 import sys, re
 file_path = sys.argv[1]; method_name = sys.argv[2]; ret_type = sys.argv[3]
 tpl_true = ".registers 1\n    const/4 v0, 0x1\n    return v0"
 tpl_false = ".registers 1\n    const/4 v0, 0x0\n    return v0"
+tpl_null = ".registers 1\n    const/4 v0, 0x0\n    return-object v0"
 tpl_void = ".registers 0\n    return-void"
 payload = tpl_void
 if ret_type.lower() == 'true': payload = tpl_true
 elif ret_type.lower() == 'false': payload = tpl_false
+elif ret_type.lower() == 'null': payload = tpl_null
 with open(file_path, 'r') as f: content = f.read()
 pattern = r'(\.method.* ' + re.escape(method_name) + r'\(.*)(?s:.*?)(\.end method)'
 new_content, count = re.subn(pattern, lambda m: m.group(1) + "\n" + payload + "\n" + m.group(2), content)
@@ -134,10 +135,115 @@ if count > 0:
     print("PATCHED")
 PY
 RESULT=$(python3 "$BIN_DIR/wiper.py" "$SMALI_FILE" "$TARGET_METHOD" "$RETURN_VAL")
-[ "$RESULT" == "PATCHED" ] && apktool b -c "$TEMP_MOD" -o "$APK_PATH" >/dev/null 2>&1 && echo "   [APK-Modder] ✅ Done."
+[ "$RESULT" == "PATCHED" ] && apktool b -c "$TEMP_MOD" -o "$APK_PATH" >/dev/null 2>&1 && echo "   [Modder] ✅ Done."
 rm -rf "$TEMP_MOD" "$BIN_DIR/wiper.py"
 EOF
 chmod +x "$GITHUB_WORKSPACE/apk-modder.sh"
+
+# --- INTERNAL PATCHER GENERATOR ---
+cat <<'EOF' > "$BIN_DIR/kaorios_patcher.py"
+import os, sys, re
+
+def patch_file(file_path, target_method_re, code_to_insert, position, search_term_re=None):
+    if not os.path.exists(file_path): return False
+    with open(file_path, 'r') as f: content = f.read()
+    
+    # 1. FIND METHOD BLOCK (STRICT)
+    # We must find the method that matches the regex EXACTLY
+    method_match = re.search(target_method_re, content, re.MULTILINE | re.DOTALL)
+    if not method_match: return False
+
+    method_start = method_match.start()
+    
+    # Find the end of THIS specific method
+    # We look for .end method starting from where the method definition was found
+    end_match = re.search(r'^\.end method', content[method_start:], re.MULTILINE)
+    if not end_match: return False
+    
+    method_end = method_start + end_match.end()
+    method_body = content[method_start:method_end]
+    new_body = method_body
+    
+    # 2. APPLY INJECTION
+    if position == 'registers':
+        reg_match = re.search(r'\.(registers|locals)\s+\d+', method_body)
+        if reg_match:
+            idx = reg_match.end()
+            new_body = method_body[:idx] + "\n" + code_to_insert + method_body[idx:]
+            
+    elif position == 'below_search' and search_term_re:
+        search_match = re.search(search_term_re, method_body)
+        if search_match:
+            idx = search_match.end()
+            final_code = code_to_insert
+            if search_match.groups(): final_code = final_code.replace("{REG}", search_match.group(1))
+            new_body = method_body[:idx] + "\n" + final_code + method_body[idx:]
+            
+    elif position == 'above_search' and search_term_re:
+        search_match = re.search(search_term_re, method_body)
+        if search_match:
+            idx = search_match.start()
+            new_body = method_body[:idx] + code_to_insert + "\n" + method_body[idx:]
+
+    new_content = content[:method_start] + new_body + content[method_end:]
+    with open(file_path, 'w') as f: f.write(new_content)
+    print(f"   [OK] Patched: {os.path.basename(file_path)}")
+    return True
+
+# --- PAYLOADS ---
+p1_code = """    invoke-static {}, Landroid/app/ActivityThread;->currentPackageName()Ljava/lang/String;
+    move-result-object v0
+    :try_start_kaori_override
+    iget-object v1, p0, Landroid/app/ApplicationPackageManager;->mContext:Landroid/app/ContextImpl;
+    invoke-static {v1, p1, v0}, Lcom/android/internal/util/kaorios/KaoriFeatureOverrides;->getOverride(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/Boolean;
+    move-result-object v0
+    :try_end_kaori_override
+    .catchall {:try_start_kaori_override .. :try_end_kaori_override} :catchall_kaori_override
+    goto :goto_kaori_override
+    :catchall_kaori_override
+    const/4 v0, 0x0
+    :goto_kaori_override
+    if-eqz v0, :cond_kaori_override
+    invoke-virtual {v0}, Ljava/lang/Boolean;->booleanValue()Z
+    move-result p0
+    return p0
+    :cond_kaori_override"""
+
+p2_code = "    invoke-static {p1}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriProps(Landroid/content/Context;)V"
+p3_code = "    invoke-static {p3}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriProps(Landroid/content/Context;)V"
+
+p4_code = """    invoke-static {v0}, Lcom/android/internal/util/kaorios/KaoriKeyboxHooks;->KaoriGetKeyEntry(Landroid/system/keystore2/KeyEntryResponse;)Landroid/system/keystore2/KeyEntryResponse;
+    move-result-object v0"""
+
+p5_code_1 = "    invoke-static {}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriGetCertificateChain()V"
+p5_code_2 = """    invoke-static {v3}, Lcom/android/internal/util/kaorios/KaoriKeyboxHooks;->KaoriGetCertificateChain([Ljava/security/cert/Certificate;)[Ljava/security/cert/Certificate;
+    move-result-object v3"""
+
+root_dir = sys.argv[1]
+for r, d, f in os.walk(root_dir):
+    # 1. AppPkgMgr: ULTRA STRICT REGEX
+    # Matches: .method [flags] hasSystemFeature(String, Int) Bool
+    # Does NOT match: hasSystemFeature(String) Bool
+    if 'ApplicationPackageManager.smali' in f:
+        patch_file(os.path.join(r, 'ApplicationPackageManager.smali'), r'\.method.+hasSystemFeature\(Ljava/lang/String;I\)Z', p1_code, 'registers')
+    
+    # 2. Instrumentation
+    if 'Instrumentation.smali' in f:
+        path = os.path.join(r, 'Instrumentation.smali')
+        patch_file(path, r'newApplication\(Ljava/lang/Class;Landroid/content/Context;\)Landroid/app/Application;', p2_code, 'below_search', r'invoke-virtual\s+\{v0,\s*p1\},\s*Landroid/app/Application;->attach\(Landroid/content/Context;\)V')
+        patch_file(path, r'newApplication\(Ljava/lang/ClassLoader;Ljava/lang/String;Landroid/content/Context;\)Landroid/app/Application;', p3_code, 'below_search', r'invoke-virtual\s+\{v0,\s*p3\},\s*Landroid/app/Application;->attach\(Landroid/content/Context;\)V')
+    
+    # 3. KeyStore2
+    if 'KeyStore2.smali' in f:
+        if 'android/security' in r.replace(os.sep, '/'):
+            patch_file(os.path.join(r, 'KeyStore2.smali'), r'\.method.+getKeyEntry\(Landroid/system/keystore2/KeyDescriptor;\)Landroid/system/keystore2/KeyEntryResponse;', p4_code, 'above_search', r'return-object\s+v0')
+    
+    # 4. AndroidKeyStoreSpi
+    if 'AndroidKeyStoreSpi.smali' in f:
+        path = os.path.join(r, 'AndroidKeyStoreSpi.smali')
+        patch_file(path, r'engineGetCertificateChain\(Ljava/lang/String;\)\[Ljava/security/cert/Certificate;', p5_code_1, 'registers')
+        patch_file(path, r'engineGetCertificateChain\(Ljava/lang/String;\)\[Ljava/security/cert/Certificate;', p5_code_2, 'below_search', r'aput-object\s+v2,\s*v3,\s*v4')
+EOF
 
 # =========================================================
 #  2. SETUP & TOOLS
@@ -256,24 +362,15 @@ for part in $LOGICALS; do
                 cp "$BOOST_JAR" "${BOOST_JAR}.bak"
                 rm -rf "$TEMP_DIR/boost_src"
                 
-                # Decompile
                 if timeout 3m apktool d -r -f "$BOOST_JAR" -o "$TEMP_DIR/boost_src" >/dev/null 2>&1; then
-                    echo "      [LOG] Decompiled. Searching for DeviceLevelUtils..."
-                    
-                    # Find specific smali file
                     UTILS_SMALI=$(find "$TEMP_DIR/boost_src" -name "DeviceLevelUtils.smali" | head -n 1)
-                    
                     if [ -z "$UTILS_SMALI" ]; then
                         echo "      ❌ DeviceLevelUtils.smali NOT FOUND."
                     else
                         echo "      [LOG] Found Smali: $UTILS_SMALI. Applying Nuclear Patch..."
-                        
-                        # NUCLEAR PYTHON PATCHER (Inline)
 cat <<PY > "$TEMP_DIR/patch_booster.py"
 import sys, re
 with open("$UTILS_SMALI", 'r') as f: content = f.read()
-
-# Exact payload requested
 payload = """.method public initDeviceLevel()V
     .registers 2
     const-string v0, "v:1,c:3,g:3"
@@ -282,18 +379,14 @@ payload = """.method public initDeviceLevel()V
     .line 140
     return-void
 .end method"""
-
-# Regex to find the whole method block
 pattern = r'(\.method public initDeviceLevel\(\)V)(?s:.*?)(\.end method)'
 new_content, count = re.subn(pattern, payload, content)
-
 if count > 0:
     with open("$UTILS_SMALI", 'w') as f: f.write(new_content)
     print("SUCCESS")
 else:
     print("FAIL")
 PY
-                        # Run Patch
                         RES=$(python3 "$TEMP_DIR/patch_booster.py")
                         if [ "$RES" == "SUCCESS" ]; then
                             echo "      [LOG] ✅ DeviceLevelUtils Patched Successfully."
@@ -303,13 +396,11 @@ PY
                             echo "      ❌ Regex Match Failed. Method signature changed?"
                         fi
                     fi
-                else
-                    echo "      ❌ Decompile Failed."
                 fi
             fi
         fi
 
-        # D. MIUI FRAMEWORK (Baidu -> Gboard)
+        # D. MIUI FRAMEWORK
         if [ "$part" == "system_ext" ]; then
             echo "      ⌨️  Patching MIUI Framework..."
             MF_JAR=$(find "$DUMP_DIR" -name "miui-framework.jar" | head -n 1)
@@ -324,23 +415,37 @@ PY
             fi
         fi
 
-        # E. MIUI PHRASE APP (Strict Package Check)
+        # E. KAORIOS FRAMEWORK (Strict AppPkgMgr)
+        if [ "$part" == "system" ]; then
+            echo "      🌸 Kaorios: Patching Framework..."
+            FW_JAR=$(find "$DUMP_DIR" -name "framework.jar" | head -n 1)
+            if [ ! -z "$FW_JAR" ]; then
+                cp "$FW_JAR" "$TEMP_DIR/framework.jar"; cd "$TEMP_DIR"
+                if timeout 5m apktool d -r -f "framework.jar" -o "fw_src" >/dev/null 2>&1; then
+                    # We run the internal patcher here
+                    python3 "$BIN_DIR/kaorios_patcher.py" "fw_src"
+                    apktool b -c "fw_src" -o "patched.jar" >/dev/null 2>&1
+                    if [ -f "patched.jar" ]; then
+                        DEX_N=$(unzip -l "patched.jar" | grep "classes.*\.dex" | wc -l)
+                        N_DEX="classes$((DEX_N + 1)).dex"; [ "$DEX_N" -eq 1 ] && N_DEX="classes2.dex"
+                        cp "$KAORIOS_DIR/classes.dex" "$N_DEX"; zip -u -q "patched.jar" "$N_DEX"
+                        mv "patched.jar" "$FW_JAR"; echo "            ✅ Framework Patched!"
+                    fi
+                fi; cd "$GITHUB_WORKSPACE"
+            fi
+        fi
+
+        # F. MIUI PHRASE APP
         if [ "$part" == "system_ext" ] || [ "$part" == "product" ]; then
             echo "      🎨 Searching for Phrase App (com.miui.phrase)..."
-            
-            # Find all APKs, check package name
             find "$DUMP_DIR" -name "*.apk" | while read apk; do
                 pkg=$(aapt dump badging "$apk" 2>/dev/null | grep "package: name='com.miui.phrase'")
-                
                 if [ ! -z "$pkg" ]; then
                     echo "      [LOG] Found Target: $apk"
                     rm -rf "$TEMP_DIR/phrase_src"
-                    
-                    # Decompile WITH Resources
                     if timeout 5m apktool d -f "$apk" -o "$TEMP_DIR/phrase_src" >/dev/null 2>&1; then
                         echo "      [LOG] Patching Smali..."
                         find "$TEMP_DIR/phrase_src" -name "InputMethodBottomManager.smali" -exec sed -i 's/com.baidu.input_mi/com.google.android.inputmethod.latin/g' {} +
-                        
                         echo "      [LOG] Patching Colors..."
                         [ -f "$TEMP_DIR/phrase_src/res/values/colors.xml" ] && sed -i 's|<color name="input_bottom_background_color">.*</color>|<color name="input_bottom_background_color">@android:color/system_neutral1_50</color>|g' "$TEMP_DIR/phrase_src/res/values/colors.xml"
                         [ -f "$TEMP_DIR/phrase_src/res/values-night/colors.xml" ] && sed -i 's|<color name="input_bottom_background_color">.*</color>|<color name="input_bottom_background_color">@android:color/system_neutral1_900</color>|g' "$TEMP_DIR/phrase_src/res/values-night/colors.xml"
@@ -351,30 +456,30 @@ PY
                     else
                         echo "      ❌ Failed to decompile phrase app."
                     fi
-                    break # Stop looking once found
+                    break
                 fi
             done
         fi
 
-        # F. NEXPACKAGE
+        # G. NEXPACKAGE
         if [ "$part" == "product" ] && [ -d "$GITHUB_WORKSPACE/nex_pkg" ]; then
             echo "      📦 Injecting NexPackage..."
             cp -r "$GITHUB_WORKSPACE/nex_pkg/"* "$DUMP_DIR/" 2>/dev/null
             chmod 644 "$DUMP_DIR/etc/permissions/"* 2>/dev/null
         fi
         
-        # G. PROVISION
+        # H. PROVISION
         PROV_APK=$(find "$DUMP_DIR" -name "Provision.apk" | head -n 1)
         if [ ! -z "$PROV_APK" ]; then
             echo "      🔧 Patching Provision..."
-            apktool d -r -f "$PROV_APK" -o "prov_temp" > /dev/null 2>&1
+            apktool d -r -f "$PROV_APK" -o "prov_temp" >/dev/null 2>&1
             if [ -d "prov_temp" ]; then
                 grep -r "IS_INTERNATIONAL_BUILD" "prov_temp" | cut -d: -f1 | xargs sed -i -E 's/sget-boolean ([vp][0-9]+), Lmiui\/os\/Build;->IS_INTERNATIONAL_BUILD:Z/const\/4 \1, 0x1/g'
                 apktool b "prov_temp" -o "$PROV_APK" >/dev/null 2>&1
             fi; rm -rf "prov_temp"
         fi
 
-        # H. SETTINGS MOD
+        # I. SETTINGS MOD
         SETTINGS_APK=$(find "$DUMP_DIR" -name "Settings.apk" | head -n 1)
         [ ! -z "$SETTINGS_APK" ] && { echo "      💊 Modding Settings..."; ./apk-modder.sh "$SETTINGS_APK" "com/android/settings/InternalDeviceUtils" "isAiSupported" "true"; }
 
