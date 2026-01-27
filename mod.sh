@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID MANAGER - ROOT POWER EDITION v54 (Duplicate Reg Fix)
+#  NEXDROID MANAGER - ROOT POWER EDITION v56 (Clean & Alloc)
 # =========================================================
 
 set +e 
@@ -159,7 +159,7 @@ rm -rf "$TEMP_MOD" "$BIN_DIR/wiper.py"
 EOF
 chmod +x "$GITHUB_WORKSPACE/apk-modder.sh"
 
-# --- EMBEDDED PYTHON PATCHER (v54 - REGISTER FIX) ---
+# --- EMBEDDED PYTHON PATCHER (v56 - CLEAN STATE ENFORCER) ---
 cat <<'EOF' > "$BIN_DIR/kaorios_patcher.py"
 import os, sys, re, shutil
 
@@ -172,8 +172,6 @@ checklist = {
 }
 
 # === PAYLOADS ===
-
-# 1. AppPkgManager (STRICT)
 apm_code = """    invoke-static {}, Landroid/app/ActivityThread;->currentPackageName()Ljava/lang/String;
     move-result-object v0
     :try_start_kaori_override
@@ -192,15 +190,12 @@ apm_code = """    invoke-static {}, Landroid/app/ActivityThread;->currentPackage
     return p0
     :cond_kaori_override"""
 
-# 2. KeyStore2 (STRICT)
 ks2_code = """    invoke-static {v0}, Lcom/android/internal/util/kaorios/KaoriKeyboxHooks;->KaoriGetKeyEntry(Landroid/system/keystore2/KeyEntryResponse;)Landroid/system/keystore2/KeyEntryResponse;
     move-result-object v0"""
 
-# 3. Instrumentation
 inst_p2 = "    invoke-static {p1}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriProps(Landroid/content/Context;)V"
 inst_p3 = "    invoke-static {p3}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriProps(Landroid/content/Context;)V"
 
-# 4. AndroidKeyStoreSpi (FIXED: No double registers)
 akss_inj = """    invoke-static {v3}, Lcom/android/internal/util/kaorios/KaoriKeyboxHooks;->KaoriGetCertificateChain([Ljava/security/cert/Certificate;)[Ljava/security/cert/Certificate;
     move-result-object v3"""
 akss_init = "    invoke-static {}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriGetCertificateChain()V"
@@ -209,14 +204,22 @@ def process_file_state_machine(filepath, target_key):
     if not os.path.exists(filepath): return
     
     with open(filepath, 'r') as f:
-        lines = f.readlines()
+        content_raw = f.read()
+    
+    # === SAFETY CHECK: IDEMPOTENCY ===
+    # If the file already contains Kaori code, assume it's patched and SKIP.
+    # This prevents the "duplicate registers" or double injection error.
+    if "Kaori" in content_raw and "kaorios" in content_raw:
+        print(f"   [INFO] {target_key} already patched. Skipping to prevent corruption.")
+        checklist[target_key] = True
+        return
 
+    lines = content_raw.splitlines(keepends=True)
     new_lines = []
     modified = False
-    state = "OUTSIDE" # OUTSIDE, INSIDE_METHOD
+    state = "OUTSIDE"
     
-    # Signatures
-    apm_sig = "hasSystemFeature(Ljava/lang/String;I)Z" # STRICT: must match ;I)
+    apm_sig = "hasSystemFeature(Ljava/lang/String;I)Z"
     ks2_sig = "getKeyEntry(Landroid/system/keystore2/KeyDescriptor;)Landroid/system/keystore2/KeyEntryResponse;"
     inst_sig1 = "newApplication(Ljava/lang/Class;Landroid/content/Context;)Landroid/app/Application;"
     inst_sig2 = "newApplication(Ljava/lang/ClassLoader;Ljava/lang/String;Landroid/content/Context;)Landroid/app/Application;"
@@ -227,28 +230,24 @@ def process_file_state_machine(filepath, target_key):
         line = lines[i]
         trimmed = line.strip()
         
-        # --- 1. ApplicationPackageManager ---
+        # 1. AppPkgManager
         if target_key == 'ApplicationPackageManager':
             if state == "OUTSIDE":
-                if ".method" in line and apm_sig in line:
-                    state = "INSIDE_APM"
+                if ".method" in line and apm_sig in line: state = "INSIDE_APM"
             elif state == "INSIDE_APM":
-                # Inject AFTER .registers / .locals
                 if trimmed.startswith(".registers") or trimmed.startswith(".locals"):
                     new_lines.append(line)
                     new_lines.append(apm_code + "\n")
                     modified = True
                     checklist['ApplicationPackageManager'] = True
-                    state = "DONE" # Single injection per method
+                    state = "DONE"
                     i += 1; continue
                     
-        # --- 2. KeyStore2 ---
+        # 2. KeyStore2
         elif target_key == 'KeyStore2':
             if state == "OUTSIDE":
-                if ".method" in line and ks2_sig in line:
-                    state = "INSIDE_KS2"
+                if ".method" in line and ks2_sig in line: state = "INSIDE_KS2"
             elif state == "INSIDE_KS2":
-                # Inject ABOVE return-object v0
                 if "return-object v0" in trimmed:
                     new_lines.append(ks2_code + "\n")
                     new_lines.append(line)
@@ -257,40 +256,30 @@ def process_file_state_machine(filepath, target_key):
                     state = "DONE"
                     i += 1; continue
 
-        # --- 3. Instrumentation ---
+        # 3. Instrumentation
         elif target_key == 'Instrumentation':
-            if state == "OUTSIDE" or state == "DONE": # Allow multiple methods
+            if state == "OUTSIDE" or state == "DONE":
                 if ".method" in line:
                     if inst_sig1 in line: state = "INSIDE_INST1"
                     elif inst_sig2 in line: state = "INSIDE_INST2"
             elif state == "INSIDE_INST1":
-                # Search for attach call to inject below
                 if "->attach(Landroid/content/Context;)V" in line:
-                    new_lines.append(line)
-                    new_lines.append(inst_p2 + "\n")
-                    modified = True
-                    state = "DONE" # Exit this method state
-                    i += 1; continue
+                    new_lines.append(line); new_lines.append(inst_p2 + "\n")
+                    modified = True; state = "DONE"; i += 1; continue
             elif state == "INSIDE_INST2":
                 if "->attach(Landroid/content/Context;)V" in line:
-                    new_lines.append(line)
-                    new_lines.append(inst_p3 + "\n")
-                    modified = True
-                    checklist['Instrumentation'] = True # Mark done if at least one patched
-                    state = "DONE"
-                    i += 1; continue
+                    new_lines.append(line); new_lines.append(inst_p3 + "\n")
+                    modified = True; checklist['Instrumentation'] = True; state = "DONE"; i += 1; continue
 
-        # --- 4. AndroidKeyStoreSpi ---
+        # 4. AndroidKeyStoreSpi
         elif target_key == 'AndroidKeyStoreSpi':
             if state == "OUTSIDE":
-                if ".method" in line and akss_sig in line:
-                    state = "INSIDE_AKSS"
+                if ".method" in line and akss_sig in line: state = "INSIDE_AKSS"
             elif state == "INSIDE_AKSS":
-                # Inject AFTER the EXISTING registers line
                 if trimmed.startswith(".registers") or trimmed.startswith(".locals"):
                     new_lines.append(line)
                     new_lines.append(akss_init + "\n")
-                    # Do NOT set state=DONE here, we still need the second injection
+                    i += 1; continue # Don't change state yet
                 elif "aput-object v2, v3, v4" in trimmed:
                     new_lines.append(line)
                     new_lines.append(akss_inj + "\n")
@@ -299,37 +288,23 @@ def process_file_state_machine(filepath, target_key):
                     state = "DONE"
                     i += 1; continue
 
-        # Reset state at end of method
-        if ".end method" in line:
-            state = "OUTSIDE"
-
+        if ".end method" in line: state = "OUTSIDE"
         new_lines.append(line)
         i += 1
     
     if modified:
-        with open(filepath, 'w') as f:
-            f.writelines(new_lines)
-        print(f"   [SUCCESS] Patched {target_key} in {os.path.basename(filepath)}")
+        with open(filepath, 'w') as f: f.writelines(new_lines)
+        print(f"   [SUCCESS] Patched {target_key}")
 
 # === MAIN SCANNER ===
 root_dir = sys.argv[1]
-
 for r, d, f in os.walk(root_dir):
-    # AppPkgMgr
     if 'ApplicationPackageManager.smali' in f:
         process_file_state_machine(os.path.join(r, 'ApplicationPackageManager.smali'), 'ApplicationPackageManager')
-    
-    # KeyStore2
-    if 'KeyStore2.smali' in f:
-        # Extra verification for path
-        if 'android/security' in r.replace(os.sep, '/'):
-            process_file_state_machine(os.path.join(r, 'KeyStore2.smali'), 'KeyStore2')
-
-    # Instrumentation
+    if 'KeyStore2.smali' in f and 'android/security' in r.replace(os.sep, '/'):
+        process_file_state_machine(os.path.join(r, 'KeyStore2.smali'), 'KeyStore2')
     if 'Instrumentation.smali' in f:
         process_file_state_machine(os.path.join(r, 'Instrumentation.smali'), 'Instrumentation')
-
-    # AndroidKeyStoreSpi
     if 'AndroidKeyStoreSpi.smali' in f:
         process_file_state_machine(os.path.join(r, 'AndroidKeyStoreSpi.smali'), 'AndroidKeyStoreSpi')
 
@@ -337,18 +312,10 @@ for r, d, f in os.walk(root_dir):
 print("-" * 30)
 failed = False
 for key, val in checklist.items():
-    if val:
-        print(f"[PASS] {key}")
-    else:
-        print(f"[FAIL] {key} - Patch NOT applied!")
-        failed = True
+    if val: print(f"[PASS] {key}")
+    else: print(f"[FAIL] {key}"); failed = True
 print("-" * 30)
-
-if failed:
-    print("CRITICAL ERROR: One or more patches failed. Aborting build.")
-    sys.exit(1)
-else:
-    sys.exit(0)
+if failed: sys.exit(1)
 EOF
 
 # =========================================================
@@ -506,7 +473,14 @@ for part in $LOGICALS; do
             
             if [ ! -z "$FW_JAR" ] && [ -s "$KAORIOS_DIR/classes.dex" ]; then
                 echo "          -> Target: $FW_JAR"
-                cp "$FW_JAR" "${FW_JAR}.bak"
+                
+                # --- AUTO RESTORE (SAFETY) ---
+                if [ -f "${FW_JAR}.bak" ]; then
+                    echo "          -> Restoring backup to prevent duplicates..."
+                    cp "${FW_JAR}.bak" "$FW_JAR"
+                else
+                    cp "$FW_JAR" "${FW_JAR}.bak"
+                fi
                 
                 rm -rf "$TEMP_DIR/framework.jar" "$TEMP_DIR/fw_src" "$TEMP_DIR/framework_patched.jar"
                 cp "$FW_JAR" "$TEMP_DIR/framework.jar"
@@ -514,11 +488,9 @@ for part in $LOGICALS; do
                 
                 if timeout 5m apktool d -r -f "framework.jar" -o "fw_src" >/dev/null 2>&1; then
                     
-                    # --- AUTO DEX ALLOCATOR (REDIVISION) ---
+                    # --- AUTO DEX ALLOCATOR ---
                     echo "      📦 Redividing Dex (Allocating new Smali bucket)..."
                     cd "fw_src"
-                    
-                    # 1. Identify current max smali folder (e.g., smali_classes5)
                     MAX_NUM=1
                     for dir in smali_classes*; do
                         if [ -d "$dir" ]; then
@@ -528,37 +500,25 @@ for part in $LOGICALS; do
                             fi
                         fi
                     done
-                    
-                    # 2. Create NEW empty bucket (e.g., smali_classes6)
                     NEW_NUM=$((MAX_NUM + 1))
                     NEW_DIR="smali_classes${NEW_NUM}"
                     mkdir -p "$NEW_DIR/android/app" "$NEW_DIR/android/security"
-                    echo "          -> Created $NEW_DIR"
-
-                    # 3. Move ApplicationPackageManager (and all inner classes) to new bucket
-                    # Note: We search in ALL smali folders
+                    
                     find . -name "ApplicationPackageManager*.smali" | while read file; do
-                        # Preserve directory structure relative to smali_classesX root
-                        # But simpler: we know it belongs in android/app
                         mv "$file" "$NEW_DIR/android/app/" 2>/dev/null
                     done
-                    
-                    # 4. Move KeyStore2 (and all inner classes) to new bucket
                     find . -name "KeyStore2*.smali" | while read file; do
-                        # Move to android/security
                         mv "$file" "$NEW_DIR/android/security/" 2>/dev/null
                     done
-                    
-                    echo "          -> Migrated heavy classes to $NEW_DIR"
                     cd ..
-                    # ---------------------------------------------
+                    # ---------------------------
 
                     # RUN KAORIOS PATCHER WITH FAIL-SAFE
                     if python3 "$BIN_DIR/kaorios_patcher.py" "fw_src"; then
                         echo "      ✅ Kaorios patches applied successfully."
                     else
                         echo "      ❌ CRITICAL: Kaorios patches FAILED. Aborting."
-                        kill $$ # HARD EXIT
+                        kill $$ 
                         exit 1
                     fi
                     
@@ -576,7 +536,7 @@ for part in $LOGICALS; do
                         echo "---------------------------------------------------"
                         cat build_log.txt
                         echo "---------------------------------------------------"
-                        kill $$ # HARD EXIT
+                        kill $$ 
                         exit 1
                     fi
                 else
@@ -594,8 +554,6 @@ for part in $LOGICALS; do
             BOOST_JAR=$(find "$DUMP_DIR" -name "MiuiBooster.jar" -type f | head -n 1)
             if [ ! -z "$BOOST_JAR" ]; then
                 echo "          -> Target: $BOOST_JAR"
-                
-                # 1. CREATE MOD.SH (Self-Contained)
                 cat <<'EOF_MOD' > "$TEMP_DIR/mod.sh"
 #!/bin/bash
 JAR="$1"
@@ -618,13 +576,10 @@ fi
 rm -rf "bst_tmp"
 EOF_MOD
                 chmod +x "$TEMP_DIR/mod.sh"
-                
-                # 2. EXECUTE MOD.SH
                 cd "$TEMP_DIR"
                 ./mod.sh "$BOOST_JAR"
                 rm "mod.sh"
                 cd "$GITHUB_WORKSPACE"
-                
                 echo "            ✅ MiuiBooster Patched!"
             fi
         fi
