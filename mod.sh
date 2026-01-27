@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID MANAGER - ROOT POWER EDITION v42
-#  (Fix: Robust Notifications + Debug Logging + Fallback)
+#  NEXDROID MANAGER - ROOT POWER EDITION v44
+#  (Fix: Strict Smali Patching for AppPkgManager & KeyStore2)
 # =========================================================
 
 set +e 
@@ -102,7 +102,7 @@ install_gapp_logic() {
     done
 }
 
-# --- CREATE APK-MODDER.SH (Ensuring Permissions) ---
+# --- CREATE APK-MODDER.SH (Permissions + Setup) ---
 cat <<'EOF' > "$GITHUB_WORKSPACE/apk-modder.sh"
 #!/bin/bash
 APK_PATH="$1"
@@ -160,7 +160,7 @@ rm -rf "$TEMP_MOD" "$BIN_DIR/wiper.py"
 EOF
 chmod +x "$GITHUB_WORKSPACE/apk-modder.sh"
 
-# --- EMBEDDED PYTHON PATCHER (Framework) ---
+# --- EMBEDDED PYTHON PATCHER (Strict Framework) ---
 cat <<'EOF' > "$BIN_DIR/kaorios_patcher.py"
 import os
 import sys
@@ -172,6 +172,7 @@ def patch_file(file_path, target_method_re, code_to_insert, position, search_ter
     with open(file_path, 'r') as f:
         content = f.read()
     
+    # Strictly find the Method Definition
     method_match = re.search(target_method_re, content, re.MULTILINE | re.DOTALL)
     if not method_match:
         print(f"   [FAIL] Method not found: {target_method_re[:50]}")
@@ -187,6 +188,7 @@ def patch_file(file_path, target_method_re, code_to_insert, position, search_ter
     method_body = content[method_start:method_end]
     new_body = method_body
     
+    # A. Below .registers
     if position == 'registers':
         reg_match = re.search(r'\.(registers|locals)\s+\d+', method_body)
         if reg_match:
@@ -196,6 +198,7 @@ def patch_file(file_path, target_method_re, code_to_insert, position, search_ter
             print("   [FAIL] .registers not found.")
             return False
 
+    # B. Below Search Term
     elif position == 'below_search' and search_term_re:
         search_match = re.search(search_term_re, method_body)
         if search_match:
@@ -209,6 +212,7 @@ def patch_file(file_path, target_method_re, code_to_insert, position, search_ter
             print(f"   [FAIL] Search term not found: {search_term_re}")
             return False
 
+    # C. Above Search Term
     elif position == 'above_search' and search_term_re:
         search_match = re.search(search_term_re, method_body)
         if search_match:
@@ -223,9 +227,8 @@ def patch_file(file_path, target_method_re, code_to_insert, position, search_ter
     print(f"   [OK] Patched: {os.path.basename(file_path)}")
     return True
 
-# PAYLOADS
-p1_code = """
-    invoke-static {}, Landroid/app/ActivityThread;->currentPackageName()Ljava/lang/String;
+# PAYLOADS (Updated exactly as requested)
+p1_code = """    invoke-static {}, Landroid/app/ActivityThread;->currentPackageName()Ljava/lang/String;
     move-result-object v0
     :try_start_kaori_override
     iget-object v1, p0, Landroid/app/ApplicationPackageManager;->mContext:Landroid/app/ContextImpl;
@@ -241,27 +244,28 @@ p1_code = """
     invoke-virtual {v0}, Ljava/lang/Boolean;->booleanValue()Z
     move-result p0
     return p0
-    :cond_kaori_override
-"""
+    :cond_kaori_override"""
+
 p2_code = "    invoke-static {p1}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriProps(Landroid/content/Context;)V"
 p3_code = "    invoke-static {p3}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriProps(Landroid/content/Context;)V"
-p4_code = """
-    invoke-static {v0}, Lcom/android/internal/util/kaorios/KaoriKeyboxHooks;->KaoriGetKeyEntry(Landroid/system/keystore2/KeyEntryResponse;)Landroid/system/keystore2/KeyEntryResponse;
-    move-result-object v0
-"""
+
+p4_code = """    invoke-static {v0}, Lcom/android/internal/util/kaorios/KaoriKeyboxHooks;->KaoriGetKeyEntry(Landroid/system/keystore2/KeyEntryResponse;)Landroid/system/keystore2/KeyEntryResponse;
+    move-result-object v0"""
+
 p5_code_1 = "    invoke-static {}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriGetCertificateChain()V"
-p5_code_2 = """
-    invoke-static {v3}, Lcom/android/internal/util/kaorios/KaoriKeyboxHooks;->KaoriGetCertificateChain([Ljava/security/cert/Certificate;)[Ljava/security/cert/Certificate;
-    move-result-object v3
-"""
+p5_code_2 = """    invoke-static {v3}, Lcom/android/internal/util/kaorios/KaoriKeyboxHooks;->KaoriGetCertificateChain([Ljava/security/cert/Certificate;)[Ljava/security/cert/Certificate;
+    move-result-object v3"""
 
 root_dir = sys.argv[1]
 for r, d, f in os.walk(root_dir):
+    # 1. AppPkgMgr: Strict Method Definition + Below Registers
     if 'ApplicationPackageManager.smali' in f:
         path = os.path.join(r, 'ApplicationPackageManager.smali')
-        meth = r'\.method.*hasSystemFeature\(Ljava/lang/String;I\)Z'
+        # Matches: .method [flags] hasSystemFeature(Ljava/lang/String;I)Z
+        meth = r'\.method.+hasSystemFeature\(Ljava/lang/String;I\)Z'
         patch_file(path, meth, p1_code, 'registers')
 
+    # 2. Instrumentation: Working as is
     if 'Instrumentation.smali' in f:
         path = os.path.join(r, 'Instrumentation.smali')
         meth1 = r'newApplication\(Ljava/lang/Class;Landroid/content/Context;\)Landroid/app/Application;'
@@ -271,12 +275,15 @@ for r, d, f in os.walk(root_dir):
         search2 = r'invoke-virtual\s+\{v0,\s*p3\},\s*Landroid/app/Application;->attach\(Landroid/content/Context;\)V'
         patch_file(path, meth2, p3_code, 'below_search', search2)
 
+    # 3. KeyStore2: Strict Method Definition + Above Return
     if 'KeyStore2.smali' in f:
         path = os.path.join(r, 'KeyStore2.smali')
-        meth = r'getKeyEntry\(Landroid/system/keystore2/KeyDescriptor;\)Landroid/system/keystore2/KeyEntryResponse;'
+        # Matches: .method [flags] getKeyEntry(...)KeyEntryResponse;
+        meth = r'\.method.+getKeyEntry\(Landroid/system/keystore2/KeyDescriptor;\)Landroid/system/keystore2/KeyEntryResponse;'
         search = r'return-object\s+v0'
         patch_file(path, meth, p4_code, 'above_search', search)
 
+    # 4. AndroidKeyStoreSpi: Working as is
     if 'AndroidKeyStoreSpi.smali' in f:
         path = os.path.join(r, 'AndroidKeyStoreSpi.smali')
         meth = r'engineGetCertificateChain\(Ljava/lang/String;\)\[Ljava/security/cert/Certificate;'
@@ -296,7 +303,7 @@ sudo apt-get update -y
 sudo apt-get install -y python3 python3-pip erofs-utils erofsfuse jq aria2 zip unzip liblz4-tool p7zip-full aapt git openjdk-17-jre-headless
 pip3 install gdown --break-system-packages
 
-# [CRITICAL FIX] Ensure your repo's script is executable
+# Ensure your repo's script is executable
 if [ -f "apk-modder.sh" ]; then
     chmod +x apk-modder.sh
 fi
@@ -585,9 +592,10 @@ mv "$SUPER_ZIP" "$OUTPUT_DIR/"
 echo "☁️  Uploading..."
 cd "$OUTPUT_DIR"
 
+# 1. Upload Function (FIXED: Redirect echo to stderr)
 upload() {
     local file=$1; [ ! -f "$file" ] && return
-    echo "   ⬆️ Uploading $file..."
+    echo "   ⬆️ Uploading $file..." >&2 
     if [ -z "$PIXELDRAIN_KEY" ]; then
         curl -s -T "$file" "https://pixeldrain.com/api/file/" | jq -r '"https://pixeldrain.com/u/" + .id'
     else
@@ -609,13 +617,13 @@ else
     BTN_TEXT="Download ROM"
 fi
 
-# 3. Notification (Debug Edition)
+# 3. Notification (Minimalist Pro Aesthetic)
 if [ ! -z "$TELEGRAM_TOKEN" ] && [ ! -z "$CHAT_ID" ]; then
     echo "📣 Sending Telegram Notification..."
     BUILD_DATE=$(date +"%Y-%m-%d %H:%M")
     
-    # Prepare text payload first to be safe
-    MSG_TEXT="*NexDroid Build Complete*
+    # Minimalist Text Body (No Emojis, Clean Layout)
+    MSG_TEXT="**NEXDROID BUILD COMPLETE**
 ---------------------------
 \`Device  : $DEVICE_CODE\`
 \`Version : $OS_VER\`
