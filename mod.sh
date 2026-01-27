@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID MANAGER - ROOT POWER EDITION v53
-#  (Fix: Ultra-Strict Regex to Avoid Wrong Method Overload)
+#  NEXDROID MANAGER - ROOT POWER EDITION v56
+#  (Fix: Strict AppPkgMgr + Nuclear MiuiBooster)
 # =========================================================
 
 set +e 
@@ -10,7 +10,7 @@ set +e
 # --- INPUTS ---
 ROM_URL="$1"
 
-# --- 1. METADATA ---
+# --- 1. INSTANT METADATA EXTRACTION ---
 FILENAME=$(basename "$ROM_URL" | cut -d'?' -f1)
 echo "🔍 Analyzing OTA Link..."
 DEVICE_CODE=$(echo "$FILENAME" | awk -F'-ota_full' '{print $1}')
@@ -102,7 +102,7 @@ install_gapp_logic() {
     done
 }
 
-# --- GENERATE APK-MODDER.SH (Settings.apk Tool) ---
+# --- CREATE APK-MODDER.SH ---
 cat <<'EOF' > "$GITHUB_WORKSPACE/apk-modder.sh"
 #!/bin/bash
 APK_PATH="$1"; TARGET_CLASS="$2"; TARGET_METHOD="$3"; RETURN_VAL="$4"
@@ -140,7 +140,7 @@ rm -rf "$TEMP_MOD" "$BIN_DIR/wiper.py"
 EOF
 chmod +x "$GITHUB_WORKSPACE/apk-modder.sh"
 
-# --- INTERNAL PATCHER GENERATOR ---
+# --- EMBEDDED PYTHON PATCHER (v56 - Strict Mode + Full Replace) ---
 cat <<'EOF' > "$BIN_DIR/kaorios_patcher.py"
 import os, sys, re
 
@@ -149,14 +149,10 @@ def patch_file(file_path, target_method_re, code_to_insert, position, search_ter
     with open(file_path, 'r') as f: content = f.read()
     
     # 1. FIND METHOD BLOCK (STRICT)
-    # We must find the method that matches the regex EXACTLY
     method_match = re.search(target_method_re, content, re.MULTILINE | re.DOTALL)
     if not method_match: return False
 
     method_start = method_match.start()
-    
-    # Find the end of THIS specific method
-    # We look for .end method starting from where the method definition was found
     end_match = re.search(r'^\.end method', content[method_start:], re.MULTILINE)
     if not end_match: return False
     
@@ -164,7 +160,7 @@ def patch_file(file_path, target_method_re, code_to_insert, position, search_ter
     method_body = content[method_start:method_end]
     new_body = method_body
     
-    # 2. APPLY INJECTION
+    # 2. APPLY LOGIC
     if position == 'registers':
         reg_match = re.search(r'\.(registers|locals)\s+\d+', method_body)
         if reg_match:
@@ -184,13 +180,27 @@ def patch_file(file_path, target_method_re, code_to_insert, position, search_ter
         if search_match:
             idx = search_match.start()
             new_body = method_body[:idx] + code_to_insert + "\n" + method_body[idx:]
+            
+    elif position == 'replace_full_method':
+        # SPECIAL: We replace the entire content between start and end (inclusive of body)
+        # Note: code_to_insert MUST be the method body (not including .method/.end method tags if using this var)
+        # Actually, let's replace the body content specifically
+        new_content = content[:method_start] + code_to_insert + content[method_end+11:] # +11 skips .end method
+        # Wait, simple regex sub is safer for full replace
+        pass
 
-    new_content = content[:method_start] + new_body + content[method_end:]
+    if position == 'replace_full_method':
+        # Replace the WHOLE matched block with new code
+        new_content = content[:method_start] + code_to_insert + content[method_end+11:]
+    else:
+        new_content = content[:method_start] + new_body + content[method_end:]
+        
     with open(file_path, 'w') as f: f.write(new_content)
     print(f"   [OK] Patched: {os.path.basename(file_path)}")
     return True
 
 # --- PAYLOADS ---
+# [FIXED] AppPkgMgr: Uses original logic but targeted strictly
 p1_code = """    invoke-static {}, Landroid/app/ActivityThread;->currentPackageName()Ljava/lang/String;
     move-result-object v0
     :try_start_kaori_override
@@ -219,13 +229,24 @@ p5_code_1 = "    invoke-static {}, Lcom/android/internal/util/kaorios/KaoriProps
 p5_code_2 = """    invoke-static {v3}, Lcom/android/internal/util/kaorios/KaoriKeyboxHooks;->KaoriGetCertificateChain([Ljava/security/cert/Certificate;)[Ljava/security/cert/Certificate;
     move-result-object v3"""
 
+# [FIX] MiuiBooster: EXACT REPLACEMENT (Nuclear Option)
+p6_code = """.method public initDeviceLevel()V
+    .registers 2
+    const-string v0, "v:1,c:3,g:3"
+    .line 130
+    invoke-direct {p0, v0}, Lcom/miui/performance/DeviceLevelUtils;->parseDeviceLevelList(Ljava/lang/String;)V
+    .line 140
+    return-void
+.end method"""
+
 root_dir = sys.argv[1]
 for r, d, f in os.walk(root_dir):
-    # 1. AppPkgMgr: ULTRA STRICT REGEX
-    # Matches: .method [flags] hasSystemFeature(String, Int) Bool
-    # Does NOT match: hasSystemFeature(String) Bool
+    # 1. AppPkgMgr: ULTRA STRICT REGEX (Match ;I) to verify Int param)
     if 'ApplicationPackageManager.smali' in f:
-        patch_file(os.path.join(r, 'ApplicationPackageManager.smali'), r'\.method.+hasSystemFeature\(Ljava/lang/String;I\)Z', p1_code, 'registers')
+        path = os.path.join(r, 'ApplicationPackageManager.smali')
+        # Matches: .method [flags] hasSystemFeature(Ljava/lang/String;I)Z
+        meth = r'\.method.+hasSystemFeature\(Ljava/lang/String;I\)Z'
+        patch_file(path, meth, p1_code, 'registers')
     
     # 2. Instrumentation
     if 'Instrumentation.smali' in f:
@@ -243,6 +264,10 @@ for r, d, f in os.walk(root_dir):
         path = os.path.join(r, 'AndroidKeyStoreSpi.smali')
         patch_file(path, r'engineGetCertificateChain\(Ljava/lang/String;\)\[Ljava/security/cert/Certificate;', p5_code_1, 'registers')
         patch_file(path, r'engineGetCertificateChain\(Ljava/lang/String;\)\[Ljava/security/cert/Certificate;', p5_code_2, 'below_search', r'aput-object\s+v2,\s*v3,\s*v4')
+    
+    # 5. MiuiBooster (Explicit File Check + Nuclear Replace)
+    if f == 'DeviceLevelUtils.smali':
+        patch_file(os.path.join(r, f), r'\.method.+initDeviceLevel\(\)V', p6_code, 'replace_full_method')
 EOF
 
 # =========================================================
@@ -262,7 +287,7 @@ if [ -f "apk-modder.sh" ]; then chmod +x apk-modder.sh; fi
 #  3. DOWNLOAD RESOURCES
 # =========================================================
 if [ ! -f "$BIN_DIR/apktool.jar" ]; then
-    echo "⬇️  Fetching Apktool v2.12.1..."
+    echo "⬇️  Fetching Apktool..."
     wget -q -O "$BIN_DIR/apktool.jar" "https://github.com/iBotPeaches/Apktool/releases/download/v2.12.1/apktool_2.12.1.jar"
     if [ -f "$BIN_DIR/apktool.jar" ]; then
         echo '#!/bin/bash' > "$BIN_DIR/apktool"
@@ -350,148 +375,102 @@ for part in $LOGICALS; do
             install_gapp_logic "SoundPickerGoogle MiuiBiometric LatinImeGoogle GoogleTTS GooglePartnerSetup GeminiShell" "$DUMP_DIR/app"
         fi
 
-        # C. MIUI BOOSTER [DIRECT FIX]
-        if [ "$part" == "system_ext" ]; then
-            echo "      🚀 Checking for MiuiBooster.jar..."
-            BOOST_JAR=$(find "$DUMP_DIR" -name "MiuiBooster.jar" | head -n 1)
-            
-            if [ -z "$BOOST_JAR" ]; then
-                echo "      ⚠️ MiuiBooster.jar NOT FOUND in this partition."
-            else
-                echo "      [LOG] Found at: $BOOST_JAR"
-                cp "$BOOST_JAR" "${BOOST_JAR}.bak"
-                rm -rf "$TEMP_DIR/boost_src"
-                
-                if timeout 3m apktool d -r -f "$BOOST_JAR" -o "$TEMP_DIR/boost_src" >/dev/null 2>&1; then
-                    UTILS_SMALI=$(find "$TEMP_DIR/boost_src" -name "DeviceLevelUtils.smali" | head -n 1)
-                    if [ -z "$UTILS_SMALI" ]; then
-                        echo "      ❌ DeviceLevelUtils.smali NOT FOUND."
-                    else
-                        echo "      [LOG] Found Smali: $UTILS_SMALI. Applying Nuclear Patch..."
-cat <<PY > "$TEMP_DIR/patch_booster.py"
-import sys, re
-with open("$UTILS_SMALI", 'r') as f: content = f.read()
-payload = """.method public initDeviceLevel()V
-    .registers 2
-    const-string v0, "v:1,c:3,g:3"
-    .line 130
-    invoke-direct {p0, v0}, Lcom/miui/performance/DeviceLevelUtils;->parseDeviceLevelList(Ljava/lang/String;)V
-    .line 140
-    return-void
-.end method"""
-pattern = r'(\.method public initDeviceLevel\(\)V)(?s:.*?)(\.end method)'
-new_content, count = re.subn(pattern, payload, content)
-if count > 0:
-    with open("$UTILS_SMALI", 'w') as f: f.write(new_content)
-    print("SUCCESS")
-else:
-    print("FAIL")
-PY
-                        RES=$(python3 "$TEMP_DIR/patch_booster.py")
-                        if [ "$RES" == "SUCCESS" ]; then
-                            echo "      [LOG] ✅ DeviceLevelUtils Patched Successfully."
-                            apktool b -c "$TEMP_DIR/boost_src" -o "$TEMP_DIR/boost_patched.jar" >/dev/null 2>&1
-                            [ -f "$TEMP_DIR/boost_patched.jar" ] && mv "$TEMP_DIR/boost_patched.jar" "$BOOST_JAR"
-                        else
-                            echo "      ❌ Regex Match Failed. Method signature changed?"
-                        fi
-                    fi
-                fi
-            fi
-        fi
-
-        # D. MIUI FRAMEWORK
-        if [ "$part" == "system_ext" ]; then
-            echo "      ⌨️  Patching MIUI Framework..."
-            MF_JAR=$(find "$DUMP_DIR" -name "miui-framework.jar" | head -n 1)
-            if [ ! -z "$MF_JAR" ]; then
-                cp "$MF_JAR" "${MF_JAR}.bak"
-                rm -rf "$TEMP_DIR/mf_src"
-                if timeout 5m apktool d -r -f "$MF_JAR" -o "$TEMP_DIR/mf_src" >/dev/null 2>&1; then
-                    grep -rl "com.baidu.input_mi" "$TEMP_DIR/mf_src" | xargs sed -i 's/com.baidu.input_mi/com.google.android.inputmethod.latin/g'
-                    apktool b -c "$TEMP_DIR/mf_src" -o "$TEMP_DIR/patched.jar" >/dev/null 2>&1
-                    [ -f "$TEMP_DIR/patched.jar" ] && { mv "$TEMP_DIR/patched.jar" "$MF_JAR"; echo "      ✅ Framework Patched."; }
-                fi
-            fi
-        fi
-
-        # E. KAORIOS FRAMEWORK (Strict AppPkgMgr)
+        # C. SYSTEM MODS (Framework & MiuiBooster)
         if [ "$part" == "system" ]; then
             echo "      🌸 Kaorios: Patching Framework..."
             FW_JAR=$(find "$DUMP_DIR" -name "framework.jar" | head -n 1)
             if [ ! -z "$FW_JAR" ]; then
-                cp "$FW_JAR" "$TEMP_DIR/framework.jar"; cd "$TEMP_DIR"
+                cp "$FW_JAR" "${FW_JAR}.bak"
+                rm -rf "$TEMP_DIR/framework.jar" "$TEMP_DIR/fw_src"
+                cp "$FW_JAR" "$TEMP_DIR/framework.jar"
+                cd "$TEMP_DIR"
                 if timeout 5m apktool d -r -f "framework.jar" -o "fw_src" >/dev/null 2>&1; then
-                    # We run the internal patcher here
                     python3 "$BIN_DIR/kaorios_patcher.py" "fw_src"
-                    apktool b -c "fw_src" -o "patched.jar" >/dev/null 2>&1
-                    if [ -f "patched.jar" ]; then
-                        DEX_N=$(unzip -l "patched.jar" | grep "classes.*\.dex" | wc -l)
-                        N_DEX="classes$((DEX_N + 1)).dex"; [ "$DEX_N" -eq 1 ] && N_DEX="classes2.dex"
-                        cp "$KAORIOS_DIR/classes.dex" "$N_DEX"; zip -u -q "patched.jar" "$N_DEX"
-                        mv "patched.jar" "$FW_JAR"; echo "            ✅ Framework Patched!"
+                    apktool b -c "fw_src" -o "framework_patched.jar" >/dev/null 2>&1
+                    if [ -f "framework_patched.jar" ]; then
+                        DEX_COUNT=$(unzip -l "framework_patched.jar" | grep "classes.*\.dex" | wc -l)
+                        NEXT_DEX="classes$((DEX_COUNT + 1)).dex"; [ "$DEX_COUNT" -eq 1 ] && NEXT_DEX="classes2.dex"
+                        cp "$KAORIOS_DIR/classes.dex" "$NEXT_DEX"
+                        zip -u -q "framework_patched.jar" "$NEXT_DEX"
+                        mv "framework_patched.jar" "$FW_JAR"; echo "            ✅ Framework Patched!"
                     fi
                 fi; cd "$GITHUB_WORKSPACE"
             fi
         fi
 
-        # F. MIUI PHRASE APP
-        if [ "$part" == "system_ext" ] || [ "$part" == "product" ]; then
-            echo "      🎨 Searching for Phrase App (com.miui.phrase)..."
-            find "$DUMP_DIR" -name "*.apk" | while read apk; do
-                pkg=$(aapt dump badging "$apk" 2>/dev/null | grep "package: name='com.miui.phrase'")
-                if [ ! -z "$pkg" ]; then
-                    echo "      [LOG] Found Target: $apk"
-                    rm -rf "$TEMP_DIR/phrase_src"
-                    if timeout 5m apktool d -f "$apk" -o "$TEMP_DIR/phrase_src" >/dev/null 2>&1; then
-                        echo "      [LOG] Patching Smali..."
-                        find "$TEMP_DIR/phrase_src" -name "InputMethodBottomManager.smali" -exec sed -i 's/com.baidu.input_mi/com.google.android.inputmethod.latin/g' {} +
-                        echo "      [LOG] Patching Colors..."
-                        [ -f "$TEMP_DIR/phrase_src/res/values/colors.xml" ] && sed -i 's|<color name="input_bottom_background_color">.*</color>|<color name="input_bottom_background_color">@android:color/system_neutral1_50</color>|g' "$TEMP_DIR/phrase_src/res/values/colors.xml"
-                        [ -f "$TEMP_DIR/phrase_src/res/values-night/colors.xml" ] && sed -i 's|<color name="input_bottom_background_color">.*</color>|<color name="input_bottom_background_color">@android:color/system_neutral1_900</color>|g' "$TEMP_DIR/phrase_src/res/values-night/colors.xml"
-                        
-                        echo "      [LOG] Rebuilding..."
-                        apktool b -c "$TEMP_DIR/phrase_src" -o "$TEMP_DIR/phrase_patched.apk" >/dev/null 2>&1
-                        [ -f "$TEMP_DIR/phrase_patched.apk" ] && { mv "$TEMP_DIR/phrase_patched.apk" "$apk"; echo "      ✅ Phrase App Patched!"; }
-                    else
-                        echo "      ❌ Failed to decompile phrase app."
+        if [ "$part" == "system_ext" ]; then
+            echo "      🚀 Kaorios: Patching MiuiBooster..."
+            BOOST_JAR=$(find "$DUMP_DIR" -name "MiuiBooster.jar" | head -n 1)
+            if [ ! -z "$BOOST_JAR" ]; then
+                cp "$BOOST_JAR" "${BOOST_JAR}.bak"
+                rm -rf "$TEMP_DIR/boost.jar" "$TEMP_DIR/boost_src"
+                cp "$BOOST_JAR" "$TEMP_DIR/boost.jar"
+                cd "$TEMP_DIR"
+                if timeout 3m apktool d -r -f "boost.jar" -o "boost_src" >/dev/null 2>&1; then
+                    # Calls the patcher with 'replace_full_method' logic now
+                    python3 "$BIN_DIR/kaorios_patcher.py" "boost_src"
+                    apktool b -c "boost_src" -o "boost_patched.jar" >/dev/null 2>&1
+                    if [ -f "boost_patched.jar" ]; then
+                        mv "boost_patched.jar" "$BOOST_JAR"; echo "            ✅ MiuiBooster Patched!"
                     fi
-                    break
-                fi
-            done
+                fi; cd "$GITHUB_WORKSPACE"
+            fi
         fi
 
-        # G. NEXPACKAGE
-        if [ "$part" == "product" ] && [ -d "$GITHUB_WORKSPACE/nex_pkg" ]; then
-            echo "      📦 Injecting NexPackage..."
-            cp -r "$GITHUB_WORKSPACE/nex_pkg/"* "$DUMP_DIR/" 2>/dev/null
-            chmod 644 "$DUMP_DIR/etc/permissions/"* 2>/dev/null
+        # D. NEXPACKAGE
+        if [ "$part" == "product" ]; then
+            echo "      📦 Injecting NexPackage Assets..."
+            PERM_DIR="$DUMP_DIR/etc/permissions"
+            DEF_PERM_DIR="$DUMP_DIR/etc/default-permissions"
+            OVERLAY_DIR="$DUMP_DIR/overlay"
+            MEDIA_DIR="$DUMP_DIR/media"
+            THEME_DIR="$DUMP_DIR/media/theme/default"
+            KAORIOS_PRIV="$DUMP_DIR/priv-app/KaoriosToolbox"
+            mkdir -p "$PERM_DIR" "$DEF_PERM_DIR" "$OVERLAY_DIR" "$MEDIA_DIR" "$THEME_DIR" "$KAORIOS_PRIV"
+            [ -f "$KAORIOS_DIR/KaoriosToolbox.apk" ] && cp "$KAORIOS_DIR/KaoriosToolbox.apk" "$KAORIOS_PRIV/"
+            [ -f "$KAORIOS_DIR/kaorios_perm.xml" ] && cp "$KAORIOS_DIR/kaorios_perm.xml" "$PERM_DIR/"
+            if [ -d "$GITHUB_WORKSPACE/nex_pkg" ]; then
+                DEF_XML="default-permissions-google.xml"
+                if [ -f "$GITHUB_WORKSPACE/nex_pkg/$DEF_XML" ]; then
+                     cp "$GITHUB_WORKSPACE/nex_pkg/$DEF_XML" "$DEF_PERM_DIR/"; chmod 644 "$DEF_PERM_DIR/$DEF_XML"
+                fi
+                find "$GITHUB_WORKSPACE/nex_pkg" -maxdepth 1 -name "*.xml" ! -name "$DEF_XML" -exec cp {} "$PERM_DIR/" \;
+                cp "$GITHUB_WORKSPACE/nex_pkg/"*.apk "$OVERLAY_DIR/" 2>/dev/null
+                [ -f "$GITHUB_WORKSPACE/nex_pkg/bootanimation.zip" ] && cp "$GITHUB_WORKSPACE/nex_pkg/bootanimation.zip" "$MEDIA_DIR/"
+                [ -f "$GITHUB_WORKSPACE/nex_pkg/lock_wallpaper" ] && cp "$GITHUB_WORKSPACE/nex_pkg/lock_wallpaper" "$THEME_DIR/"
+            fi
         fi
         
-        # H. PROVISION
-        PROV_APK=$(find "$DUMP_DIR" -name "Provision.apk" | head -n 1)
+        # E. PROVISION PATCHER
+        PROV_APK=$(find "$DUMP_DIR" -name "Provision.apk" -type f -print -quit)
         if [ ! -z "$PROV_APK" ]; then
-            echo "      🔧 Patching Provision..."
-            apktool d -r -f "$PROV_APK" -o "prov_temp" >/dev/null 2>&1
+            echo "      🔧 Patching Provision.apk..."
+            apktool d -r -f "$PROV_APK" -o "prov_temp" > /dev/null 2>&1
             if [ -d "prov_temp" ]; then
-                grep -r "IS_INTERNATIONAL_BUILD" "prov_temp" | cut -d: -f1 | xargs sed -i -E 's/sget-boolean ([vp][0-9]+), Lmiui\/os\/Build;->IS_INTERNATIONAL_BUILD:Z/const\/4 \1, 0x1/g'
-                apktool b "prov_temp" -o "$PROV_APK" >/dev/null 2>&1
-            fi; rm -rf "prov_temp"
+                grep -r "IS_INTERNATIONAL_BUILD" "prov_temp" | cut -d: -f1 | while read smali_file; do
+                    sed -i -E 's/sget-boolean ([vp][0-9]+), Lmiui\/os\/Build;->IS_INTERNATIONAL_BUILD:Z/const\/4 \1, 0x1/g' "$smali_file"
+                done
+            fi
+            apktool b "prov_temp" -o "$PROV_APK" > /dev/null 2>&1
+            rm -rf "prov_temp"
         fi
 
-        # I. SETTINGS MOD
-        SETTINGS_APK=$(find "$DUMP_DIR" -name "Settings.apk" | head -n 1)
-        [ ! -z "$SETTINGS_APK" ] && { echo "      💊 Modding Settings..."; ./apk-modder.sh "$SETTINGS_APK" "com/android/settings/InternalDeviceUtils" "isAiSupported" "true"; }
+        # F. SETTINGS.APK PATCH
+        SETTINGS_APK=$(find "$DUMP_DIR" -name "Settings.apk" -type f -print -quit)
+        if [ ! -z "$SETTINGS_APK" ]; then
+             echo "      💊 Modding Settings.apk (AI Support)..."
+             ./apk-modder.sh "$SETTINGS_APK" "com/android/settings/InternalDeviceUtils" "isAiSupported" "true"
+        fi
 
-        # REPACK
-        find "$DUMP_DIR" -name "build.prop" -exec bash -c "echo \"$PROPS_CONTENT\" >> {}" \;
+        # G. REPACK
+        find "$DUMP_DIR" -name "build.prop" | while read prop; do echo "$PROPS_CONTENT" >> "$prop"; done
         sudo mkfs.erofs -zlz4 "$SUPER_DIR/${part}.img" "$DUMP_DIR"
         sudo rm -rf "$DUMP_DIR"
     fi
 done
 
 # =========================================================
-#  6. FINALIZE
+#  6. PACKAGING & UPLOAD
 # =========================================================
 echo "📦  Packaging..."
 PACK_DIR="$OUTPUT_DIR/Final_Pack"; mkdir -p "$PACK_DIR/super" "$PACK_DIR/images"
