@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID MANAGER - ROOT POWER EDITION v53 (Dex Allocator)
+#  NEXDROID MANAGER - ROOT POWER EDITION v54 (Duplicate Reg Fix)
 # =========================================================
 
 set +e 
@@ -159,7 +159,7 @@ rm -rf "$TEMP_MOD" "$BIN_DIR/wiper.py"
 EOF
 chmod +x "$GITHUB_WORKSPACE/apk-modder.sh"
 
-# --- EMBEDDED PYTHON PATCHER (v51 - FAIL-SAFE STATE MACHINE) ---
+# --- EMBEDDED PYTHON PATCHER (v54 - REGISTER FIX) ---
 cat <<'EOF' > "$BIN_DIR/kaorios_patcher.py"
 import os, sys, re, shutil
 
@@ -200,10 +200,10 @@ ks2_code = """    invoke-static {v0}, Lcom/android/internal/util/kaorios/KaoriKe
 inst_p2 = "    invoke-static {p1}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriProps(Landroid/content/Context;)V"
 inst_p3 = "    invoke-static {p3}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriProps(Landroid/content/Context;)V"
 
-# 4. AndroidKeyStoreSpi
-akss_reg = "    invoke-static {}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriGetCertificateChain()V"
+# 4. AndroidKeyStoreSpi (FIXED: No double registers)
 akss_inj = """    invoke-static {v3}, Lcom/android/internal/util/kaorios/KaoriKeyboxHooks;->KaoriGetCertificateChain([Ljava/security/cert/Certificate;)[Ljava/security/cert/Certificate;
     move-result-object v3"""
+akss_init = "    invoke-static {}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriGetCertificateChain()V"
 
 def process_file_state_machine(filepath, target_key):
     if not os.path.exists(filepath): return
@@ -286,9 +286,11 @@ def process_file_state_machine(filepath, target_key):
                 if ".method" in line and akss_sig in line:
                     state = "INSIDE_AKSS"
             elif state == "INSIDE_AKSS":
+                # Inject AFTER the EXISTING registers line
                 if trimmed.startswith(".registers") or trimmed.startswith(".locals"):
                     new_lines.append(line)
-                    new_lines.append(akss_reg + "\n")
+                    new_lines.append(akss_init + "\n")
+                    # Do NOT set state=DONE here, we still need the second injection
                 elif "aput-object v2, v3, v4" in trimmed:
                     new_lines.append(line)
                     new_lines.append(akss_inj + "\n")
