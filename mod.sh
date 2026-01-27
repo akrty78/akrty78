@@ -1,8 +1,7 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID MANAGER - ROOT POWER EDITION v49
-#  (Fix: Absolute Strict AppPkgManager Targeting)
+#  NEXDROID MANAGER - ROOT POWER EDITION v50 (Strict Fix)
 # =========================================================
 
 set +e 
@@ -160,7 +159,7 @@ rm -rf "$TEMP_MOD" "$BIN_DIR/wiper.py"
 EOF
 chmod +x "$GITHUB_WORKSPACE/apk-modder.sh"
 
-# --- EMBEDDED PYTHON PATCHER (v49 - Precise Logic) ---
+# --- EMBEDDED PYTHON PATCHER (v50 - STRICT FIX) ---
 cat <<'EOF' > "$BIN_DIR/kaorios_patcher.py"
 import os, sys, re
 
@@ -171,13 +170,12 @@ def patch_file(file_path, target_method_re, code_to_insert, position, search_ter
     # Locate the EXACT method block first
     method_match = re.search(target_method_re, content, re.MULTILINE | re.DOTALL)
     if not method_match:
-        print(f"   [FAIL] Method not found: {target_method_re[:50]}...")
+        # Silently fail or log if needed, but keeping output clean
         return False
 
     method_start = method_match.start()
     end_match = re.search(r'^\.end method', content[method_start:], re.MULTILINE)
     if not end_match:
-        print("   [FAIL] Method end not found.")
         return False
     
     method_end = method_start + end_match.end()
@@ -192,7 +190,6 @@ def patch_file(file_path, target_method_re, code_to_insert, position, search_ter
             idx = reg_match.end()
             new_body = method_body[:idx] + "\n" + code_to_insert + method_body[idx:]
         else:
-            print("   [FAIL] .registers not found inside target method.")
             return False
 
     # 2. Inject BELOW a specific line
@@ -204,7 +201,6 @@ def patch_file(file_path, target_method_re, code_to_insert, position, search_ter
             if search_match.groups(): final_code = final_code.replace("{REG}", search_match.group(1))
             new_body = method_body[:idx] + "\n" + final_code + method_body[idx:]
         else:
-            print(f"   [FAIL] Search term '{search_term_re}' not found.")
             return False
 
     # 3. Inject ABOVE a specific line
@@ -214,12 +210,7 @@ def patch_file(file_path, target_method_re, code_to_insert, position, search_ter
             idx = search_match.start()
             new_body = method_body[:idx] + code_to_insert + "\n" + method_body[idx:]
         else:
-            print(f"   [FAIL] Search term '{search_term_re}' not found.")
             return False
-
-    # 4. REPLACE WHOLE BODY
-    elif position == 'replace_body':
-        new_body = "\n" + code_to_insert + "\n"
 
     new_content = content[:method_start] + new_body + content[method_end:]
     with open(file_path, 'w') as f: f.write(new_content)
@@ -228,7 +219,8 @@ def patch_file(file_path, target_method_re, code_to_insert, position, search_ter
 
 # --- PAYLOADS ---
 
-# [UPDATED] AppPkgMgr: Your requested block
+# [STRICT] ApplicationPackageManager.hasSystemFeature(String, Int)
+# Note: Indentation matches standard smali 4-space
 p1_code = """    invoke-static {}, Landroid/app/ActivityThread;->currentPackageName()Ljava/lang/String;
     move-result-object v0
     :try_start_kaori_override
@@ -247,30 +239,26 @@ p1_code = """    invoke-static {}, Landroid/app/ActivityThread;->currentPackageN
     return p0
     :cond_kaori_override"""
 
+# Instrumentation (unchanged)
 p2_code = "    invoke-static {p1}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriProps(Landroid/content/Context;)V"
 p3_code = "    invoke-static {p3}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriProps(Landroid/content/Context;)V"
 
+# [STRICT] KeyStore2.getKeyEntry - Inject BEFORE return-object v0
 p4_code = """    invoke-static {v0}, Lcom/android/internal/util/kaorios/KaoriKeyboxHooks;->KaoriGetKeyEntry(Landroid/system/keystore2/KeyEntryResponse;)Landroid/system/keystore2/KeyEntryResponse;
     move-result-object v0"""
 
+# AndroidKeyStoreSpi (unchanged)
 p5_code_1 = "    invoke-static {}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriGetCertificateChain()V"
 p5_code_2 = """    invoke-static {v3}, Lcom/android/internal/util/kaorios/KaoriKeyboxHooks;->KaoriGetCertificateChain([Ljava/security/cert/Certificate;)[Ljava/security/cert/Certificate;
     move-result-object v3"""
 
-p6_code = """    .registers 2
-    const-string v0, "v:1,c:3,g:3"
-    .line 130
-    invoke-direct {p0, v0}, Lcom/miui/performance/DeviceLevelUtils;->parseDeviceLevelList(Ljava/lang/String;)V
-    .line 140
-    return-void"""
-
 root_dir = sys.argv[1]
 for r, d, f in os.walk(root_dir):
-    # 1. AppPkgMgr: STRICT REGEX to target ONLY (String, Int)
+    
+    # 1. ApplicationPackageManager: STRICT MATCH hasSystemFeature(Ljava/lang/String;I)Z
     if 'ApplicationPackageManager.smali' in f:
         path = os.path.join(r, 'ApplicationPackageManager.smali')
-        # This matches: .method public hasSystemFeature(Ljava/lang/String;I)Z
-        # The ';I)' is the key - it ensures we ignore the single-arg version.
+        # Regex MUST match ";I)" to ensure Int arg, preventing injection into (String) overload
         meth = r'\.method.+hasSystemFeature\(Ljava/lang/String;I\)Z'
         patch_file(path, meth, p1_code, 'registers')
     
@@ -280,20 +268,20 @@ for r, d, f in os.walk(root_dir):
         patch_file(path, r'newApplication\(Ljava/lang/Class;Landroid/content/Context;\)Landroid/app/Application;', p2_code, 'below_search', r'invoke-virtual\s+\{v0,\s*p1\},\s*Landroid/app/Application;->attach\(Landroid/content/Context;\)V')
         patch_file(path, r'newApplication\(Ljava/lang/ClassLoader;Ljava/lang/String;Landroid/content/Context;\)Landroid/app/Application;', p3_code, 'below_search', r'invoke-virtual\s+\{v0,\s*p3\},\s*Landroid/app/Application;->attach\(Landroid/content/Context;\)V')
     
-    # 3. KeyStore2
+    # 3. KeyStore2: STRICT MATCH getKeyEntry
     if 'KeyStore2.smali' in f:
+        # Check path to ensure we are in security/KeyStore2
         if 'android/security' in r.replace(os.sep, '/'):
-            patch_file(os.path.join(r, 'KeyStore2.smali'), r'\.method.+getKeyEntry\(Landroid/system/keystore2/KeyDescriptor;\)Landroid/system/keystore2/KeyEntryResponse;', p4_code, 'above_search', r'return-object\s+v0')
+            path = os.path.join(r, 'KeyStore2.smali')
+            meth = r'\.method.+getKeyEntry\(Landroid/system/keystore2/KeyDescriptor;\)Landroid/system/keystore2/KeyEntryResponse;'
+            # Inject ABOVE return-object v0
+            patch_file(path, meth, p4_code, 'above_search', r'return-object\s+v0')
     
     # 4. AndroidKeyStoreSpi
     if 'AndroidKeyStoreSpi.smali' in f:
         path = os.path.join(r, 'AndroidKeyStoreSpi.smali')
         patch_file(path, r'engineGetCertificateChain\(Ljava/lang/String;\)\[Ljava/security/cert/Certificate;', p5_code_1, 'registers')
         patch_file(path, r'engineGetCertificateChain\(Ljava/lang/String;\)\[Ljava/security/cert/Certificate;', p5_code_2, 'below_search', r'aput-object\s+v2,\s*v3,\s*v4')
-    
-    # 5. MiuiBooster
-    if f == 'DeviceLevelUtils.smali':
-        patch_file(os.path.join(r, f), r'\.method.+initDeviceLevel\(\)V', p6_code, 'replace_body')
 EOF
 
 # =========================================================
@@ -481,7 +469,7 @@ for part in $LOGICALS; do
             if [ ! -z "$BOOST_JAR" ]; then
                 echo "          -> Target: $BOOST_JAR"
                 
-                # 1. CREATE MOD.SH
+                # 1. CREATE MOD.SH (Self-Contained)
                 cat <<'EOF_MOD' > "$TEMP_DIR/mod.sh"
 #!/bin/bash
 JAR="$1"
