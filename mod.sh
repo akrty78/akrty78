@@ -101,61 +101,179 @@ install_gapp_logic() {
     done
 }
 
-# --- CREATE APK-MODDER.SH ---
+# --- CREATE APK-MODDER.SH (DIRECT DEX EDITION - SAFE) ---
 cat <<'EOF' > "$GITHUB_WORKSPACE/apk-modder.sh"
 #!/bin/bash
+# =========================================================
+#  NEXDROID MODDER - DIRECT DEX EDITION (The "Real" MT Style)
+#  Safely mods System Apps WITHOUT breaking the Manifest
+# =========================================================
+
 APK_PATH="$1"
-TARGET_CLASS="$2"
-TARGET_METHOD="$3"
-RETURN_VAL="$4"
+TARGET_CLASS="$2"  # e.g. com/android/settings/InternalDeviceUtils
+TARGET_METHOD="$3" # e.g. isAiSupported
+RETURN_VAL="$4"    # true | false | null | void
+
+# --- 1. SETUP & TOOLS ---
 BIN_DIR="$(pwd)/bin"
-TEMP_MOD="temp_modder"
+WORK_DIR="temp_dex_work"
 export PATH="$BIN_DIR:$PATH"
+mkdir -p "$BIN_DIR"
 
-if [ ! -f "$APK_PATH" ]; then exit 1; fi
-echo "   [Modder] 💉 Patching $TARGET_METHOD..."
-
-rm -rf "$TEMP_MOD"
-apktool d -r -f "$APK_PATH" -o "$TEMP_MOD" >/dev/null 2>&1
-
-CLASS_PATH=$(echo "$TARGET_CLASS" | sed 's/\./\//g')
-SMALI_FILE=$(find "$TEMP_MOD" -type f -path "*/$CLASS_PATH.smali" | head -n 1)
-
-if [ -z "$SMALI_FILE" ]; then
-    echo "   [Modder] ⚠️ Class not found."
-    rm -rf "$TEMP_MOD"; exit 0
+# Auto-Fetch Baksmali/Smali (Required for safe editing)
+if [ ! -f "$BIN_DIR/baksmali.jar" ]; then
+    echo "   [Modder] ⬇️ Fetching Baksmali..."
+    wget -q -O "$BIN_DIR/baksmali.jar" "https://bitbucket.org/JesusFreke/smali/downloads/baksmali-2.5.2.jar"
+fi
+if [ ! -f "$BIN_DIR/smali.jar" ]; then
+    echo "   [Modder] ⬇️ Fetching Smali..."
+    wget -q -O "$BIN_DIR/smali.jar" "https://bitbucket.org/JesusFreke/smali/downloads/smali-2.5.2.jar"
 fi
 
+if [ ! -f "$APK_PATH" ]; then
+    echo "   [Modder] ❌ File not found: $APK_PATH"
+    exit 1
+fi
+
+echo "   [Modder] 💉 Patching: $TARGET_METHOD -> $RETURN_VAL"
+
+# --- 2. PREPARE WORKSPACE ---
+rm -rf "$WORK_DIR"
+mkdir -p "$WORK_DIR/dex_out"
+
+# --- 3. EXTRACT ALL DEX FILES ---
+# Settings.apk is Multi-Dex (classes.dex, classes2.dex...)
+# We unzip ONLY .dex files. Manifest/Resources stay safely inside the APK.
+unzip -q -j "$APK_PATH" "*.dex" -d "$WORK_DIR"
+
+# --- 4. LOCATE THE CLASS (Multi-Dex Scan) ---
+TARGET_DEX=""
+SMALI_ROOT=""
+SMALI_FILE=""
+
+# Scan which dex contains the class
+for dex in "$WORK_DIR"/*.dex; do
+    [ ! -f "$dex" ] && continue
+    
+    # Quick Check: Does this DEX roughly contain the class string?
+    # Convert "com.android.settings" -> "com/android/settings"
+    SEARCH_PATH=$(echo "$TARGET_CLASS" | sed 's/\./\//g')
+    
+    # Only disassemble if potential match found (Optimization)
+    if strings "$dex" | grep -q "$SEARCH_PATH"; then
+        # Full Disassemble to verify
+        java -jar "$BIN_DIR/baksmali.jar" d "$dex" -o "$WORK_DIR/check_smali"
+        
+        # Look for the specific Smali file
+        FOUND_SMALI=$(find "$WORK_DIR/check_smali" -type f -path "*/$SEARCH_PATH.smali" | head -n 1)
+        
+        if [ ! -z "$FOUND_SMALI" ]; then
+            TARGET_DEX="$dex"
+            SMALI_ROOT="$WORK_DIR/check_smali"
+            SMALI_FILE="$FOUND_SMALI"
+            echo "   [Modder] 📍 Found class in $(basename "$dex")"
+            break
+        fi
+        rm -rf "$WORK_DIR/check_smali"
+    fi
+done
+
+if [ -z "$TARGET_DEX" ]; then
+    echo "   [Modder] ⚠️ Class '$TARGET_CLASS' not found in any Dex file."
+    rm -rf "$WORK_DIR"
+    exit 0
+fi
+
+# --- 5. PYTHON SURGEON (YOUR EXACT LOGIC) ---
 cat <<PY > "$BIN_DIR/wiper.py"
 import sys, re
-file_path = sys.argv[1]; method_name = sys.argv[2]; ret_type = sys.argv[3]
 
-tpl_true = ".registers 1\n    const/4 v0, 0x1\n    return v0"
-tpl_false = ".registers 1\n    const/4 v0, 0x0\n    return v0"
-tpl_null = ".registers 1\n    const/4 v0, 0x0\n    return-object v0"
-tpl_void = ".registers 0\n    return-void"
+file_path = sys.argv[1]
+method_name = sys.argv[2]
+ret_type = sys.argv[3]
 
+# Templates (MT Manager Style - Minimal Registers)
+tpl_true = """    .registers 1
+    const/4 v0, 0x1
+    return v0"""
+
+tpl_false = """    .registers 1
+    const/4 v0, 0x0
+    return v0"""
+
+tpl_null = """    .registers 1
+    const/4 v0, 0x0
+    return-object v0"""
+
+tpl_void = """    .registers 0
+    return-void"""
+
+# Select Template
 payload = tpl_void
 if ret_type.lower() == 'true': payload = tpl_true
 elif ret_type.lower() == 'false': payload = tpl_false
 elif ret_type.lower() == 'null': payload = tpl_null
 
-with open(file_path, 'r') as f: content = f.read()
+with open(file_path, 'r') as f:
+    content = f.read()
+
+# Regex to find the method block (Start to End)
+# Matches: .method [flags] methodName(...)RetType ... .end method
+# Uses DOTALL to capture newlines inside method body
 pattern = r'(\.method.* ' + re.escape(method_name) + r'\(.*)(?s:.*?)(\.end method)'
-new_content, count = re.subn(pattern, lambda m: m.group(1) + "\n" + payload + "\n" + m.group(2), content)
+
+def replacer(match):
+    header = match.group(1)
+    footer = match.group(2)
+    # WIPE BODY, INSERT PAYLOAD
+    return header + "\\n" + payload + "\\n" + footer
+
+new_content, count = re.subn(pattern, replacer, content)
 
 if count > 0:
-    with open(file_path, 'w') as f: f.write(new_content)
+    with open(file_path, 'w') as f:
+        f.write(new_content)
     print("PATCHED")
+else:
+    print("MISSING")
 PY
 
+# Execute Patch
 RESULT=$(python3 "$BIN_DIR/wiper.py" "$SMALI_FILE" "$TARGET_METHOD" "$RETURN_VAL")
 
 if [ "$RESULT" == "PATCHED" ]; then
-    apktool b -c "$TEMP_MOD" -o "$APK_PATH" >/dev/null 2>&1
-    echo "   [Modder] ✅ Done."
+    # --- 6. RECOMPILE DEX ---
+    echo "   [Modder] 🏗️ Recompiling Dex..."
+    # We rebuild only the modified DEX code
+    java -jar "$BIN_DIR/smali.jar" a "$SMALI_ROOT" -o "$WORK_DIR/new_classes.dex"
+    
+    if [ -f "$WORK_DIR/new_classes.dex" ]; then
+        DEX_NAME=$(basename "$TARGET_DEX")
+        mv "$WORK_DIR/new_classes.dex" "$WORK_DIR/$DEX_NAME"
+        
+        # --- 7. INJECT INTO APK (THE FIX) ---
+        # Update ONLY the specific .dex file inside the ZIP.
+        # This keeps AndroidManifest.xml untouched (Binary identical).
+        current_dir=$(pwd)
+        cd "$WORK_DIR"
+        zip -q -u "$APK_PATH" "$DEX_NAME"
+        cd "$current_dir"
+        
+        # --- 8. REMOVE SIGNATURE (CRITICAL) ---
+        # Since hash changed, old signature is invalid. Remove it.
+        # System will accept it via CorePatch/Root.
+        zip -d -q "$APK_PATH" "META-INF/*" 2>/dev/null
+        
+        echo "   [Modder] ✅ Success! Settings.apk patched safely (Manifest Intact)."
+    else
+        echo "   [Modder] ❌ Failed to reassemble Dex."
+    fi
+else
+    echo "   [Modder] ⚠️ Method '$TARGET_METHOD' not found in class."
 fi
-rm -rf "$TEMP_MOD" "$BIN_DIR/wiper.py"
+
+# Cleanup
+rm -rf "$WORK_DIR" "$BIN_DIR/wiper.py"
 EOF
 chmod +x "$GITHUB_WORKSPACE/apk-modder.sh"
 
@@ -362,6 +480,16 @@ if [ ! -f "$BIN_DIR/payload-dumper-go" ]; then
     rm pd.tar.gz
 fi
 
+# Ensure Baksmali/Smali for Direct Dex Editing
+if [ ! -f "$BIN_DIR/baksmali.jar" ]; then
+    echo "⬇️  Fetching Baksmali..."
+    wget -q -O "$BIN_DIR/baksmali.jar" "https://bitbucket.org/JesusFreke/smali/downloads/baksmali-2.5.2.jar"
+fi
+if [ ! -f "$BIN_DIR/smali.jar" ]; then
+    echo "⬇️  Fetching Smali..."
+    wget -q -O "$BIN_DIR/smali.jar" "https://bitbucket.org/JesusFreke/smali/downloads/smali-2.5.2.jar"
+fi
+
 # GApps
 if [ ! -d "gapps_src" ]; then
     echo "⬇️  Downloading GApps..."
@@ -548,7 +676,7 @@ for part in $LOGICALS; do
             fi
         fi
 
-# [UPDATED] MIUI BOOSTER - FLAGSHIP TIER UNLOCK (v57)
+        # [UPDATED] MIUI BOOSTER - FLAGSHIP TIER UNLOCK (v57)
         if [ "$part" == "system_ext" ]; then
             echo "      🚀 Kaorios: Patching MiuiBooster (Flagship Tier)..."
             BOOST_JAR=$(find "$DUMP_DIR" -name "MiuiBooster.jar" -type f | head -n 1)
@@ -700,41 +828,37 @@ EOF_MOD
         if [ ! -z "$PROV_APK" ]; then
             echo "      🔧 Patching Provision.apk (Direct Dex)..."
             
-            # 1. Ensure Tools Exist
-            [ ! -f "$BIN_DIR/baksmali.jar" ] && wget -q -O "$BIN_DIR/baksmali.jar" "https://bitbucket.org/JesusFreke/smali/downloads/baksmali-2.5.2.jar"
-            [ ! -f "$BIN_DIR/smali.jar" ] && wget -q -O "$BIN_DIR/smali.jar" "https://bitbucket.org/JesusFreke/smali/downloads/smali-2.5.2.jar"
-
-            # 2. Setup Workspace
+            # Setup Workspace
             rm -rf "$TEMP_DIR/prov_work"
             mkdir -p "$TEMP_DIR/prov_work"
             
-            # 3. Extract ONLY classes.dex
+            # Extract ONLY classes.dex
             unzip -q -j "$PROV_APK" "classes.dex" -d "$TEMP_DIR/prov_work"
             
             if [ -f "$TEMP_DIR/prov_work/classes.dex" ]; then
-                # 4. Disassemble
+                # Disassemble
                 java -jar "$BIN_DIR/baksmali.jar" d "$TEMP_DIR/prov_work/classes.dex" -o "$TEMP_DIR/prov_work/out"
                 
-                # 5. Apply Patch (Build.IS_INTERNATIONAL_BUILD -> True)
+                # Apply Patch (Build.IS_INTERNATIONAL_BUILD -> True)
                 grep -r "IS_INTERNATIONAL_BUILD" "$TEMP_DIR/prov_work/out" | cut -d: -f1 | while read smali_file; do
                     sed -i -E 's/sget-boolean ([vp][0-9]+), Lmiui\/os\/Build;->IS_INTERNATIONAL_BUILD:Z/const\/4 \1, 0x1/g' "$smali_file"
                     echo "          -> Patched: $(basename "$smali_file")"
                 done
                 
-                # 6. Reassemble
+                # Reassemble
                 java -jar "$BIN_DIR/smali.jar" a "$TEMP_DIR/prov_work/out" -o "$TEMP_DIR/prov_work/new_classes.dex"
                 
-                # 7. Inject Back (Update Zip)
+                # Inject Back (Update Zip)
                 if [ -f "$TEMP_DIR/prov_work/new_classes.dex" ]; then
                     mv "$TEMP_DIR/prov_work/new_classes.dex" "$TEMP_DIR/prov_work/classes.dex"
                     
-                    # We need to run zip from the dir containing classes.dex so it maps to root of APK
+                    # Run zip from the dir containing classes.dex
                     current_dir=$(pwd)
                     cd "$TEMP_DIR/prov_work"
                     zip -q -u "$PROV_APK" "classes.dex"
                     cd "$current_dir"
                     
-                    # 8. Remove Old Signature (Vital for Modified System Apps)
+                    # Remove Old Signature (Vital for Modified System Apps)
                     zip -d -q "$PROV_APK" "META-INF/*"
                     
                     echo "          ✅ Provision.apk Patched (Manifest Preserved)"
@@ -749,80 +873,11 @@ EOF_MOD
             rm -rf "$TEMP_DIR/prov_work"
         fi
 
-# F. SETTINGS.APK PATCH (Direct Dex - Multi-Dex Safe)
+        # F. SETTINGS.APK PATCH (Uses Safe Direct Dex Modder)
         SETTINGS_APK=$(find "$DUMP_DIR" -name "Settings.apk" -type f -print -quit)
         if [ ! -z "$SETTINGS_APK" ]; then
              echo "      💊 Modding Settings.apk (AI Support - Safe Mode)..."
-             
-             # Setup Safe Workspace
-             WORK_DIR="$TEMP_DIR/settings_work"
-             rm -rf "$WORK_DIR"
-             mkdir -p "$WORK_DIR/dex_out"
-             
-             # 1. Extract ALL Dex files (Settings is Multi-Dex)
-             unzip -q -j "$SETTINGS_APK" "*.dex" -d "$WORK_DIR"
-             
-             # 2. Find which Dex contains 'InternalDeviceUtils'
-             TARGET_DEX=""
-             for dex in "$WORK_DIR"/*.dex; do
-                 # Quick disassemble to check for class string
-                 # We grep the binary dex or quick-disassemble first to save time
-                 if strings "$dex" | grep -q "InternalDeviceUtils"; then
-                     echo "          -> Found Target Class in: $(basename "$dex")"
-                     TARGET_DEX="$dex"
-                     break
-                 fi
-             done
-             
-             if [ ! -z "$TARGET_DEX" ]; then
-                 DEX_NAME=$(basename "$TARGET_DEX")
-                 
-                 # 3. Disassemble Target Dex
-                 java -jar "$BIN_DIR/baksmali.jar" d "$TARGET_DEX" -o "$WORK_DIR/smali_out"
-                 
-                 # 4. Find the Smali File
-                 TARGET_SMALI=$(find "$WORK_DIR/smali_out" -name "InternalDeviceUtils.smali" -type f)
-                 
-                 if [ ! -z "$TARGET_SMALI" ]; then
-                     echo "          -> Patching: $TARGET_SMALI"
-                     
-                     # 5. Apply Patch: isAiSupported() -> return true
-                     # Regex matches method start ... end, replaces body with "return true"
-                     python3 -c '
-import sys, re
-with open(sys.argv[1], "r") as f: c = f.read()
-# Pattern: .method ... isAiSupported()Z ... .end method
-p = r"(\.method.*isAiSupported\(\)Z)(.*?)(\.end method)"
-# Replacement: return true (const/4 v0, 0x1)
-r = r"\1\n    .registers 1\n    const/4 v0, 0x1\n    return v0\n\3"
-with open(sys.argv[1], "w") as f: f.write(re.sub(p, r, c, flags=re.DOTALL))
-' "$TARGET_SMALI"
-                     
-                     # 6. Reassemble Dex
-                     java -jar "$BIN_DIR/smali.jar" a "$WORK_DIR/smali_out" -o "$WORK_DIR/new_dex"
-                     
-                     # 7. Inject back into APK
-                     if [ -f "$WORK_DIR/new_dex" ]; then
-                         mv "$WORK_DIR/new_dex" "$WORK_DIR/$DEX_NAME"
-                         
-                         cd "$WORK_DIR"
-                         zip -q -u "$SETTINGS_APK" "$DEX_NAME"
-                         cd "$GITHUB_WORKSPACE"
-                         
-                         # 8. Un-sign (Remove META-INF)
-                         zip -d -q "$SETTINGS_APK" "META-INF/*"
-                         echo "          ✅ Settings.apk Patched & Safe!"
-                     else
-                         echo "          ❌ Failed to reassemble Dex."
-                     fi
-                 else
-                     echo "          ⚠️ InternalDeviceUtils.smali not found in disassembled code."
-                 fi
-             else
-                 echo "          ⚠️ Could not find InternalDeviceUtils in any Dex file."
-             fi
-             
-             rm -rf "$WORK_DIR"
+             ./apk-modder.sh "$SETTINGS_APK" "com/android/settings/InternalDeviceUtils" "isAiSupported" "true"
         fi
 
         # G. REPACK
