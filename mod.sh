@@ -695,25 +695,134 @@ EOF_MOD
             fi
         fi
         
-        # E. PROVISION PATCHER
+        # E. PROVISION PATCHER (Direct Dex Method - v57)
         PROV_APK=$(find "$DUMP_DIR" -name "Provision.apk" -type f -print -quit)
         if [ ! -z "$PROV_APK" ]; then
-            echo "      🔧 Patching Provision.apk..."
-            apktool d -r -f "$PROV_APK" -o "prov_temp" > /dev/null 2>&1
-            if [ -d "prov_temp" ]; then
-                grep -r "IS_INTERNATIONAL_BUILD" "prov_temp" | cut -d: -f1 | while read smali_file; do
+            echo "      🔧 Patching Provision.apk (Direct Dex)..."
+            
+            # 1. Ensure Tools Exist
+            [ ! -f "$BIN_DIR/baksmali.jar" ] && wget -q -O "$BIN_DIR/baksmali.jar" "https://bitbucket.org/JesusFreke/smali/downloads/baksmali-2.5.2.jar"
+            [ ! -f "$BIN_DIR/smali.jar" ] && wget -q -O "$BIN_DIR/smali.jar" "https://bitbucket.org/JesusFreke/smali/downloads/smali-2.5.2.jar"
+
+            # 2. Setup Workspace
+            rm -rf "$TEMP_DIR/prov_work"
+            mkdir -p "$TEMP_DIR/prov_work"
+            
+            # 3. Extract ONLY classes.dex
+            unzip -q -j "$PROV_APK" "classes.dex" -d "$TEMP_DIR/prov_work"
+            
+            if [ -f "$TEMP_DIR/prov_work/classes.dex" ]; then
+                # 4. Disassemble
+                java -jar "$BIN_DIR/baksmali.jar" d "$TEMP_DIR/prov_work/classes.dex" -o "$TEMP_DIR/prov_work/out"
+                
+                # 5. Apply Patch (Build.IS_INTERNATIONAL_BUILD -> True)
+                grep -r "IS_INTERNATIONAL_BUILD" "$TEMP_DIR/prov_work/out" | cut -d: -f1 | while read smali_file; do
                     sed -i -E 's/sget-boolean ([vp][0-9]+), Lmiui\/os\/Build;->IS_INTERNATIONAL_BUILD:Z/const\/4 \1, 0x1/g' "$smali_file"
+                    echo "          -> Patched: $(basename "$smali_file")"
                 done
+                
+                # 6. Reassemble
+                java -jar "$BIN_DIR/smali.jar" a "$TEMP_DIR/prov_work/out" -o "$TEMP_DIR/prov_work/new_classes.dex"
+                
+                # 7. Inject Back (Update Zip)
+                if [ -f "$TEMP_DIR/prov_work/new_classes.dex" ]; then
+                    mv "$TEMP_DIR/prov_work/new_classes.dex" "$TEMP_DIR/prov_work/classes.dex"
+                    
+                    # We need to run zip from the dir containing classes.dex so it maps to root of APK
+                    current_dir=$(pwd)
+                    cd "$TEMP_DIR/prov_work"
+                    zip -q -u "$PROV_APK" "classes.dex"
+                    cd "$current_dir"
+                    
+                    # 8. Remove Old Signature (Vital for Modified System Apps)
+                    zip -d -q "$PROV_APK" "META-INF/*"
+                    
+                    echo "          ✅ Provision.apk Patched (Manifest Preserved)"
+                else
+                    echo "          ❌ Smali Rebuild Failed"
+                fi
+            else
+                echo "          ⚠️ classes.dex not found in Provision.apk"
             fi
-            apktool b "prov_temp" -o "$PROV_APK" > /dev/null 2>&1
-            rm -rf "prov_temp"
+            
+            # Cleanup
+            rm -rf "$TEMP_DIR/prov_work"
         fi
 
-        # F. SETTINGS.APK PATCH
+# F. SETTINGS.APK PATCH (Direct Dex - Multi-Dex Safe)
         SETTINGS_APK=$(find "$DUMP_DIR" -name "Settings.apk" -type f -print -quit)
         if [ ! -z "$SETTINGS_APK" ]; then
-             echo "      💊 Modding Settings.apk (AI Support)..."
-             ./apk-modder.sh "$SETTINGS_APK" "com/android/settings/InternalDeviceUtils" "isAiSupported" "true"
+             echo "      💊 Modding Settings.apk (AI Support - Safe Mode)..."
+             
+             # Setup Safe Workspace
+             WORK_DIR="$TEMP_DIR/settings_work"
+             rm -rf "$WORK_DIR"
+             mkdir -p "$WORK_DIR/dex_out"
+             
+             # 1. Extract ALL Dex files (Settings is Multi-Dex)
+             unzip -q -j "$SETTINGS_APK" "*.dex" -d "$WORK_DIR"
+             
+             # 2. Find which Dex contains 'InternalDeviceUtils'
+             TARGET_DEX=""
+             for dex in "$WORK_DIR"/*.dex; do
+                 # Quick disassemble to check for class string
+                 # We grep the binary dex or quick-disassemble first to save time
+                 if strings "$dex" | grep -q "InternalDeviceUtils"; then
+                     echo "          -> Found Target Class in: $(basename "$dex")"
+                     TARGET_DEX="$dex"
+                     break
+                 fi
+             done
+             
+             if [ ! -z "$TARGET_DEX" ]; then
+                 DEX_NAME=$(basename "$TARGET_DEX")
+                 
+                 # 3. Disassemble Target Dex
+                 java -jar "$BIN_DIR/baksmali.jar" d "$TARGET_DEX" -o "$WORK_DIR/smali_out"
+                 
+                 # 4. Find the Smali File
+                 TARGET_SMALI=$(find "$WORK_DIR/smali_out" -name "InternalDeviceUtils.smali" -type f)
+                 
+                 if [ ! -z "$TARGET_SMALI" ]; then
+                     echo "          -> Patching: $TARGET_SMALI"
+                     
+                     # 5. Apply Patch: isAiSupported() -> return true
+                     # Regex matches method start ... end, replaces body with "return true"
+                     python3 -c '
+import sys, re
+with open(sys.argv[1], "r") as f: c = f.read()
+# Pattern: .method ... isAiSupported()Z ... .end method
+p = r"(\.method.*isAiSupported\(\)Z)(.*?)(\.end method)"
+# Replacement: return true (const/4 v0, 0x1)
+r = r"\1\n    .registers 1\n    const/4 v0, 0x1\n    return v0\n\3"
+with open(sys.argv[1], "w") as f: f.write(re.sub(p, r, c, flags=re.DOTALL))
+' "$TARGET_SMALI"
+                     
+                     # 6. Reassemble Dex
+                     java -jar "$BIN_DIR/smali.jar" a "$WORK_DIR/smali_out" -o "$WORK_DIR/new_dex"
+                     
+                     # 7. Inject back into APK
+                     if [ -f "$WORK_DIR/new_dex" ]; then
+                         mv "$WORK_DIR/new_dex" "$WORK_DIR/$DEX_NAME"
+                         
+                         cd "$WORK_DIR"
+                         zip -q -u "$SETTINGS_APK" "$DEX_NAME"
+                         cd "$GITHUB_WORKSPACE"
+                         
+                         # 8. Un-sign (Remove META-INF)
+                         zip -d -q "$SETTINGS_APK" "META-INF/*"
+                         echo "          ✅ Settings.apk Patched & Safe!"
+                     else
+                         echo "          ❌ Failed to reassemble Dex."
+                     fi
+                 else
+                     echo "          ⚠️ InternalDeviceUtils.smali not found in disassembled code."
+                 fi
+             else
+                 echo "          ⚠️ Could not find InternalDeviceUtils in any Dex file."
+             fi
+             
+             rm -rf "$WORK_DIR"
         fi
 
         # G. REPACK
