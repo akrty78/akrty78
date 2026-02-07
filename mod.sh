@@ -90,14 +90,24 @@ ro.control_privapp_permissions=
 # --- FUNCTIONS ---
 install_gapp_logic() {
     local app_list="$1"; local target_root="$2"
+    local installed=0
+    local missing=0
+    
     for app in $app_list; do
         local src=$(find "$GITHUB_WORKSPACE/gapps_src" -name "${app}.apk" -print -quit)
         if [ -f "$src" ]; then
             mkdir -p "$target_root/$app"
             cp "$src" "$target_root/$app/${app}.apk"
             chmod 644 "$target_root/$app/${app}.apk"
+            echo "         ✅ $app.apk → $(basename $target_root)/$app/"
+            installed=$((installed + 1))
+        else
+            echo "         ⚠️ $app.apk (not found in gapps_src)"
+            missing=$((missing + 1))
         fi
     done
+    
+    echo "         📊 Installed: $installed | Missing: $missing"
 }
 
 # --- SIGNING FUNCTIONS ---
@@ -351,18 +361,26 @@ for part in $LOGICALS; do
         # A. DEBLOATER
         echo "   🗑️  Debloating..."
         echo "$BLOAT_LIST" | tr ' ' '\n' | grep -v "^\s*$" > "$TEMP_DIR/bloat_target_list.txt"
+        
         BLOAT_COUNT=0
-        find "$DUMP_DIR" -type f -name "*.apk" | while read apk_file; do
+        APK_COUNT=0
+        
+        echo "      🔍 Scanning for APKs in: $DUMP_DIR"
+        
+        while IFS= read -r apk_file; do
+            APK_COUNT=$((APK_COUNT + 1))
             pkg_name=$(aapt dump badging "$apk_file" 2>/dev/null | grep "package: name=" | cut -d"'" -f2)
+            
             if [ ! -z "$pkg_name" ]; then
                 if grep -Fxq "$pkg_name" "$TEMP_DIR/bloat_target_list.txt"; then
                     rm -rf "$(dirname "$apk_file")"
-                    echo "      ➜ Removed: $pkg_name"
+                    echo "      ❌ Removed: $pkg_name ($(dirname "$apk_file"))"
                     BLOAT_COUNT=$((BLOAT_COUNT + 1))
                 fi
             fi
-        done
-        echo "      ✅ Removed $BLOAT_COUNT bloatware packages"
+        done < <(find "$DUMP_DIR" -type f -name "*.apk")
+        
+        echo "      📊 Scanned: $APK_COUNT APKs | Removed: $BLOAT_COUNT bloatware packages"
 
         # B. GAPPS INJECTION
         if [ "$part" == "product" ] && [ -d "$GITHUB_WORKSPACE/gapps_src" ]; then
@@ -371,12 +389,20 @@ for part in $LOGICALS; do
             PRIV_ROOT="$DUMP_DIR/priv-app"
             mkdir -p "$APP_ROOT" "$PRIV_ROOT"
             
+            echo "      📂 GApps source: $GITHUB_WORKSPACE/gapps_src"
+            
             P_APP="SoundPickerGoogle MiuiBiometric LatinImeGoogle GoogleTTS GooglePartnerSetup GeminiShell"
             P_PRIV="Velvet Phonesky MIUIPackageInstaller GoogleRestore GooglePartnerSetup Assistant AndroidAutoStub"
             
-            install_gapp_logic "$P_PRIV" "$PRIV_ROOT"
+            echo "      📦 Installing to /app..."
             install_gapp_logic "$P_APP" "$APP_ROOT"
-            echo "      ✅ GApps injected"
+            
+            echo "      📦 Installing to /priv-app..."
+            install_gapp_logic "$P_PRIV" "$PRIV_ROOT"
+            
+            echo "      ✅ GApps injection complete"
+        elif [ "$part" == "product" ]; then
+            echo "   ⚠️ Skipping GApps injection (gapps_src not found)"
         fi
 
         # C. KAORIOS FRAMEWORK PATCHER - REMOVED AS REQUESTED
@@ -388,7 +414,7 @@ for part in $LOGICALS; do
             BOOST_JAR=$(find "$DUMP_DIR" -name "MiuiBooster.jar" -type f | head -n 1)
             
             if [ ! -z "$BOOST_JAR" ] && [ -f "$BOOST_JAR" ]; then
-                echo "      → Target: $BOOST_JAR"
+                echo "      ✅ Found: $BOOST_JAR"
                 
                 cat <<'EOF_BOOST' > "$TEMP_DIR/patch_booster.py"
 import sys, re, os, subprocess
@@ -450,6 +476,8 @@ EOF_BOOST
 
                 python3 "$TEMP_DIR/patch_booster.py" "$BOOST_JAR"
                 rm -f "$TEMP_DIR/patch_booster.py"
+            else
+                echo "      ⚠️ MiuiBooster.jar not found, skipping..."
             fi
         fi
 
@@ -459,12 +487,14 @@ EOF_BOOST
             MF_JAR=$(find "$DUMP_DIR" -name "miui-framework.jar" -type f | head -n 1)
             
             if [ ! -z "$MF_JAR" ] && [ -f "$MF_JAR" ]; then
+                echo "      ✅ Found: $MF_JAR"
                 cp "$MF_JAR" "${MF_JAR}.bak"
                 rm -rf "$TEMP_DIR/mf.jar" "$TEMP_DIR/mf_src"
                 cp "$MF_JAR" "$TEMP_DIR/mf.jar"
                 
                 cd "$TEMP_DIR"
                 if timeout 5m apktool d -r -f "mf.jar" -o "mf_src" >/dev/null 2>&1; then
+                    echo "      📦 Decompiled successfully"
                     PATCHED=0
                     grep -rl "com.baidu.input_mi" "mf_src" | while read f; do
                         if [[ "$f" == *"InputMethodServiceInjector.smali"* ]]; then
@@ -476,10 +506,21 @@ EOF_BOOST
                     
                     if [ "$PATCHED" -eq 1 ] || grep -rq "com.google.android.inputmethod.latin" "mf_src"; then
                         apktool b -c "mf_src" -o "mf_patched.jar" >/dev/null 2>&1
-                        [ -f "mf_patched.jar" ] && mv "mf_patched.jar" "$MF_JAR"
+                        if [ -f "mf_patched.jar" ]; then
+                            mv "mf_patched.jar" "$MF_JAR"
+                            echo "      ✅ miui-framework.jar repacked successfully"
+                        else
+                            echo "      ❌ Recompile failed"
+                        fi
+                    else
+                        echo "      ⚠️ No Baidu IME references found"
                     fi
+                else
+                    echo "      ❌ Decompile failed"
                 fi
                 cd "$GITHUB_WORKSPACE"
+            else
+                echo "      ⚠️ miui-framework.jar not found, skipping..."
             fi
         fi
 
@@ -487,26 +528,43 @@ EOF_BOOST
         MFP_APK=$(find "$DUMP_DIR" -name "MIUIFrequentPhrase.apk" -type f -print -quit)
         if [ ! -z "$MFP_APK" ] && [ -f "$MFP_APK" ]; then
             echo "   🎨 Modding MIUIFrequentPhrase..."
+            echo "      ✅ Found: $MFP_APK"
             rm -rf "$TEMP_DIR/mfp.apk" "$TEMP_DIR/mfp_src"
             cp "$MFP_APK" "$TEMP_DIR/mfp.apk"
             
             cd "$TEMP_DIR"
             if timeout 5m apktool d -f "mfp.apk" -o "mfp_src" >/dev/null 2>&1; then
-                find "mfp_src" -name "InputMethodBottomManager.smali" -exec sed -i 's/com\.baidu\.input_mi/com.google.android.inputmethod.latin/g' {} +
+                echo "      📦 Decompiled successfully"
+                
+                # Patch IME
+                IME_FILES=$(find "mfp_src" -name "InputMethodBottomManager.smali" | wc -l)
+                if [ "$IME_FILES" -gt 0 ]; then
+                    find "mfp_src" -name "InputMethodBottomManager.smali" -exec sed -i 's/com\.baidu\.input_mi/com.google.android.inputmethod.latin/g' {} +
+                    echo "      ✅ Patched IME redirect (Baidu → Gboard)"
+                else
+                    echo "      ⚠️ InputMethodBottomManager.smali not found"
+                fi
                 
                 if [ -f "mfp_src/res/values/colors.xml" ]; then
                     sed -i 's|<color name="input_bottom_background_color">.*</color>|<color name="input_bottom_background_color">@android:color/system_neutral1_50</color>|g' "mfp_src/res/values/colors.xml"
+                    echo "      ✅ Patched colors.xml (light theme)"
                 fi
                 if [ -f "mfp_src/res/values-night/colors.xml" ]; then
                     sed -i 's|<color name="input_bottom_background_color">.*</color>|<color name="input_bottom_background_color">@android:color/system_neutral1_900</color>|g' "mfp_src/res/values-night/colors.xml"
+                    echo "      ✅ Patched colors.xml (dark theme)"
                 fi
                 
                 apktool b -c "mfp_src" -o "mfp_patched.apk" >/dev/null 2>&1
                 if [ -f "mfp_patched.apk" ]; then
+                    echo "      📦 Recompiled successfully"
                     sign_apk "mfp_patched.apk"
                     mv "mfp_patched.apk" "$MFP_APK"
                     echo "      ✅ MIUIFrequentPhrase patched & signed"
+                else
+                    echo "      ❌ Recompile failed"
                 fi
+            else
+                echo "      ❌ Decompile failed"
             fi
             cd "$GITHUB_WORKSPACE"
         fi
@@ -523,29 +581,56 @@ EOF_BOOST
             
             mkdir -p "$PERM_DIR" "$DEF_PERM_DIR" "$OVERLAY_DIR" "$MEDIA_DIR" "$THEME_DIR" "$KAORIOS_PRIV"
             
+            echo "      🌸 Installing Kaorios Toolbox..."
             if [ -f "$KAORIOS_DIR/KaoriosToolbox.apk" ]; then
                 cp "$KAORIOS_DIR/KaoriosToolbox.apk" "$KAORIOS_PRIV/"
-                echo "      ✅ KaoriosToolbox.apk installed"
+                echo "         ✅ KaoriosToolbox.apk → /priv-app/KaoriosToolbox/"
+            else
+                echo "         ⚠️ KaoriosToolbox.apk not found"
             fi
+            
             if [ -f "$KAORIOS_DIR/kaorios_perm.xml" ]; then
                 cp "$KAORIOS_DIR/kaorios_perm.xml" "$PERM_DIR/"
-                echo "      ✅ Kaorios permissions configured"
+                echo "         ✅ kaorios_perm.xml → /etc/permissions/"
+            else
+                echo "         ⚠️ kaorios_perm.xml not found"
             fi
 
             if [ -d "$GITHUB_WORKSPACE/nex_pkg" ]; then
+                echo "      📂 Installing NexPackage assets..."
+                
                 DEF_XML="default-permissions-google.xml"
                 if [ -f "$GITHUB_WORKSPACE/nex_pkg/$DEF_XML" ]; then
                     cp "$GITHUB_WORKSPACE/nex_pkg/$DEF_XML" "$DEF_PERM_DIR/"
                     chmod 644 "$DEF_PERM_DIR/$DEF_XML"
+                    echo "         ✅ $DEF_XML → /etc/default-permissions/"
                 fi
                 
-                find "$GITHUB_WORKSPACE/nex_pkg" -maxdepth 1 -name "*.xml" ! -name "$DEF_XML" -exec cp {} "$PERM_DIR/" \;
-                find "$GITHUB_WORKSPACE/nex_pkg" -maxdepth 1 -name "*.apk" -exec cp {} "$OVERLAY_DIR/" \;
+                XML_COUNT=$(find "$GITHUB_WORKSPACE/nex_pkg" -maxdepth 1 -name "*.xml" ! -name "$DEF_XML" | wc -l)
+                if [ "$XML_COUNT" -gt 0 ]; then
+                    find "$GITHUB_WORKSPACE/nex_pkg" -maxdepth 1 -name "*.xml" ! -name "$DEF_XML" -exec cp {} "$PERM_DIR/" \;
+                    echo "         ✅ $XML_COUNT permission XML(s) → /etc/permissions/"
+                fi
                 
-                [ -f "$GITHUB_WORKSPACE/nex_pkg/bootanimation.zip" ] && cp "$GITHUB_WORKSPACE/nex_pkg/bootanimation.zip" "$MEDIA_DIR/"
-                [ -f "$GITHUB_WORKSPACE/nex_pkg/lock_wallpaper" ] && cp "$GITHUB_WORKSPACE/nex_pkg/lock_wallpaper" "$THEME_DIR/"
+                APK_COUNT=$(find "$GITHUB_WORKSPACE/nex_pkg" -maxdepth 1 -name "*.apk" | wc -l)
+                if [ "$APK_COUNT" -gt 0 ]; then
+                    find "$GITHUB_WORKSPACE/nex_pkg" -maxdepth 1 -name "*.apk" -exec cp {} "$OVERLAY_DIR/" \;
+                    echo "         ✅ $APK_COUNT overlay APK(s) → /overlay/"
+                fi
+                
+                if [ -f "$GITHUB_WORKSPACE/nex_pkg/bootanimation.zip" ]; then
+                    cp "$GITHUB_WORKSPACE/nex_pkg/bootanimation.zip" "$MEDIA_DIR/"
+                    echo "         ✅ bootanimation.zip → /media/"
+                fi
+                
+                if [ -f "$GITHUB_WORKSPACE/nex_pkg/lock_wallpaper" ]; then
+                    cp "$GITHUB_WORKSPACE/nex_pkg/lock_wallpaper" "$THEME_DIR/"
+                    echo "         ✅ lock_wallpaper → /media/theme/default/"
+                fi
                 
                 echo "      ✅ NexPackage assets deployed"
+            else
+                echo "      ⚠️ NexPackage directory not found, skipping..."
             fi
         fi
         
@@ -553,39 +638,54 @@ EOF_BOOST
         PROV_APK=$(find "$DUMP_DIR" -name "Provision.apk" -type f -print -quit)
         if [ ! -z "$PROV_APK" ] && [ -f "$PROV_APK" ]; then
             echo "   🔧 Patching Provision.apk (Direct Dex Method)..."
+            echo "      ✅ Found: $PROV_APK"
             
             PROV_WORK="$TEMP_DIR/prov_dex_$$"
             mkdir -p "$PROV_WORK"
             
             # Extract ONLY dex files
-            unzip -j "$PROV_APK" 'classes*.dex' -d "$PROV_WORK/" 2>/dev/null
+            echo "      📦 Extracting dex files (manifest untouched)..."
+            DEX_EXTRACTED=$(unzip -j "$PROV_APK" 'classes*.dex' -d "$PROV_WORK/" 2>/dev/null | grep -c "inflating:" || echo "0")
+            echo "      📊 Extracted $DEX_EXTRACTED dex file(s)"
             
             # Process each dex
+            PATCHED_COUNT=0
             for dex_file in "$PROV_WORK"/classes*.dex; do
                 [ ! -f "$dex_file" ] && continue
                 
                 dex_name=$(basename "$dex_file" .dex)
                 smali_out="$PROV_WORK/${dex_name}_smali"
                 
+                echo "      🔍 Processing $dex_name.dex..."
+                
                 # Decompile dex to smali
                 java -jar "$BIN_DIR/baksmali.jar" d "$dex_file" -o "$smali_out" 2>/dev/null
                 
                 if [ -d "$smali_out" ]; then
                     # Patch IS_INTERNATIONAL_BUILD checks
-                    find "$smali_out" -type f -name "*.smali" -exec grep -l "IS_INTERNATIONAL_BUILD" {} \; | while read smali_file; do
-                        sed -i -E 's/sget-boolean ([vp][0-9]+), Lmiui\/os\/Build;->IS_INTERNATIONAL_BUILD:Z/const\/4 \1, 0x1/g' "$smali_file"
-                    done
+                    SMALI_COUNT=$(find "$smali_out" -type f -name "*.smali" -exec grep -l "IS_INTERNATIONAL_BUILD" {} \; | wc -l)
+                    
+                    if [ "$SMALI_COUNT" -gt 0 ]; then
+                        echo "         ✅ Found $SMALI_COUNT file(s) with IS_INTERNATIONAL_BUILD"
+                        find "$smali_out" -type f -name "*.smali" -exec grep -l "IS_INTERNATIONAL_BUILD" {} \; | while read smali_file; do
+                            sed -i -E 's/sget-boolean ([vp][0-9]+), Lmiui\/os\/Build;->IS_INTERNATIONAL_BUILD:Z/const\/4 \1, 0x1/g' "$smali_file"
+                        done
+                        PATCHED_COUNT=$((PATCHED_COUNT + 1))
+                    else
+                        echo "         ⚠️ No IS_INTERNATIONAL_BUILD references found"
+                    fi
                     
                     # Recompile smali to dex
                     java -jar "$BIN_DIR/smali.jar" a "$smali_out" -o "${dex_file}.patched" 2>/dev/null
                     
                     if [ -f "${dex_file}.patched" ]; then
                         mv "${dex_file}.patched" "$dex_file"
-                        echo "      ✅ Patched: $dex_name.dex"
+                        echo "         ✅ Recompiled: $dex_name.dex"
                     fi
                 fi
             done
             
+            echo "      📦 Injecting patched dex files back into APK..."
             # Inject patched dex back into APK (preserving manifest)
             cd "$PROV_WORK"
             for dex_file in classes*.dex; do
@@ -597,28 +697,37 @@ EOF_BOOST
             # Verify manifest integrity
             MANIFEST_HASH=$(unzip -p "$PROV_APK" AndroidManifest.xml 2>/dev/null | md5sum | cut -d' ' -f1)
             echo "      📋 Manifest Hash: $MANIFEST_HASH (unchanged)"
+            echo "      ✅ Provision.apk patched successfully ($PATCHED_COUNT dex file(s) modified)"
             
             cd "$GITHUB_WORKSPACE"
             rm -rf "$PROV_WORK"
+        else
+            echo "   ⚠️ Provision.apk not found, skipping..."
         fi
 
         # I. SETTINGS.APK PATCH (DIRECT DEX EDITING - NO MANIFEST TOUCH)
         SETTINGS_APK=$(find "$DUMP_DIR" -name "Settings.apk" -type f -print -quit)
         if [ ! -z "$SETTINGS_APK" ] && [ -f "$SETTINGS_APK" ]; then
             echo "   💊 Modding Settings.apk (Direct Dex Method)..."
+            echo "      ✅ Found: $SETTINGS_APK"
             
             SETTINGS_WORK="$TEMP_DIR/settings_dex_$$"
             mkdir -p "$SETTINGS_WORK"
             
             # Extract ONLY dex files
-            unzip -j "$SETTINGS_APK" 'classes*.dex' -d "$SETTINGS_WORK/" 2>/dev/null
+            echo "      📦 Extracting dex files (manifest untouched)..."
+            DEX_EXTRACTED=$(unzip -j "$SETTINGS_APK" 'classes*.dex' -d "$SETTINGS_WORK/" 2>/dev/null | grep -c "inflating:" || echo "0")
+            echo "      📊 Extracted $DEX_EXTRACTED dex file(s)"
             
             # Process each dex
+            PATCHED=0
             for dex_file in "$SETTINGS_WORK"/classes*.dex; do
                 [ ! -f "$dex_file" ] && continue
                 
                 dex_name=$(basename "$dex_file" .dex)
                 smali_out="$SETTINGS_WORK/${dex_name}_smali"
+                
+                echo "      🔍 Processing $dex_name.dex..."
                 
                 # Decompile
                 java -jar "$BIN_DIR/baksmali.jar" d "$dex_file" -o "$smali_out" 2>/dev/null
@@ -628,6 +737,7 @@ EOF_BOOST
                     TARGET_FILE=$(find "$smali_out" -path "*/com/android/settings/InternalDeviceUtils.smali" -type f)
                     
                     if [ ! -z "$TARGET_FILE" ] && [ -f "$TARGET_FILE" ]; then
+                        echo "         ✅ Found InternalDeviceUtils.smali"
                         # Patch the method to always return true
                         python3 <<'PYTHON_PATCHER' "$TARGET_FILE"
 import sys
@@ -652,10 +762,11 @@ new_content = re.sub(pattern, replacement, content, flags=re.DOTALL)
 if content != new_content:
     with open(smali_file, 'w') as f:
         f.write(new_content)
-    print("      ✅ Patched: isAiSupported() → return true")
+    print("         ✅ Patched: isAiSupported() → return true")
 else:
-    print("      ⚠️ Method not found or already patched")
+    print("         ⚠️ Method not found or already patched")
 PYTHON_PATCHER
+                        PATCHED=1
                     fi
                     
                     # Recompile
@@ -663,10 +774,12 @@ PYTHON_PATCHER
                     
                     if [ -f "${dex_file}.patched" ]; then
                         mv "${dex_file}.patched" "$dex_file"
+                        echo "         ✅ Recompiled: $dex_name.dex"
                     fi
                 fi
             done
             
+            echo "      📦 Injecting patched dex files back into APK..."
             # Inject back
             cd "$SETTINGS_WORK"
             for dex_file in classes*.dex; do
@@ -675,8 +788,16 @@ PYTHON_PATCHER
                 zip -u "$SETTINGS_APK" "$dex_file" 2>/dev/null
             done
             
+            if [ "$PATCHED" -eq 1 ]; then
+                echo "      ✅ Settings.apk patched successfully (AI Support enabled)"
+            else
+                echo "      ⚠️ Settings.apk processed but no patches applied"
+            fi
+            
             cd "$GITHUB_WORKSPACE"
             rm -rf "$SETTINGS_WORK"
+        else
+            echo "   ⚠️ Settings.apk not found, skipping..."
         fi
 
         # J. ADD PROPS
