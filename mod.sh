@@ -460,7 +460,7 @@ for part in $LOGICALS; do
             mkdir -p "$APP_ROOT" "$PRIV_ROOT"
             
             P_APP="SoundPickerGoogle MiuiBiometric LatinImeGoogle GoogleTTS GooglePartnerSetup GeminiShell"
-            P_PRIV="Wizard Velvet Phonesky MIUIPackageInstaller GoogleRestore GooglePartnerSetup Assistant AndroidAutoStub"
+            P_PRIV="Velvet Phonesky MIUIPackageInstaller GoogleRestore GooglePartnerSetup Assistant AndroidAutoStub"
             install_gapp_logic "$P_PRIV" "$PRIV_ROOT"
             install_gapp_logic "$P_APP" "$APP_ROOT"
         fi
@@ -548,39 +548,78 @@ for part in $LOGICALS; do
             fi
         fi
 
-        # [NEW] MIUI BOOSTER (VIA MOD.SH)
+# [UPDATED] MIUI BOOSTER - FLAGSHIP TIER UNLOCK (v57)
         if [ "$part" == "system_ext" ]; then
-            echo "      🚀 Kaorios: Patching MiuiBooster (via mod.sh)..."
+            echo "      🚀 Kaorios: Patching MiuiBooster (Flagship Tier)..."
             BOOST_JAR=$(find "$DUMP_DIR" -name "MiuiBooster.jar" -type f | head -n 1)
+            
             if [ ! -z "$BOOST_JAR" ]; then
                 echo "          -> Target: $BOOST_JAR"
-                cat <<'EOF_MOD' > "$TEMP_DIR/mod.sh"
-#!/bin/bash
-JAR="$1"
-[ ! -f "$JAR" ] && exit 1
-rm -rf "bst_tmp"
-apktool d -r -f "$JAR" -o "bst_tmp" >/dev/null 2>&1
-SMALI=$(find "bst_tmp" -name "DeviceLevelUtils.smali" -type f | head -n 1)
-if [ -f "$SMALI" ]; then
-    python3 -c '
-import sys, re
-f=sys.argv[1]
-with open(f,"r") as h: c=h.read()
-p=r"(\.method.+initDeviceLevel\(\)V)(.*?)(\.end method)"
-r=r"\1\n    .registers 2\n    const-string v0, \"v:1,c:3,g:3\"\n    invoke-direct {p0, v0}, Lcom/miui/performance/DeviceLevelUtils;->parseDeviceLevelList(Ljava/lang/String;)V\n    return-void\n\3"
-with open(f,"w") as h: h.write(re.sub(p, r, c, flags=re.DOTALL))
-' "$SMALI"
-    apktool b -c "bst_tmp" -o "patched.jar" >/dev/null 2>&1
-    [ -f "patched.jar" ] && mv "patched.jar" "$JAR"
-fi
-rm -rf "bst_tmp"
+                
+                # Create a specialized patcher for this specific method
+                cat <<'EOF_MOD' > "$TEMP_DIR/mod_booster.py"
+import sys, re, os
+
+jar_path = sys.argv[1]
+temp_dir = "bst_tmp"
+
+# 1. Decompile
+os.system(f"apktool d -r -f '{jar_path}' -o {temp_dir} >/dev/null 2>&1")
+
+# 2. Find target Smali
+target_file = None
+for root, dirs, files in os.walk(temp_dir):
+    if "DeviceLevelUtils.smali" in files:
+        target_file = os.path.join(root, "DeviceLevelUtils.smali")
+        break
+
+if target_file:
+    with open(target_file, 'r') as f:
+        content = f.read()
+
+    # 3. The Payload (Your Exact Code)
+    # We use regex to match the method start and end, wiping everything inside.
+    method_header = ".method public initDeviceLevel()V"
+    method_body = """
+    .registers 2
+
+    const-string v0, "v:1,c:3,g:3"
+
+    .line 130
+    invoke-direct {p0, v0}, Lcom/miui/performance/DeviceLevelUtils;->parseDeviceLevelList(Ljava/lang/String;)V
+
+    .line 140
+    return-void
+"""
+    # Regex to replace the method body
+    # Matches: .method public initDeviceLevel()V ... [anything] ... .end method
+    pattern = re.compile(r'(\.method public initDeviceLevel\(\)V)(.*?)(\.end method)', re.DOTALL)
+    
+    new_content = pattern.sub(f"\\1{method_body}\\3", content)
+
+    if content != new_content:
+        with open(target_file, 'w') as f:
+            f.write(new_content)
+        print("          ✅ Method Replaced: initDeviceLevel() -> v:1,c:3,g:3")
+        
+        # 4. Recompile
+        os.system(f"apktool b -c {temp_dir} -o 'patched_booster.jar' >/dev/null 2>&1")
+        if os.path.exists("patched_booster.jar"):
+            os.replace("patched_booster.jar", jar_path)
+            print("          ✅ MiuiBooster Repacked Successfully")
+        else:
+            print("          ❌ Repack Failed")
+    else:
+        print("          ⚠️ Method not found or already patched")
+
+import shutil
+if os.path.exists(temp_dir):
+    shutil.rmtree(temp_dir)
 EOF_MOD
-                chmod +x "$TEMP_DIR/mod.sh"
-                cd "$TEMP_DIR"
-                ./mod.sh "$BOOST_JAR"
-                rm "mod.sh"
-                cd "$GITHUB_WORKSPACE"
-                echo "            ✅ MiuiBooster Patched!"
+
+                # Execute
+                python3 "$TEMP_DIR/mod_booster.py" "$BOOST_JAR"
+                rm "$TEMP_DIR/mod_booster.py"
             fi
         fi
 
