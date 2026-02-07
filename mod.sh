@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =========================================================
-#  NEXDROID MANAGER - ROOT POWER EDITION v56 (Clean & Alloc)
+#  NEXDROID MANAGER - ROOT POWER EDITION v58 (Universal Scan)
 # =========================================================
 
 set +e 
@@ -102,31 +102,24 @@ install_gapp_logic() {
 }
 
 # --- CREATE APK-MODDER.SH (DIRECT DEX EDITION - SAFE) ---
+# This fixes the "Settings.apk disappearing" issue by NOT using apktool to rebuild manifest
 cat <<'EOF' > "$GITHUB_WORKSPACE/apk-modder.sh"
 #!/bin/bash
-# =========================================================
-#  NEXDROID MODDER - DIRECT DEX EDITION (The "Real" MT Style)
-#  Safely mods System Apps WITHOUT breaking the Manifest
-# =========================================================
-
 APK_PATH="$1"
 TARGET_CLASS="$2"  # e.g. com/android/settings/InternalDeviceUtils
 TARGET_METHOD="$3" # e.g. isAiSupported
 RETURN_VAL="$4"    # true | false | null | void
 
-# --- 1. SETUP & TOOLS ---
 BIN_DIR="$(pwd)/bin"
 WORK_DIR="temp_dex_work"
 export PATH="$BIN_DIR:$PATH"
 mkdir -p "$BIN_DIR"
 
-# Auto-Fetch Baksmali/Smali (Required for safe editing)
+# Auto-Fetch Baksmali/Smali
 if [ ! -f "$BIN_DIR/baksmali.jar" ]; then
-    echo "   [Modder] ⬇️ Fetching Baksmali..."
     wget -q -O "$BIN_DIR/baksmali.jar" "https://bitbucket.org/JesusFreke/smali/downloads/baksmali-2.5.2.jar"
 fi
 if [ ! -f "$BIN_DIR/smali.jar" ]; then
-    echo "   [Modder] ⬇️ Fetching Smali..."
     wget -q -O "$BIN_DIR/smali.jar" "https://bitbucket.org/JesusFreke/smali/downloads/smali-2.5.2.jar"
 fi
 
@@ -137,34 +130,25 @@ fi
 
 echo "   [Modder] 💉 Patching: $TARGET_METHOD -> $RETURN_VAL"
 
-# --- 2. PREPARE WORKSPACE ---
+# Prepare Workspace
 rm -rf "$WORK_DIR"
 mkdir -p "$WORK_DIR/dex_out"
 
-# --- 3. EXTRACT ALL DEX FILES ---
-# Settings.apk is Multi-Dex (classes.dex, classes2.dex...)
-# We unzip ONLY .dex files. Manifest/Resources stay safely inside the APK.
+# Extract ONLY dex files (Manifest stays safe)
 unzip -q -j "$APK_PATH" "*.dex" -d "$WORK_DIR"
 
-# --- 4. LOCATE THE CLASS (Multi-Dex Scan) ---
+# Locate Class (Multi-Dex Scan)
 TARGET_DEX=""
 SMALI_ROOT=""
 SMALI_FILE=""
 
-# Scan which dex contains the class
 for dex in "$WORK_DIR"/*.dex; do
     [ ! -f "$dex" ] && continue
-    
-    # Quick Check: Does this DEX roughly contain the class string?
-    # Convert "com.android.settings" -> "com/android/settings"
     SEARCH_PATH=$(echo "$TARGET_CLASS" | sed 's/\./\//g')
     
-    # Only disassemble if potential match found (Optimization)
+    # Optimization: Check strings first
     if strings "$dex" | grep -q "$SEARCH_PATH"; then
-        # Full Disassemble to verify
         java -jar "$BIN_DIR/baksmali.jar" d "$dex" -o "$WORK_DIR/check_smali"
-        
-        # Look for the specific Smali file
         FOUND_SMALI=$(find "$WORK_DIR/check_smali" -type f -path "*/$SEARCH_PATH.smali" | head -n 1)
         
         if [ ! -z "$FOUND_SMALI" ]; then
@@ -179,100 +163,57 @@ for dex in "$WORK_DIR"/*.dex; do
 done
 
 if [ -z "$TARGET_DEX" ]; then
-    echo "   [Modder] ⚠️ Class '$TARGET_CLASS' not found in any Dex file."
+    echo "   [Modder] ⚠️ Class '$TARGET_CLASS' not found."
     rm -rf "$WORK_DIR"
     exit 0
 fi
 
-# --- 5. PYTHON SURGEON (YOUR EXACT LOGIC) ---
+# Python Wiper
 cat <<PY > "$BIN_DIR/wiper.py"
 import sys, re
+file_path = sys.argv[1]; method_name = sys.argv[2]; ret_type = sys.argv[3]
+tpl_true = ".registers 1\n    const/4 v0, 0x1\n    return v0"; tpl_false = ".registers 1\n    const/4 v0, 0x0\n    return v0"
+tpl_null = ".registers 1\n    const/4 v0, 0x0\n    return-object v0"; tpl_void = ".registers 0\n    return-void"
 
-file_path = sys.argv[1]
-method_name = sys.argv[2]
-ret_type = sys.argv[3]
-
-# Templates (MT Manager Style - Minimal Registers)
-tpl_true = """    .registers 1
-    const/4 v0, 0x1
-    return v0"""
-
-tpl_false = """    .registers 1
-    const/4 v0, 0x0
-    return v0"""
-
-tpl_null = """    .registers 1
-    const/4 v0, 0x0
-    return-object v0"""
-
-tpl_void = """    .registers 0
-    return-void"""
-
-# Select Template
 payload = tpl_void
 if ret_type.lower() == 'true': payload = tpl_true
 elif ret_type.lower() == 'false': payload = tpl_false
 elif ret_type.lower() == 'null': payload = tpl_null
 
-with open(file_path, 'r') as f:
-    content = f.read()
-
-# Regex to find the method block (Start to End)
-# Matches: .method [flags] methodName(...)RetType ... .end method
-# Uses DOTALL to capture newlines inside method body
+with open(file_path, 'r') as f: content = f.read()
 pattern = r'(\.method.* ' + re.escape(method_name) + r'\(.*)(?s:.*?)(\.end method)'
-
-def replacer(match):
-    header = match.group(1)
-    footer = match.group(2)
-    # WIPE BODY, INSERT PAYLOAD
-    return header + "\\n" + payload + "\\n" + footer
-
+def replacer(match): return match.group(1) + "\n" + payload + "\n" + match.group(2)
 new_content, count = re.subn(pattern, replacer, content)
 
 if count > 0:
-    with open(file_path, 'w') as f:
-        f.write(new_content)
+    with open(file_path, 'w') as f: f.write(new_content)
     print("PATCHED")
-else:
-    print("MISSING")
+else: print("MISSING")
 PY
 
-# Execute Patch
 RESULT=$(python3 "$BIN_DIR/wiper.py" "$SMALI_FILE" "$TARGET_METHOD" "$RETURN_VAL")
 
 if [ "$RESULT" == "PATCHED" ]; then
-    # --- 6. RECOMPILE DEX ---
     echo "   [Modder] 🏗️ Recompiling Dex..."
-    # We rebuild only the modified DEX code
     java -jar "$BIN_DIR/smali.jar" a "$SMALI_ROOT" -o "$WORK_DIR/new_classes.dex"
     
     if [ -f "$WORK_DIR/new_classes.dex" ]; then
         DEX_NAME=$(basename "$TARGET_DEX")
         mv "$WORK_DIR/new_classes.dex" "$WORK_DIR/$DEX_NAME"
         
-        # --- 7. INJECT INTO APK (THE FIX) ---
-        # Update ONLY the specific .dex file inside the ZIP.
-        # This keeps AndroidManifest.xml untouched (Binary identical).
+        # Inject Back
         current_dir=$(pwd)
         cd "$WORK_DIR"
         zip -q -u "$APK_PATH" "$DEX_NAME"
         cd "$current_dir"
         
-        # --- 8. REMOVE SIGNATURE (CRITICAL) ---
-        # Since hash changed, old signature is invalid. Remove it.
-        # System will accept it via CorePatch/Root.
+        # Unsign
         zip -d -q "$APK_PATH" "META-INF/*" 2>/dev/null
-        
-        echo "   [Modder] ✅ Success! Settings.apk patched safely (Manifest Intact)."
+        echo "   [Modder] ✅ Success! Patched safely (Manifest Intact)."
     else
-        echo "   [Modder] ❌ Failed to reassemble Dex."
+        echo "   [Modder] ❌ Dex Recompile Failed."
     fi
-else
-    echo "   [Modder] ⚠️ Method '$TARGET_METHOD' not found in class."
 fi
-
-# Cleanup
 rm -rf "$WORK_DIR" "$BIN_DIR/wiper.py"
 EOF
 chmod +x "$GITHUB_WORKSPACE/apk-modder.sh"
@@ -280,16 +221,8 @@ chmod +x "$GITHUB_WORKSPACE/apk-modder.sh"
 # --- EMBEDDED PYTHON PATCHER (v56 - CLEAN STATE ENFORCER) ---
 cat <<'EOF' > "$BIN_DIR/kaorios_patcher.py"
 import os, sys, re, shutil
+checklist = { 'ApplicationPackageManager': False, 'Instrumentation': False, 'KeyStore2': False, 'AndroidKeyStoreSpi': False }
 
-# === CONFIGURATION ===
-checklist = {
-    'ApplicationPackageManager': False,
-    'Instrumentation': False,
-    'KeyStore2': False,
-    'AndroidKeyStoreSpi': False
-}
-
-# === PAYLOADS ===
 apm_code = """    invoke-static {}, Landroid/app/ActivityThread;->currentPackageName()Ljava/lang/String;
     move-result-object v0
     :try_start_kaori_override
@@ -310,33 +243,20 @@ apm_code = """    invoke-static {}, Landroid/app/ActivityThread;->currentPackage
 
 ks2_code = """    invoke-static {v0}, Lcom/android/internal/util/kaorios/KaoriKeyboxHooks;->KaoriGetKeyEntry(Landroid/system/keystore2/KeyEntryResponse;)Landroid/system/keystore2/KeyEntryResponse;
     move-result-object v0"""
-
 inst_p2 = "    invoke-static {p1}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriProps(Landroid/content/Context;)V"
 inst_p3 = "    invoke-static {p3}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriProps(Landroid/content/Context;)V"
-
 akss_inj = """    invoke-static {v3}, Lcom/android/internal/util/kaorios/KaoriKeyboxHooks;->KaoriGetCertificateChain([Ljava/security/cert/Certificate;)[Ljava/security/cert/Certificate;
     move-result-object v3"""
 akss_init = "    invoke-static {}, Lcom/android/internal/util/kaorios/KaoriPropsUtils;->KaoriGetCertificateChain()V"
 
 def process_file_state_machine(filepath, target_key):
     if not os.path.exists(filepath): return
-    
-    with open(filepath, 'r') as f:
-        content_raw = f.read()
-    
-    # === SAFETY CHECK: IDEMPOTENCY ===
-    # If the file already contains Kaori code, assume it's patched and SKIP.
-    # This prevents the "duplicate registers" or double injection error.
+    with open(filepath, 'r') as f: content_raw = f.read()
     if "Kaori" in content_raw and "kaorios" in content_raw:
-        print(f"   [INFO] {target_key} already patched. Skipping to prevent corruption.")
-        checklist[target_key] = True
-        return
+        print(f"   [INFO] {target_key} already patched.")
+        checklist[target_key] = True; return
 
-    lines = content_raw.splitlines(keepends=True)
-    new_lines = []
-    modified = False
-    state = "OUTSIDE"
-    
+    lines = content_raw.splitlines(keepends=True); new_lines = []; modified = False; state = "OUTSIDE"
     apm_sig = "hasSystemFeature(Ljava/lang/String;I)Z"
     ks2_sig = "getKeyEntry(Landroid/system/keystore2/KeyDescriptor;)Landroid/system/keystore2/KeyEntryResponse;"
     inst_sig1 = "newApplication(Ljava/lang/Class;Landroid/content/Context;)Landroid/app/Application;"
@@ -345,36 +265,19 @@ def process_file_state_machine(filepath, target_key):
     
     i = 0
     while i < len(lines):
-        line = lines[i]
-        trimmed = line.strip()
-        
-        # 1. AppPkgManager
+        line = lines[i]; trimmed = line.strip()
         if target_key == 'ApplicationPackageManager':
             if state == "OUTSIDE":
                 if ".method" in line and apm_sig in line: state = "INSIDE_APM"
             elif state == "INSIDE_APM":
                 if trimmed.startswith(".registers") or trimmed.startswith(".locals"):
-                    new_lines.append(line)
-                    new_lines.append(apm_code + "\n")
-                    modified = True
-                    checklist['ApplicationPackageManager'] = True
-                    state = "DONE"
-                    i += 1; continue
-                    
-        # 2. KeyStore2
+                    new_lines.append(line); new_lines.append(apm_code + "\n"); modified = True; checklist['ApplicationPackageManager'] = True; state = "DONE"; i += 1; continue
         elif target_key == 'KeyStore2':
             if state == "OUTSIDE":
                 if ".method" in line and ks2_sig in line: state = "INSIDE_KS2"
             elif state == "INSIDE_KS2":
                 if "return-object v0" in trimmed:
-                    new_lines.append(ks2_code + "\n")
-                    new_lines.append(line)
-                    modified = True
-                    checklist['KeyStore2'] = True
-                    state = "DONE"
-                    i += 1; continue
-
-        # 3. Instrumentation
+                    new_lines.append(ks2_code + "\n"); new_lines.append(line); modified = True; checklist['KeyStore2'] = True; state = "DONE"; i += 1; continue
         elif target_key == 'Instrumentation':
             if state == "OUTSIDE" or state == "DONE":
                 if ".method" in line:
@@ -382,51 +285,33 @@ def process_file_state_machine(filepath, target_key):
                     elif inst_sig2 in line: state = "INSIDE_INST2"
             elif state == "INSIDE_INST1":
                 if "->attach(Landroid/content/Context;)V" in line:
-                    new_lines.append(line); new_lines.append(inst_p2 + "\n")
-                    modified = True; state = "DONE"; i += 1; continue
+                    new_lines.append(line); new_lines.append(inst_p2 + "\n"); modified = True; state = "DONE"; i += 1; continue
             elif state == "INSIDE_INST2":
                 if "->attach(Landroid/content/Context;)V" in line:
-                    new_lines.append(line); new_lines.append(inst_p3 + "\n")
-                    modified = True; checklist['Instrumentation'] = True; state = "DONE"; i += 1; continue
-
-        # 4. AndroidKeyStoreSpi
+                    new_lines.append(line); new_lines.append(inst_p3 + "\n"); modified = True; checklist['Instrumentation'] = True; state = "DONE"; i += 1; continue
         elif target_key == 'AndroidKeyStoreSpi':
             if state == "OUTSIDE":
                 if ".method" in line and akss_sig in line: state = "INSIDE_AKSS"
             elif state == "INSIDE_AKSS":
                 if trimmed.startswith(".registers") or trimmed.startswith(".locals"):
-                    new_lines.append(line)
-                    new_lines.append(akss_init + "\n")
-                    i += 1; continue # Don't change state yet
+                    new_lines.append(line); new_lines.append(akss_init + "\n"); i += 1; continue
                 elif "aput-object v2, v3, v4" in trimmed:
-                    new_lines.append(line)
-                    new_lines.append(akss_inj + "\n")
-                    modified = True
-                    checklist['AndroidKeyStoreSpi'] = True
-                    state = "DONE"
-                    i += 1; continue
+                    new_lines.append(line); new_lines.append(akss_inj + "\n"); modified = True; checklist['AndroidKeyStoreSpi'] = True; state = "DONE"; i += 1; continue
 
         if ".end method" in line: state = "OUTSIDE"
-        new_lines.append(line)
-        i += 1
+        new_lines.append(line); i += 1
     
     if modified:
         with open(filepath, 'w') as f: f.writelines(new_lines)
         print(f"   [SUCCESS] Patched {target_key}")
 
-# === MAIN SCANNER ===
 root_dir = sys.argv[1]
 for r, d, f in os.walk(root_dir):
-    if 'ApplicationPackageManager.smali' in f:
-        process_file_state_machine(os.path.join(r, 'ApplicationPackageManager.smali'), 'ApplicationPackageManager')
-    if 'KeyStore2.smali' in f and 'android/security' in r.replace(os.sep, '/'):
-        process_file_state_machine(os.path.join(r, 'KeyStore2.smali'), 'KeyStore2')
-    if 'Instrumentation.smali' in f:
-        process_file_state_machine(os.path.join(r, 'Instrumentation.smali'), 'Instrumentation')
-    if 'AndroidKeyStoreSpi.smali' in f:
-        process_file_state_machine(os.path.join(r, 'AndroidKeyStoreSpi.smali'), 'AndroidKeyStoreSpi')
+    if 'ApplicationPackageManager.smali' in f: process_file_state_machine(os.path.join(r, 'ApplicationPackageManager.smali'), 'ApplicationPackageManager')
+    if 'KeyStore2.smali' in f and 'android/security' in r.replace(os.sep, '/'): process_file_state_machine(os.path.join(r, 'KeyStore2.smali'), 'KeyStore2')
+    if 'Instrumentation.smali' in f: process_file_state_machine(os.path.join(r, 'Instrumentation.smali'), 'Instrumentation')
+    if 'AndroidKeyStoreSpi.smali' in f: process_file_state_machine(os.path.join(r, 'AndroidKeyStoreSpi.smali'), 'AndroidKeyStoreSpi')
 
-# === FINAL VALIDATION ===
 print("-" * 30)
 failed = False
 for key, val in checklist.items():
@@ -454,21 +339,13 @@ fi
 # =========================================================
 #  3. DOWNLOAD RESOURCES
 # =========================================================
-# 1. SETUP APKTOOL 2.12.1
+# 1. SETUP APKTOOL
 if [ ! -f "$BIN_DIR/apktool.jar" ]; then
-    echo "⬇️  Fetching Apktool v2.12.1..."
-    APKTOOL_URL="https://github.com/iBotPeaches/Apktool/releases/download/v2.12.1/apktool_2.12.1.jar"
-    wget -q -O "$BIN_DIR/apktool.jar" "$APKTOOL_URL"
-    
-    if [ -f "$BIN_DIR/apktool.jar" ]; then
-        echo "   ✅ Installed Apktool v2.12.1"
-        echo '#!/bin/bash' > "$BIN_DIR/apktool"
-        echo 'java -Xmx8G -jar "'"$BIN_DIR"'/apktool.jar" "$@"' >> "$BIN_DIR/apktool"
-        chmod +x "$BIN_DIR/apktool"
-    else
-        echo "   ❌ Failed to download Apktool! Falling back to apt..."
-        sudo apt-get install -y apktool
-    fi
+    echo "⬇️  Fetching Apktool..."
+    wget -q -O "$BIN_DIR/apktool.jar" "https://github.com/iBotPeaches/Apktool/releases/download/v2.12.1/apktool_2.12.1.jar"
+    echo '#!/bin/bash' > "$BIN_DIR/apktool"
+    echo 'java -Xmx8G -jar "'"$BIN_DIR"'/apktool.jar" "$@"' >> "$BIN_DIR/apktool"
+    chmod +x "$BIN_DIR/apktool"
 fi
 
 # Payload Dumper
@@ -546,7 +423,7 @@ rm payload.bin
 python3 -c "import sys; open(sys.argv[1], 'r+b').write(b'\x03', 123) if __name__=='__main__' else None" "$IMAGES_DIR/vbmeta.img" 2>/dev/null
 
 # =========================================================
-#  5. PARTITION MODIFICATION LOOP
+#  5. PARTITION MODIFICATION LOOP (UNIVERSAL)
 # =========================================================
 echo "🔄 Processing Partitions..."
 LOGICALS="system system_ext product mi_ext vendor odm"
@@ -593,61 +470,37 @@ for part in $LOGICALS; do
             install_gapp_logic "$P_APP" "$APP_ROOT"
         fi
 
-        # C. KAORIOS TOOLBOX
+        # C. KAORIOS TOOLBOX (System Only)
         if [ "$part" == "system" ]; then
             echo "      🌸 Kaorios: Patching Framework..."
             RAW_PATH=$(find "$DUMP_DIR" -name "framework.jar" -type f | head -n 1)
             FW_JAR=$(readlink -f "$RAW_PATH")
-            
             if [ ! -z "$FW_JAR" ] && [ -s "$KAORIOS_DIR/classes.dex" ]; then
                 echo "          -> Target: $FW_JAR"
-                
-                # --- AUTO RESTORE (SAFETY) ---
-                if [ -f "${FW_JAR}.bak" ]; then
-                    echo "          -> Restoring backup to prevent duplicates..."
-                    cp "${FW_JAR}.bak" "$FW_JAR"
-                else
-                    cp "$FW_JAR" "${FW_JAR}.bak"
-                fi
-                
+                if [ -f "${FW_JAR}.bak" ]; then cp "${FW_JAR}.bak" "$FW_JAR"; else cp "$FW_JAR" "${FW_JAR}.bak"; fi
                 rm -rf "$TEMP_DIR/framework.jar" "$TEMP_DIR/fw_src" "$TEMP_DIR/framework_patched.jar"
                 cp "$FW_JAR" "$TEMP_DIR/framework.jar"
                 cd "$TEMP_DIR"
-                
                 if timeout 5m apktool d -r -f "framework.jar" -o "fw_src" >/dev/null 2>&1; then
-                    
-                    # --- AUTO DEX ALLOCATOR ---
-                    echo "      📦 Redividing Dex (Allocating new Smali bucket)..."
+                    echo "      📦 Redividing Dex..."
                     cd "fw_src"
                     MAX_NUM=1
                     for dir in smali_classes*; do
                         if [ -d "$dir" ]; then
                             NUM=$(echo "$dir" | sed 's/smali_classes//')
-                            if [[ "$NUM" =~ ^[0-9]+$ ]] && [ "$NUM" -gt "$MAX_NUM" ]; then
-                                MAX_NUM=$NUM
-                            fi
+                            if [[ "$NUM" =~ ^[0-9]+$ ]] && [ "$NUM" -gt "$MAX_NUM" ]; then MAX_NUM=$NUM; fi
                         fi
                     done
-                    NEW_NUM=$((MAX_NUM + 1))
-                    NEW_DIR="smali_classes${NEW_NUM}"
+                    NEW_NUM=$((MAX_NUM + 1)); NEW_DIR="smali_classes${NEW_NUM}"
                     mkdir -p "$NEW_DIR/android/app" "$NEW_DIR/android/security"
-                    
-                    find . -name "ApplicationPackageManager*.smali" | while read file; do
-                        mv "$file" "$NEW_DIR/android/app/" 2>/dev/null
-                    done
-                    find . -name "KeyStore2*.smali" | while read file; do
-                        mv "$file" "$NEW_DIR/android/security/" 2>/dev/null
-                    done
+                    find . -name "ApplicationPackageManager*.smali" | while read file; do mv "$file" "$NEW_DIR/android/app/" 2>/dev/null; done
+                    find . -name "KeyStore2*.smali" | while read file; do mv "$file" "$NEW_DIR/android/security/" 2>/dev/null; done
                     cd ..
-                    # ---------------------------
-
-                    # RUN KAORIOS PATCHER WITH FAIL-SAFE
+                    
                     if python3 "$BIN_DIR/kaorios_patcher.py" "fw_src"; then
-                        echo "      ✅ Kaorios patches applied successfully."
+                        echo "      ✅ Kaorios patches applied."
                     else
-                        echo "      ❌ CRITICAL: Kaorios patches FAILED. Aborting."
-                        kill $$ 
-                        exit 1
+                        echo "      ❌ Kaorios patches FAILED. Aborting."; kill $$; exit 1
                     fi
                     
                     apktool b -c "fw_src" -o "framework_patched.jar" > build_log.txt 2>&1
@@ -658,126 +511,72 @@ for part in $LOGICALS; do
                         cp "$KAORIOS_DIR/classes.dex" "$NEXT_DEX"
                         zip -u -q "framework_patched.jar" "$NEXT_DEX"
                         mv "framework_patched.jar" "$FW_JAR"
-                        echo "            ✅ Framework Patched & Repacked!"
+                        echo "            ✅ Framework Patched!"
                     else
-                        echo "      ❌ Framework Repack Failed! LOGS:"
-                        echo "---------------------------------------------------"
-                        cat build_log.txt
-                        echo "---------------------------------------------------"
-                        kill $$ 
-                        exit 1
+                        echo "      ❌ Framework Repack Failed!"; cat build_log.txt; kill $$; exit 1
                     fi
-                else
-                    echo "      ❌ Framework Decompile Failed."
-                    kill $$
-                    exit 1
                 fi
                 cd "$GITHUB_WORKSPACE"
             fi
         fi
+        
+        # =========================================================
+        # UNIVERSAL PATCHER BLOCK (Scans EVERY partition)
+        # =========================================================
+        echo "      [SCAN] Searching for targets in $part..."
 
-        # [UPDATED] MIUI BOOSTER - FLAGSHIP TIER UNLOCK (v57)
-        if [ "$part" == "system_ext" ]; then
-            echo "      🚀 Kaorios: Patching MiuiBooster (Flagship Tier)..."
-            BOOST_JAR=$(find "$DUMP_DIR" -name "MiuiBooster.jar" -type f | head -n 1)
-            
-            if [ ! -z "$BOOST_JAR" ]; then
-                echo "          -> Target: $BOOST_JAR"
-                
-                # Create a specialized patcher for this specific method
-                cat <<'EOF_MOD' > "$TEMP_DIR/mod_booster.py"
-import sys, re, os
-
-jar_path = sys.argv[1]
-temp_dir = "bst_tmp"
-
-# 1. Decompile
+        # 1. MIUI BOOSTER
+        BOOST_JAR=$(find "$DUMP_DIR" -name "MiuiBooster.jar" -type f | head -n 1)
+        if [ ! -z "$BOOST_JAR" ]; then
+            echo "      ✅ Found MiuiBooster.jar! Patching..."
+            cat <<'EOF_MOD' > "$TEMP_DIR/mod_booster.py"
+import sys, re, os, shutil
+jar_path = sys.argv[1]; temp_dir = "bst_tmp"
 os.system(f"apktool d -r -f '{jar_path}' -o {temp_dir} >/dev/null 2>&1")
-
-# 2. Find target Smali
 target_file = None
 for root, dirs, files in os.walk(temp_dir):
-    if "DeviceLevelUtils.smali" in files:
-        target_file = os.path.join(root, "DeviceLevelUtils.smali")
-        break
-
+    if "DeviceLevelUtils.smali" in files: target_file = os.path.join(root, "DeviceLevelUtils.smali"); break
 if target_file:
-    with open(target_file, 'r') as f:
-        content = f.read()
-
-    # 3. The Payload (Your Exact Code)
-    # We use regex to match the method start and end, wiping everything inside.
-    method_header = ".method public initDeviceLevel()V"
-    method_body = """
-    .registers 2
-
-    const-string v0, "v:1,c:3,g:3"
-
-    .line 130
-    invoke-direct {p0, v0}, Lcom/miui/performance/DeviceLevelUtils;->parseDeviceLevelList(Ljava/lang/String;)V
-
-    .line 140
-    return-void
-"""
-    # Regex to replace the method body
-    # Matches: .method public initDeviceLevel()V ... [anything] ... .end method
+    with open(target_file, 'r') as f: content = f.read()
     pattern = re.compile(r'(\.method public initDeviceLevel\(\)V)(.*?)(\.end method)', re.DOTALL)
-    
-    new_content = pattern.sub(f"\\1{method_body}\\3", content)
-
+    body = """\n    .registers 2\n    const-string v0, "v:1,c:3,g:3"\n    .line 130\n    invoke-direct {p0, v0}, Lcom/miui/performance/DeviceLevelUtils;->parseDeviceLevelList(Ljava/lang/String;)V\n    .line 140\n    return-void\n"""
+    new_content = pattern.sub(f"\\1{body}\\3", content)
     if content != new_content:
-        with open(target_file, 'w') as f:
-            f.write(new_content)
-        print("          ✅ Method Replaced: initDeviceLevel() -> v:1,c:3,g:3")
-        
-        # 4. Recompile
+        with open(target_file, 'w') as f: f.write(new_content)
         os.system(f"apktool b -c {temp_dir} -o 'patched_booster.jar' >/dev/null 2>&1")
         if os.path.exists("patched_booster.jar"):
             os.replace("patched_booster.jar", jar_path)
             print("          ✅ MiuiBooster Repacked Successfully")
-        else:
-            print("          ❌ Repack Failed")
-    else:
-        print("          ⚠️ Method not found or already patched")
-
-import shutil
-if os.path.exists(temp_dir):
-    shutil.rmtree(temp_dir)
+if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
 EOF_MOD
-
-                # Execute
-                python3 "$TEMP_DIR/mod_booster.py" "$BOOST_JAR"
-                rm "$TEMP_DIR/mod_booster.py"
-            fi
+            python3 "$TEMP_DIR/mod_booster.py" "$BOOST_JAR"
+            rm "$TEMP_DIR/mod_booster.py"
         fi
 
-        # [NEW] MIUI-FRAMEWORK (BAIDU->GBOARD)
-        if [ "$part" == "system_ext" ]; then
-            echo "      ⌨️  Redirecting Baidu IME to Gboard..."
-            MF_JAR=$(find "$DUMP_DIR" -name "miui-framework.jar" -type f | head -n 1)
-            if [ ! -z "$MF_JAR" ]; then
-                cp "$MF_JAR" "${MF_JAR}.bak"
-                rm -rf "$TEMP_DIR/mf.jar" "$TEMP_DIR/mf_src"
-                cp "$MF_JAR" "$TEMP_DIR/mf.jar"
-                cd "$TEMP_DIR"
-                if timeout 5m apktool d -r -f "mf.jar" -o "mf_src" >/dev/null 2>&1; then
-                    grep -rl "com.baidu.input_mi" "mf_src" | while read f; do
-                        if [[ "$f" == *"InputMethodServiceInjector.smali"* ]]; then
-                            sed -i 's/com.baidu.input_mi/com.google.android.inputmethod.latin/g' "$f"
-                            echo "            ✅ Patched: InputMethodServiceInjector"
-                        fi
-                    done
-                    apktool b -c "mf_src" -o "mf_patched.jar" >/dev/null 2>&1
-                    [ -f "mf_patched.jar" ] && mv "mf_patched.jar" "$MF_JAR"
-                fi
-                cd "$GITHUB_WORKSPACE"
+        # 2. MIUI FRAMEWORK (Baidu -> Gboard)
+        MF_JAR=$(find "$DUMP_DIR" -name "miui-framework.jar" -type f | head -n 1)
+        if [ ! -z "$MF_JAR" ]; then
+            echo "      ✅ Found miui-framework.jar! Patching..."
+            rm -rf "$TEMP_DIR/mf.jar" "$TEMP_DIR/mf_src"
+            cp "$MF_JAR" "$TEMP_DIR/mf.jar"
+            cd "$TEMP_DIR"
+            if timeout 5m apktool d -r -f "mf.jar" -o "mf_src" >/dev/null 2>&1; then
+                grep -rl "com.baidu.input_mi" "mf_src" | while read f; do
+                    if [[ "$f" == *"InputMethodServiceInjector.smali"* ]]; then
+                        sed -i 's/com.baidu.input_mi/com.google.android.inputmethod.latin/g' "$f"
+                        echo "            ✅ Patched: InputMethodServiceInjector"
+                    fi
+                done
+                apktool b -c "mf_src" -o "mf_patched.jar" >/dev/null 2>&1
+                [ -f "mf_patched.jar" ] && mv "mf_patched.jar" "$MF_JAR"
             fi
+            cd "$GITHUB_WORKSPACE"
         fi
 
-        # [NEW] MIUI FREQUENT PHRASE (COLORS + GBOARD)
+        # 3. MIUI FREQUENT PHRASE
         MFP_APK=$(find "$DUMP_DIR" -name "MIUIFrequentPhrase.apk" -type f -print -quit)
         if [ ! -z "$MFP_APK" ]; then
-            echo "      🎨 Modding MIUIFrequentPhrase..."
+            echo "      ✅ Found MIUIFrequentPhrase.apk! Patching..."
             rm -rf "$TEMP_DIR/mfp.apk" "$TEMP_DIR/mfp_src"
             cp "$MFP_APK" "$TEMP_DIR/mfp.apk"
             cd "$TEMP_DIR"
@@ -785,15 +584,43 @@ EOF_MOD
                 find "mfp_src" -name "InputMethodBottomManager.smali" -exec sed -i 's/com.baidu.input_mi/com.google.android.inputmethod.latin/g' {} +
                 sed -i 's|<color name="input_bottom_background_color">.*</color>|<color name="input_bottom_background_color">@android:color/system_neutral1_50</color>|g' "mfp_src/res/values/colors.xml"
                 sed -i 's|<color name="input_bottom_background_color">.*</color>|<color name="input_bottom_background_color">@android:color/system_neutral1_900</color>|g' "mfp_src/res/values-night/colors.xml"
-                
                 apktool b -c "mfp_src" -o "mfp_patched.apk" >/dev/null 2>&1
-                if [ -f "mfp_patched.apk" ]; then
-                    mv "mfp_patched.apk" "$MFP_APK"
-                    echo "            ✅ MIUIFrequentPhrase Patched!"
-                fi
+                [ -f "mfp_patched.apk" ] && mv "mfp_patched.apk" "$MFP_APK"
             fi
             cd "$GITHUB_WORKSPACE"
         fi
+
+        # 4. PROVISION PATCHER (Direct Dex - Manifest Safe)
+        PROV_APK=$(find "$DUMP_DIR" -name "Provision.apk" -type f -print -quit)
+        if [ ! -z "$PROV_APK" ]; then
+            echo "      ✅ Found Provision.apk! Patching (Direct Dex)..."
+            rm -rf "$TEMP_DIR/prov_work"; mkdir -p "$TEMP_DIR/prov_work"
+            unzip -q -j "$PROV_APK" "classes.dex" -d "$TEMP_DIR/prov_work"
+            if [ -f "$TEMP_DIR/prov_work/classes.dex" ]; then
+                java -jar "$BIN_DIR/baksmali.jar" d "$TEMP_DIR/prov_work/classes.dex" -o "$TEMP_DIR/prov_work/out"
+                grep -r "IS_INTERNATIONAL_BUILD" "$TEMP_DIR/prov_work/out" | cut -d: -f1 | while read smali_file; do
+                    sed -i -E 's/sget-boolean ([vp][0-9]+), Lmiui\/os\/Build;->IS_INTERNATIONAL_BUILD:Z/const\/4 \1, 0x1/g' "$smali_file"
+                    echo "          -> Patched: $(basename "$smali_file")"
+                done
+                java -jar "$BIN_DIR/smali.jar" a "$TEMP_DIR/prov_work/out" -o "$TEMP_DIR/prov_work/new_classes.dex"
+                if [ -f "$TEMP_DIR/prov_work/new_classes.dex" ]; then
+                    mv "$TEMP_DIR/prov_work/new_classes.dex" "$TEMP_DIR/prov_work/classes.dex"
+                    cur=$(pwd); cd "$TEMP_DIR/prov_work"; zip -q -u "$PROV_APK" "classes.dex"; cd "$cur"
+                    zip -d -q "$PROV_APK" "META-INF/*"
+                    echo "          ✅ Provision.apk Patched & Unsigned"
+                fi
+            fi
+            rm -rf "$TEMP_DIR/prov_work"
+        fi
+
+        # 5. SETTINGS PATCHER (Direct Dex - Manifest Safe)
+        SETTINGS_APK=$(find "$DUMP_DIR" -name "Settings.apk" -type f -print -quit)
+        if [ ! -z "$SETTINGS_APK" ]; then
+             echo "      ✅ Found Settings.apk! Patching (Safe Mode)..."
+             ./apk-modder.sh "$SETTINGS_APK" "com/android/settings/InternalDeviceUtils" "isAiSupported" "true"
+        fi
+        
+        # =========================================================
 
         # D. NEXPACKAGE
         if [ "$part" == "product" ]; then
@@ -821,63 +648,6 @@ EOF_MOD
                 [ -f "$GITHUB_WORKSPACE/nex_pkg/bootanimation.zip" ] && cp "$GITHUB_WORKSPACE/nex_pkg/bootanimation.zip" "$MEDIA_DIR/"
                 [ -f "$GITHUB_WORKSPACE/nex_pkg/lock_wallpaper" ] && cp "$GITHUB_WORKSPACE/nex_pkg/lock_wallpaper" "$THEME_DIR/"
             fi
-        fi
-        
-        # E. PROVISION PATCHER (Direct Dex Method - v57)
-        PROV_APK=$(find "$DUMP_DIR" -name "Provision.apk" -type f -print -quit)
-        if [ ! -z "$PROV_APK" ]; then
-            echo "      🔧 Patching Provision.apk (Direct Dex)..."
-            
-            # Setup Workspace
-            rm -rf "$TEMP_DIR/prov_work"
-            mkdir -p "$TEMP_DIR/prov_work"
-            
-            # Extract ONLY classes.dex
-            unzip -q -j "$PROV_APK" "classes.dex" -d "$TEMP_DIR/prov_work"
-            
-            if [ -f "$TEMP_DIR/prov_work/classes.dex" ]; then
-                # Disassemble
-                java -jar "$BIN_DIR/baksmali.jar" d "$TEMP_DIR/prov_work/classes.dex" -o "$TEMP_DIR/prov_work/out"
-                
-                # Apply Patch (Build.IS_INTERNATIONAL_BUILD -> True)
-                grep -r "IS_INTERNATIONAL_BUILD" "$TEMP_DIR/prov_work/out" | cut -d: -f1 | while read smali_file; do
-                    sed -i -E 's/sget-boolean ([vp][0-9]+), Lmiui\/os\/Build;->IS_INTERNATIONAL_BUILD:Z/const\/4 \1, 0x1/g' "$smali_file"
-                    echo "          -> Patched: $(basename "$smali_file")"
-                done
-                
-                # Reassemble
-                java -jar "$BIN_DIR/smali.jar" a "$TEMP_DIR/prov_work/out" -o "$TEMP_DIR/prov_work/new_classes.dex"
-                
-                # Inject Back (Update Zip)
-                if [ -f "$TEMP_DIR/prov_work/new_classes.dex" ]; then
-                    mv "$TEMP_DIR/prov_work/new_classes.dex" "$TEMP_DIR/prov_work/classes.dex"
-                    
-                    # Run zip from the dir containing classes.dex
-                    current_dir=$(pwd)
-                    cd "$TEMP_DIR/prov_work"
-                    zip -q -u "$PROV_APK" "classes.dex"
-                    cd "$current_dir"
-                    
-                    # Remove Old Signature (Vital for Modified System Apps)
-                    zip -d -q "$PROV_APK" "META-INF/*"
-                    
-                    echo "          ✅ Provision.apk Patched (Manifest Preserved)"
-                else
-                    echo "          ❌ Smali Rebuild Failed"
-                fi
-            else
-                echo "          ⚠️ classes.dex not found in Provision.apk"
-            fi
-            
-            # Cleanup
-            rm -rf "$TEMP_DIR/prov_work"
-        fi
-
-        # F. SETTINGS.APK PATCH (Uses Safe Direct Dex Modder)
-        SETTINGS_APK=$(find "$DUMP_DIR" -name "Settings.apk" -type f -print -quit)
-        if [ ! -z "$SETTINGS_APK" ]; then
-             echo "      💊 Modding Settings.apk (AI Support - Safe Mode)..."
-             ./apk-modder.sh "$SETTINGS_APK" "com/android/settings/InternalDeviceUtils" "isAiSupported" "true"
         fi
 
         # G. REPACK
