@@ -376,41 +376,241 @@ for part in $LOGICALS; do
             install_gapp_logic "$P_APP" "$APP_ROOT"
         fi
 
-        # C. MIUI BOOSTER (VIA MOD.SH)
+        # C. MIUI BOOSTER - DEVICE LEVEL OVERRIDE (COMPLETE METHOD REPLACEMENT)
         if [ "$part" == "system_ext" ]; then
-            log_info "🚀 Patching MiuiBooster for performance boost..."
+            log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            log_step "🚀 MIUIBOOSTER PERFORMANCE PATCH"
+            log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            
             BOOST_JAR=$(find "$DUMP_DIR" -name "MiuiBooster.jar" -type f | head -n 1)
+            
             if [ ! -z "$BOOST_JAR" ]; then
-                log_info "Target: $BOOST_JAR"
-                cat <<'EOF_MOD' > "$TEMP_DIR/mod.sh"
-#!/bin/bash
-JAR="$1"
-[ ! -f "$JAR" ] && exit 1
-rm -rf "bst_tmp"
-apktool d -r -f "$JAR" -o "bst_tmp" >/dev/null 2>&1
-SMALI=$(find "bst_tmp" -name "DeviceLevelUtils.smali" -type f | head -n 1)
-if [ -f "$SMALI" ]; then
-    python3 -c '
-import sys, re
-f=sys.argv[1]
-with open(f,"r") as h: c=h.read()
-p=r"(\.method.+initDeviceLevel\(\)V)(.*?)(\.end method)"
-r=r"\1\n    .registers 2\n    const-string v0, \"v:1,c:3,g:3\"\n    invoke-direct {p0, v0}, Lcom/miui/performance/DeviceLevelUtils;->parseDeviceLevelList(Ljava/lang/String;)V\n    return-void\n\3"
-with open(f,"w") as h: h.write(re.sub(p, r, c, flags=re.DOTALL))
-' "$SMALI"
-    apktool b -c "bst_tmp" -o "patched.jar" >/dev/null 2>&1
-    [ -f "patched.jar" ] && mv "patched.jar" "$JAR"
-fi
-rm -rf "bst_tmp"
-EOF_MOD
-                chmod +x "$TEMP_DIR/mod.sh"
-                cd "$TEMP_DIR"
-                ./mod.sh "$BOOST_JAR"
-                rm "mod.sh"
+                log_info "Located: $BOOST_JAR"
+                JAR_SIZE=$(du -h "$BOOST_JAR" | cut -f1)
+                log_info "Original size: $JAR_SIZE"
+                
+                # Create backup
+                log_info "Creating backup..."
+                cp "$BOOST_JAR" "${BOOST_JAR}.bak"
+                log_success "✓ Backup created: ${BOOST_JAR}.bak"
+                
+                # Setup working directory
+                rm -rf "$TEMP_DIR/boost_work"
+                mkdir -p "$TEMP_DIR/boost_work"
+                cd "$TEMP_DIR/boost_work"
+                
+                # Decompile JAR
+                log_info "Decompiling MiuiBooster.jar with apktool..."
+                START_TIME=$(date +%s)
+                
+                if timeout 3m apktool d -r -f "$BOOST_JAR" -o "decompiled" 2>&1 | tee apktool_decompile.log | grep -q "I: Baksmaling"; then
+                    END_TIME=$(date +%s)
+                    DECOMPILE_TIME=$((END_TIME - START_TIME))
+                    log_success "✓ Decompiled successfully in ${DECOMPILE_TIME}s"
+                    
+                    # Find target smali file
+                    log_info "Searching for DeviceLevelUtils.smali..."
+                    SMALI_FILE=$(find "decompiled" -type f -path "*/com/miui/performance/DeviceLevelUtils.smali" | head -n 1)
+                    
+                    if [ -f "$SMALI_FILE" ]; then
+                        SMALI_REL_PATH=$(echo "$SMALI_FILE" | sed "s|decompiled/||")
+                        log_success "✓ Found: $SMALI_REL_PATH"
+                        
+                        # Show original method preview
+                        log_info "Extracting original method signature..."
+                        ORIG_METHOD=$(grep -A 2 "\.method public initDeviceLevel()V" "$SMALI_FILE" | head -n 3)
+                        if [ ! -z "$ORIG_METHOD" ]; then
+                            log_info "Original method found:"
+                            echo "$ORIG_METHOD" | while IFS= read -r line; do
+                                log_info "  $line"
+                            done
+                        fi
+                        
+                        # Create Python patcher
+                        log_info "Preparing method replacement patcher..."
+                        cat > "patcher.py" <<'PYTHON_EOF'
+import sys
+import re
+
+def patch_device_level(smali_file):
+    """Replace initDeviceLevel method with performance-optimized version"""
+    
+    print(f"[ACTION] Reading {smali_file}")
+    with open(smali_file, 'r', encoding='utf-8') as f:
+        content = f.read()
+    
+    original_length = len(content)
+    print(f"[ACTION] Original file size: {original_length} bytes")
+    
+    # New optimized method
+    new_method = """.method public initDeviceLevel()V
+    .registers 2
+
+    const-string v0, "v:1,c:3,g:3"
+
+    .line 130
+    invoke-direct {p0, v0}, Lcom/miui/performance/DeviceLevelUtils;->parseDeviceLevelList(Ljava/lang/String;)V
+
+    .line 140
+    return-void
+.end method"""
+    
+    # Pattern to match the entire initDeviceLevel method
+    print("[ACTION] Searching for initDeviceLevel()V method...")
+    pattern = r'\.method\s+public\s+initDeviceLevel\(\)V.*?\.end\s+method'
+    
+    matches = re.findall(pattern, content, flags=re.DOTALL)
+    if matches:
+        print(f"[ACTION] Found method (length: {len(matches[0])} bytes)")
+        print("[ACTION] Original method structure:")
+        # Show first few lines of original
+        orig_lines = matches[0].split('\n')[:5]
+        for line in orig_lines:
+            print(f"         {line}")
+        if len(matches[0].split('\n')) > 5:
+            print(f"         ... (+{len(matches[0].split('\n')) - 5} more lines)")
+    else:
+        print("[ERROR] Method not found!")
+        return False
+    
+    # Perform replacement
+    print("[ACTION] Replacing method with optimized version...")
+    new_content = re.sub(pattern, new_method, content, flags=re.DOTALL)
+    
+    if new_content != content:
+        new_length = len(new_content)
+        size_diff = original_length - new_length
+        print(f"[ACTION] New file size: {new_length} bytes (reduced by {size_diff} bytes)")
+        
+        # Show new method preview
+        print("[ACTION] New method structure:")
+        for line in new_method.split('\n')[:8]:
+            if line.strip():
+                print(f"         {line}")
+        
+        print(f"[ACTION] Writing patched content to {smali_file}")
+        with open(smali_file, 'w', encoding='utf-8') as f:
+            f.write(new_content)
+        
+        print("[SUCCESS] Method replacement completed!")
+        return True
+    else:
+        print("[ERROR] No changes made - pattern didn't match")
+        return False
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        print("[ERROR] Usage: python3 patcher.py <smali_file>")
+        sys.exit(1)
+    
+    smali_file = sys.argv[1]
+    success = patch_device_level(smali_file)
+    sys.exit(0 if success else 1)
+PYTHON_EOF
+                        
+                        log_success "✓ Patcher ready"
+                        
+                        # Execute patcher
+                        log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                        log_info "Executing method replacement..."
+                        log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                        
+                        if python3 "patcher.py" "$SMALI_FILE" 2>&1 | while IFS= read -r line; do
+                            if [[ "$line" == *"[ACTION]"* ]]; then
+                                log_info "${line#*[ACTION] }"
+                            elif [[ "$line" == *"[SUCCESS]"* ]]; then
+                                log_success "${line#*[SUCCESS] }"
+                            elif [[ "$line" == *"[ERROR]"* ]]; then
+                                log_error "${line#*[ERROR] }"
+                            else
+                                echo "         $line"
+                            fi
+                        done; then
+                            PATCH_SUCCESS=true
+                        else
+                            PATCH_SUCCESS=false
+                        fi
+                        
+                        if [ "$PATCH_SUCCESS" = true ]; then
+                            log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                            log_success "✓ Method patched successfully!"
+                            
+                            # Verify the patch
+                            log_info "Verifying patch..."
+                            if grep -q 'const-string v0, "v:1,c:3,g:3"' "$SMALI_FILE"; then
+                                log_success "✓ Verification passed: Device level string found"
+                            else
+                                log_error "✗ Verification failed: Device level string not found"
+                            fi
+                            
+                            # Rebuild JAR
+                            log_info "Rebuilding MiuiBooster.jar with apktool..."
+                            START_TIME=$(date +%s)
+                            
+                            if timeout 3m apktool b -c "decompiled" -o "MiuiBooster_patched.jar" 2>&1 | tee apktool_build.log | grep -q "Built"; then
+                                END_TIME=$(date +%s)
+                                BUILD_TIME=$((END_TIME - START_TIME))
+                                log_success "✓ Rebuild completed in ${BUILD_TIME}s"
+                                
+                                if [ -f "MiuiBooster_patched.jar" ]; then
+                                    PATCHED_SIZE=$(du -h "MiuiBooster_patched.jar" | cut -f1)
+                                    log_info "Patched JAR size: $PATCHED_SIZE"
+                                    
+                                    # Replace original
+                                    log_info "Installing patched JAR..."
+                                    mv "MiuiBooster_patched.jar" "$BOOST_JAR"
+                                    log_success "✓ MiuiBooster.jar successfully patched!"
+                                    
+                                    log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                                    log_success "✅ PERFORMANCE BOOST APPLIED"
+                                    log_success "   Device Level: v:1 (Version 1)"
+                                    log_success "   CPU Level: c:3 (High Performance)"
+                                    log_success "   GPU Level: g:3 (High Performance)"
+                                    log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                                else
+                                    log_error "✗ Patched JAR not found after build"
+                                    log_info "Restoring original from backup..."
+                                    cp "${BOOST_JAR}.bak" "$BOOST_JAR"
+                                    log_warning "Original restored"
+                                fi
+                            else
+                                log_error "✗ apktool build failed"
+                                cat apktool_build.log | tail -20 | while IFS= read -r line; do
+                                    log_error "   $line"
+                                done
+                                log_info "Restoring original from backup..."
+                                cp "${BOOST_JAR}.bak" "$BOOST_JAR"
+                                log_warning "Original restored"
+                            fi
+                        else
+                            log_error "✗ Method patching failed"
+                            log_info "Restoring original from backup..."
+                            cp "${BOOST_JAR}.bak" "$BOOST_JAR"
+                            log_warning "Original restored"
+                        fi
+                    else
+                        log_error "✗ DeviceLevelUtils.smali not found in JAR"
+                        log_info "Expected path: */com/miui/performance/DeviceLevelUtils.smali"
+                    fi
+                else
+                    END_TIME=$(date +%s)
+                    DECOMPILE_TIME=$((END_TIME - START_TIME))
+                    log_error "✗ Decompile failed or timed out (${DECOMPILE_TIME}s)"
+                    
+                    if [ -f "apktool_decompile.log" ]; then
+                        log_error "Decompile errors:"
+                        tail -10 apktool_decompile.log | while IFS= read -r line; do
+                            log_error "   $line"
+                        done
+                    fi
+                fi
+                
+                # Cleanup
                 cd "$GITHUB_WORKSPACE"
-                log_success "✓ MiuiBooster patched (Device Level: v1, c3, g3)"
+                rm -rf "$TEMP_DIR/boost_work"
             else
-                log_warning "MiuiBooster.jar not found"
+                log_warning "⚠️  MiuiBooster.jar not found in system_ext partition"
+                log_info "This may be normal for some ROM versions"
             fi
         fi
 
