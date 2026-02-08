@@ -320,6 +320,18 @@ echo "🔍 Extracting Firmware..."
 payload-dumper-go -o "$IMAGES_DIR" payload.bin > /dev/null 2>&1
 rm payload.bin
 
+echo "   📦 Extracted Images:"
+if [ -d "$IMAGES_DIR" ]; then
+    ls -lh "$IMAGES_DIR"/*.img 2>/dev/null | awk '{print "      " $9 " (" $5 ")"}'
+    
+    # Count extracted partitions
+    IMG_COUNT=$(ls -1 "$IMAGES_DIR"/*.img 2>/dev/null | wc -l)
+    echo "   📊 Total: $IMG_COUNT partition image(s)"
+else
+    echo "   ❌ ERROR: Images directory not created!"
+    exit 1
+fi
+
 # Patch VBMeta
 if [ -f "$IMAGES_DIR/vbmeta.img" ]; then
     python3 -c "
@@ -845,6 +857,14 @@ PYTHON_PATCHER
             echo "      ❌ Failed to create $part.img"
             exit 1
         fi
+    else
+        echo ""
+        echo "========================================"
+        echo "   SKIPPING: $part"
+        echo "========================================"
+        echo "   ⚠️  Partition image not found: $IMAGES_DIR/${part}.img"
+        echo "   ℹ️  This partition was not extracted from payload.bin"
+        echo ""
     fi
 done
 
