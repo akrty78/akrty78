@@ -1,23 +1,41 @@
 #!/bin/bash
+
 # =========================================================
-#  NEXDROID MANAGER - ROOT POWER EDITION v58 (DIRECT DEX)
+#  NEXDROID MANAGER - OPTIMIZED v57
 # =========================================================
 
 set +e 
+
+# --- COLOR CODES FOR LOGGING ---
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+NC='\033[0m' # No Color
+
+# --- LOGGING FUNCTIONS ---
+log_info() { echo -e "${CYAN}[INFO]${NC} $(date +"%H:%M:%S") - $1"; }
+log_success() { echo -e "${GREEN}[SUCCESS]${NC} $(date +"%H:%M:%S") - $1"; }
+log_warning() { echo -e "${YELLOW}[WARNING]${NC} $(date +"%H:%M:%S") - $1"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $(date +"%H:%M:%S") - $1"; }
+log_step() { echo -e "${MAGENTA}[STEP]${NC} $(date +"%H:%M:%S") - $1"; }
 
 # --- INPUTS ---
 ROM_URL="$1"
 
 # --- 1. INSTANT METADATA EXTRACTION ---
 FILENAME=$(basename "$ROM_URL" | cut -d'?' -f1)
-echo "🔍 Analyzing OTA Link..."
+log_step "🔍 Analyzing OTA Link..."
 DEVICE_CODE=$(echo "$FILENAME" | awk -F'-ota_full' '{print $1}')
 OS_VER=$(echo "$FILENAME" | awk -F'ota_full-' '{print $2}' | awk -F'-user' '{print $1}')
 ANDROID_VER=$(echo "$FILENAME" | awk -F'user-' '{print $2}' | cut -d'-' -f1)
 [ -z "$DEVICE_CODE" ] && DEVICE_CODE="UnknownDevice"
 [ -z "$OS_VER" ] && OS_VER="UnknownOS"
 [ -z "$ANDROID_VER" ] && ANDROID_VER="0.0"
-echo "   > Target: ota-nexdroid-${OS_VER}_${DEVICE_CODE}_${ANDROID_VER}.zip"
+log_info "Target ROM: ota-nexdroid-${OS_VER}_${DEVICE_CODE}_${ANDROID_VER}.zip"
+log_info "Device: $DEVICE_CODE | OS: $OS_VER | Android: $ANDROID_VER"
 
 # --- CONFIGURATION ---
 GAPPS_LINK="https://drive.google.com/file/d/1soDPsc9dhdXbuHLSx4t2L3u7x0fOlx_8/view?usp=drive_link"
@@ -31,8 +49,6 @@ OUTPUT_DIR="$GITHUB_WORKSPACE/NexMod_Output"
 IMAGES_DIR="$OUTPUT_DIR/images"
 SUPER_DIR="$OUTPUT_DIR/super"
 TEMP_DIR="$GITHUB_WORKSPACE/temp"
-KAORIOS_DIR="$GITHUB_WORKSPACE/nex_kaorios"
-KEYS_DIR="$BIN_DIR/keys"
 
 # --- BLOATWARE LIST ---
 BLOAT_LIST="
@@ -83,15 +99,16 @@ ro.logdumpd.enabled=0
 ro.lmk.debug=false
 profiler.force_disable_err_rpt=1
 ro.miui.has_gmscore=1
-persist.sys.kaorios=kousei
-ro.control_privapp_permissions=
 '
 
 # --- FUNCTIONS ---
 install_gapp_logic() {
-    local app_list="$1"; local target_root="$2"
-    local installed=0
-    local missing=0
+    local app_list="$1"
+    local target_root="$2"
+    local installed_count=0
+    local total_count=$(echo "$app_list" | wc -w)
+    
+    log_info "Installing $total_count GApps to $(basename $target_root)..."
     
     for app in $app_list; do
         local src=$(find "$GITHUB_WORKSPACE/gapps_src" -name "${app}.apk" -print -quit)
@@ -99,949 +116,544 @@ install_gapp_logic() {
             mkdir -p "$target_root/$app"
             cp "$src" "$target_root/$app/${app}.apk"
             chmod 644 "$target_root/$app/${app}.apk"
-            echo "         ✅ $app.apk → $(basename $target_root)/$app/"
-            installed=$((installed + 1))
+            installed_count=$((installed_count + 1))
+            log_success "✓ Installed: $app"
         else
-            echo "         ⚠️ $app.apk (not found in gapps_src)"
-            missing=$((missing + 1))
+            log_warning "✗ Not found: $app"
         fi
     done
     
-    echo "         📊 Installed: $installed | Missing: $missing"
+    log_success "GApps installation complete: $installed_count/$total_count installed"
 }
 
-# --- SIGNING FUNCTIONS ---
-sign_apk() {
-    local apk_path="$1"
-    local apk_name=$(basename "$apk_path")
-    
-    if [ ! -f "$apk_path" ]; then
-        echo "      ⚠️ APK not found: $apk_path"
-        return 1
-    fi
-    
-    # Backup original
-    cp "$apk_path" "${apk_path}.unsigned"
-    
-    # Zipalign first (if available)
-    if command -v zipalign &> /dev/null; then
-        zipalign -f 4 "$apk_path" "${apk_path}.aligned" 2>/dev/null
-        if [ -f "${apk_path}.aligned" ]; then
-            mv "${apk_path}.aligned" "$apk_path"
-        fi
-    fi
-    
-    # Sign with apksigner (preferred) or jarsigner
-    if command -v apksigner &> /dev/null; then
-        apksigner sign --key "$KEYS_DIR/testkey.pk8" \
-                      --cert "$KEYS_DIR/testkey.x509.pem" \
-                      "$apk_path" 2>/dev/null
-        if [ $? -eq 0 ]; then
-            echo "      ✅ Signed: $apk_name (apksigner)"
-            rm -f "${apk_path}.unsigned"
-            return 0
-        fi
-    fi
-    
-    # Fallback to jarsigner
-    if command -v jarsigner &> /dev/null; then
-        if [ ! -f "$KEYS_DIR/platform.keystore" ]; then
-            keytool -genkeypair -keystore "$KEYS_DIR/platform.keystore" \
-                    -storepass android -alias platform -keypass android \
-                    -keyalg RSA -keysize 2048 -validity 10000 \
-                    -dname "CN=Android, OU=Android, O=Android, L=Android, S=Android, C=US" 2>/dev/null
-        fi
-        
-        jarsigner -keystore "$KEYS_DIR/platform.keystore" \
-                  -storepass android -keypass android \
-                  -digestalg SHA1 -sigalg SHA1withRSA \
-                  "$apk_path" platform 2>/dev/null
-        
-        if [ $? -eq 0 ]; then
-            echo "      ✅ Signed: $apk_name (jarsigner)"
-            rm -f "${apk_path}.unsigned"
-            return 0
-        fi
-    fi
-    
-    # If signing failed, restore backup
-    echo "      ⚠️ Signing failed for $apk_name, using unsigned version"
-    if [ -f "${apk_path}.unsigned" ]; then
-        mv "${apk_path}.unsigned" "$apk_path"
-    fi
-    return 1
-}
+# --- CREATE APK-MODDER.SH ---
+cat <<'EOF' > "$GITHUB_WORKSPACE/apk-modder.sh"
+#!/bin/bash
+APK_PATH="$1"
+TARGET_CLASS="$2"
+TARGET_METHOD="$3"
+RETURN_VAL="$4"
+BIN_DIR="$(pwd)/bin"
+TEMP_MOD="temp_modder"
+export PATH="$BIN_DIR:$PATH"
+
+if [ ! -f "$APK_PATH" ]; then exit 1; fi
+echo "   [Modder] 💉 Patching $TARGET_METHOD..."
+
+rm -rf "$TEMP_MOD"
+apktool d -r -f "$APK_PATH" -o "$TEMP_MOD" >/dev/null 2>&1
+
+CLASS_PATH=$(echo "$TARGET_CLASS" | sed 's/\./\//g')
+SMALI_FILE=$(find "$TEMP_MOD" -type f -path "*/$CLASS_PATH.smali" | head -n 1)
+
+if [ -z "$SMALI_FILE" ]; then
+    echo "   [Modder] ⚠️ Class not found."
+    rm -rf "$TEMP_MOD"; exit 0
+fi
+
+cat <<PY > "$BIN_DIR/wiper.py"
+import sys, re
+file_path = sys.argv[1]; method_name = sys.argv[2]; ret_type = sys.argv[3]
+
+tpl_true = ".registers 1\n    const/4 v0, 0x1\n    return v0"
+tpl_false = ".registers 1\n    const/4 v0, 0x0\n    return v0"
+tpl_null = ".registers 1\n    const/4 v0, 0x0\n    return-object v0"
+tpl_void = ".registers 0\n    return-void"
+
+payload = tpl_void
+if ret_type.lower() == 'true': payload = tpl_true
+elif ret_type.lower() == 'false': payload = tpl_false
+elif ret_type.lower() == 'null': payload = tpl_null
+
+with open(file_path, 'r') as f: content = f.read()
+pattern = r'(\.method.* ' + re.escape(method_name) + r'\(.*)(?s:.*?)(\.end method)'
+new_content, count = re.subn(pattern, lambda m: m.group(1) + "\n" + payload + "\n" + m.group(2), content)
+
+if count > 0:
+    with open(file_path, 'w') as f: f.write(new_content)
+    print("PATCHED")
+PY
+
+RESULT=$(python3 "$BIN_DIR/wiper.py" "$SMALI_FILE" "$TARGET_METHOD" "$RETURN_VAL")
+
+if [ "$RESULT" == "PATCHED" ]; then
+    apktool b -c "$TEMP_MOD" -o "$APK_PATH" >/dev/null 2>&1
+    echo "   [Modder] ✅ Done."
+fi
+rm -rf "$TEMP_MOD" "$BIN_DIR/wiper.py"
+EOF
+chmod +x "$GITHUB_WORKSPACE/apk-modder.sh"
 
 # =========================================================
 #  2. SETUP & TOOLS
 # =========================================================
-echo "🛠️  Setting up Environment..."
-mkdir -p "$IMAGES_DIR" "$SUPER_DIR" "$TEMP_DIR" "$BIN_DIR" "$KAORIOS_DIR" "$KEYS_DIR"
+log_step "🛠️  Setting up Environment..."
+mkdir -p "$IMAGES_DIR" "$SUPER_DIR" "$TEMP_DIR" "$BIN_DIR"
 export PATH="$BIN_DIR:$PATH"
 
-sudo apt-get update -y
-sudo apt-get install -y python3 python3-pip erofs-utils erofsfuse jq aria2 zip unzip \
-    liblz4-tool p7zip-full aapt git openjdk-17-jre-headless zipalign apksigner
+log_info "Installing system dependencies..."
+sudo apt-get update -qq
+sudo apt-get install -y -qq python3 python3-pip erofs-utils erofsfuse jq aria2 zip unzip liblz4-tool p7zip-full aapt git openjdk-17-jre-headless > /dev/null 2>&1
+pip3 install gdown --break-system-packages -q
+log_success "System dependencies installed"
 
-pip3 install gdown --break-system-packages
-
-# Setup signing keys
-if [ ! -f "$KEYS_DIR/testkey.pk8" ]; then
-    echo "🔑 Generating signing keys..."
-    cd "$KEYS_DIR"
-    
-    openssl genrsa -out testkey.pem 2048 2>/dev/null
-    openssl req -new -x509 -key testkey.pem -out testkey.x509.pem -days 10000 \
-        -subj "/C=US/ST=California/L=Mountain View/O=Android/OU=Android/CN=Android" 2>/dev/null
-    openssl pkcs8 -in testkey.pem -topk8 -outform DER -out testkey.pk8 -nocrypt 2>/dev/null
-    
-    keytool -genkeypair -keystore platform.keystore \
-            -storepass android -alias platform -keypass android \
-            -keyalg RSA -keysize 2048 -validity 10000 \
-            -dname "CN=Android, OU=Android, O=Android, L=Android, S=Android, C=US" 2>/dev/null
-    
-    echo "   ✅ Signing keys generated"
-    cd "$GITHUB_WORKSPACE"
+if [ -f "apk-modder.sh" ]; then
+    chmod +x apk-modder.sh
 fi
 
 # =========================================================
 #  3. DOWNLOAD RESOURCES
 # =========================================================
-# APKTOOL 2.12.1
+log_step "📥 Downloading Required Resources..."
+
+# 1. SETUP APKTOOL 2.12.1
 if [ ! -f "$BIN_DIR/apktool.jar" ]; then
-    echo "⬇️  Fetching Apktool v2.12.1..."
+    log_info "Fetching Apktool v2.12.1..."
     APKTOOL_URL="https://github.com/iBotPeaches/Apktool/releases/download/v2.12.1/apktool_2.12.1.jar"
     wget -q -O "$BIN_DIR/apktool.jar" "$APKTOOL_URL"
     
     if [ -f "$BIN_DIR/apktool.jar" ]; then
-        echo "   ✅ Installed Apktool v2.12.1"
-        cat > "$BIN_DIR/apktool" <<'APKTOOL_SCRIPT'
-#!/bin/bash
-APKTOOL_JAR="$(dirname "$0")/apktool.jar"
-FRAMEWORK_DIR="$HOME/.local/share/apktool/framework"
-mkdir -p "$FRAMEWORK_DIR"
-exec java -Xmx8G -Djava.io.tmpdir=/tmp -jar "$APKTOOL_JAR" "$@"
-APKTOOL_SCRIPT
+        log_success "Installed Apktool v2.12.1"
+        echo '#!/bin/bash' > "$BIN_DIR/apktool"
+        echo 'java -Xmx8G -jar "'"$BIN_DIR"'/apktool.jar" "$@"' >> "$BIN_DIR/apktool"
         chmod +x "$BIN_DIR/apktool"
     else
-        echo "   ❌ Failed to download Apktool! Falling back to apt..."
+        log_error "Failed to download Apktool! Falling back to apt..."
         sudo apt-get install -y apktool
     fi
-fi
-
-# BAKSMALI/SMALI for Direct Dex Editing
-if [ ! -f "$BIN_DIR/baksmali.jar" ]; then
-    echo "⬇️  Installing baksmali/smali v2.5.2..."
-    wget -q -O "$BIN_DIR/baksmali.jar" "https://github.com/JesusFreke/smali/releases/download/v2.5.2/baksmali-2.5.2.jar"
-    wget -q -O "$BIN_DIR/smali.jar" "https://github.com/JesusFreke/smali/releases/download/v2.5.2/smali-2.5.2.jar"
-    
-    cat > "$BIN_DIR/baksmali" <<'BAKSMALI_WRAPPER'
-#!/bin/bash
-exec java -jar "$(dirname "$0")/baksmali.jar" "$@"
-BAKSMALI_WRAPPER
-    
-    cat > "$BIN_DIR/smali" <<'SMALI_WRAPPER'
-#!/bin/bash
-exec java -jar "$(dirname "$0")/smali.jar" "$@"
-SMALI_WRAPPER
-    
-    chmod +x "$BIN_DIR/baksmali" "$BIN_DIR/smali"
-    echo "   ✅ baksmali/smali installed"
+else
+    log_info "Apktool already installed"
 fi
 
 # Payload Dumper
 if [ ! -f "$BIN_DIR/payload-dumper-go" ]; then
-    echo "⬇️  Installing Payload Dumper..."
+    log_info "Downloading payload-dumper-go..."
     wget -q -O pd.tar.gz https://github.com/ssut/payload-dumper-go/releases/download/1.2.2/payload-dumper-go_1.2.2_linux_amd64.tar.gz
     tar -xzf pd.tar.gz
     find . -type f -name "payload-dumper-go" -not -path "*/bin/*" -exec mv {} "$BIN_DIR/" \;
     chmod +x "$BIN_DIR/payload-dumper-go"
     rm pd.tar.gz
+    log_success "payload-dumper-go installed"
+else
+    log_info "payload-dumper-go already installed"
 fi
 
 # GApps
 if [ ! -d "gapps_src" ]; then
-    echo "⬇️  Downloading GApps..."
-    gdown "$GAPPS_LINK" -O gapps.zip --fuzzy
-    if [ -f "gapps.zip" ]; then
-        unzip -q gapps.zip -d gapps_src && rm gapps.zip
-    fi
+    log_info "Downloading GApps package..."
+    gdown "$GAPPS_LINK" -O gapps.zip --fuzzy -q
+    unzip -qq gapps.zip -d gapps_src && rm gapps.zip
+    log_success "GApps package downloaded and extracted"
+else
+    log_info "GApps package already present"
 fi
 
 # NexPackage
 if [ ! -d "nex_pkg" ]; then
-    echo "⬇️  Downloading NexPackage..."
-    gdown "$NEX_PACKAGE_LINK" -O nex.zip --fuzzy
-    if [ -f "nex.zip" ]; then
-        unzip -q nex.zip -d nex_pkg && rm nex.zip
-    fi
-fi
-
-# Kaorios Assets
-echo "⬇️  Preparing Kaorios Assets..."
-if [ ! -f "$KAORIOS_DIR/classes.dex" ]; then
-    LATEST_JSON=$(curl -s "https://api.github.com/repos/Wuang26/Kaorios-Toolbox/releases/latest")
-    APK_URL=$(echo "$LATEST_JSON" | jq -r '.assets[] | select(.name | contains("KaoriosToolbox") and endswith(".apk")) | .browser_download_url')
-    XML_URL=$(echo "$LATEST_JSON" | jq -r '.assets[] | select(.name | endswith(".xml")) | .browser_download_url')
-    DEX_URL=$(echo "$LATEST_JSON" | jq -r '.assets[] | select(.name | contains("classes") and endswith(".dex")) | .browser_download_url')
-    
-    [ ! -z "$APK_URL" ] && [ "$APK_URL" != "null" ] && wget -q -O "$KAORIOS_DIR/KaoriosToolbox.apk" "$APK_URL"
-    [ ! -z "$XML_URL" ] && [ "$XML_URL" != "null" ] && wget -q -O "$KAORIOS_DIR/kaorios_perm.xml" "$XML_URL"
-    [ ! -z "$DEX_URL" ] && [ "$DEX_URL" != "null" ] && wget -q -O "$KAORIOS_DIR/classes.dex" "$DEX_URL"
+    log_info "Downloading NexPackage..."
+    gdown "$NEX_PACKAGE_LINK" -O nex.zip --fuzzy -q
+    unzip -qq nex.zip -d nex_pkg && rm nex.zip
+    log_success "NexPackage downloaded and extracted"
+else
+    log_info "NexPackage already present"
 fi
 
 # Launcher
 if [ ! -f "$TEMP_DIR/MiuiHome_Latest.apk" ]; then
-    echo "⬇️  Downloading Launcher..."
+    log_info "Downloading HyperOS Launcher..."
     LAUNCHER_URL=$(curl -s "https://api.github.com/repos/$LAUNCHER_REPO/releases/latest" | jq -r '.assets[] | select(.name | endswith(".zip")) | .browser_download_url' | head -n 1)
     if [ ! -z "$LAUNCHER_URL" ] && [ "$LAUNCHER_URL" != "null" ]; then
         wget -q -O l.zip "$LAUNCHER_URL"
-        unzip -q l.zip -d l_ext
+        unzip -qq l.zip -d l_ext
         FOUND=$(find l_ext -name "MiuiHome.apk" -type f | head -n 1)
-        [ ! -z "$FOUND" ] && mv "$FOUND" "$TEMP_DIR/MiuiHome_Latest.apk"
+        [ ! -z "$FOUND" ] && mv "$FOUND" "$TEMP_DIR/MiuiHome_Latest.apk" && log_success "Launcher downloaded"
         rm -rf l_ext l.zip
+    else
+        log_warning "Launcher download failed - URL not found"
     fi
+else
+    log_info "Launcher already present"
 fi
+
+log_success "All resources downloaded successfully"
 
 # =========================================================
 #  4. DOWNLOAD & EXTRACT ROM
 # =========================================================
-echo "⬇️  Downloading ROM..."
+log_step "📦 Downloading ROM..."
 cd "$TEMP_DIR"
-aria2c -x 16 -s 16 --file-allocation=none -o "rom.zip" "$ROM_URL"
+START_TIME=$(date +%s)
+aria2c -x 16 -s 16 --file-allocation=none -o "rom.zip" "$ROM_URL" 2>&1 | grep -E "download completed|ERROR"
+END_TIME=$(date +%s)
+DOWNLOAD_TIME=$((END_TIME - START_TIME))
+log_info "Download completed in ${DOWNLOAD_TIME}s"
+
 if [ ! -f "rom.zip" ]; then 
-    echo "❌ Download Failed"
+    log_error "ROM download failed!"
     exit 1
 fi
 
-unzip -o "rom.zip" payload.bin && rm "rom.zip" 
+log_step "📂 Extracting ROM payload..."
+unzip -qq -o "rom.zip" payload.bin && rm "rom.zip" 
+log_success "Payload extracted"
 
-echo "🔍 Extracting Firmware..."
+log_step "🔍 Extracting firmware images..."
+START_TIME=$(date +%s)
 payload-dumper-go -o "$IMAGES_DIR" payload.bin > /dev/null 2>&1
+END_TIME=$(date +%s)
+EXTRACT_TIME=$((END_TIME - START_TIME))
 rm payload.bin
-
-echo "   📦 Extracted Images:"
-if [ -d "$IMAGES_DIR" ]; then
-    ls -lh "$IMAGES_DIR"/*.img 2>/dev/null | awk '{print "      " $9 " (" $5 ")"}'
-    
-    # Count extracted partitions
-    IMG_COUNT=$(ls -1 "$IMAGES_DIR"/*.img 2>/dev/null | wc -l)
-    echo "   📊 Total: $IMG_COUNT partition image(s)"
-else
-    echo "   ❌ ERROR: Images directory not created!"
-    exit 1
-fi
+log_success "Firmware extracted in ${EXTRACT_TIME}s"
 
 # Patch VBMeta
-if [ -f "$IMAGES_DIR/vbmeta.img" ]; then
-    python3 -c "
-with open('$IMAGES_DIR/vbmeta.img', 'r+b') as f:
-    f.seek(123)
-    f.write(b'\x03')
-" 2>/dev/null
-    echo "   ✅ VBMeta patched"
-fi
+log_info "Patching vbmeta for AVB verification bypass..."
+python3 -c "import sys; open(sys.argv[1], 'r+b').write(b'\x03', 123) if __name__=='__main__' else None" "$IMAGES_DIR/vbmeta.img" 2>/dev/null
+log_success "vbmeta patched"
 
 # =========================================================
 #  5. PARTITION MODIFICATION LOOP
 # =========================================================
-echo "🔄 Processing Partitions..."
+log_step "🔄 Processing Partitions..."
 LOGICALS="system system_ext product mi_ext vendor odm"
 
 for part in $LOGICALS; do
     if [ -f "$IMAGES_DIR/${part}.img" ]; then
-        echo ""
-        echo "========================================"
-        echo "   PROCESSING: $part"
-        echo "========================================"
-        
-        # Show what will be processed in this partition
-        case "$part" in
-            "system")
-                echo "   📋 Tasks: build.prop injection"
-                ;;
-            "system_ext")
-                echo "   📋 Tasks: MiuiBooster, MIUI-framework, Provision.apk, Settings.apk"
-                ;;
-            "product")
-                echo "   📋 Tasks: Debloater, GApps, MIUIFrequentPhrase, NexPackage"
-                ;;
-            *)
-                echo "   📋 Tasks: build.prop injection"
-                ;;
-        esac
-        echo ""
+        log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        log_step "Processing partition: ${part^^}"
+        log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         
         DUMP_DIR="$GITHUB_WORKSPACE/${part}_dump"
         mkdir -p "$DUMP_DIR" "mnt"
         
+        log_info "Mounting ${part}.img..."
         sudo erofsfuse "$IMAGES_DIR/${part}.img" "mnt"
-        if [ -z "$(sudo ls -A mnt 2>/dev/null)" ]; then
-            echo "   ❌ ERROR: Mount failed!"
-            sudo fusermount -uz "mnt" 2>/dev/null || sudo umount "mnt" 2>/dev/null
+        if [ -z "$(sudo ls -A mnt)" ]; then
+            log_error "Mount failed for ${part}!"
+            sudo fusermount -uz "mnt"
             continue
         fi
+        log_success "Mounted successfully"
         
+        log_info "Copying partition contents..."
+        START_TIME=$(date +%s)
         sudo cp -a "mnt/." "$DUMP_DIR/"
-        sudo chown -R $(whoami):$(whoami) "$DUMP_DIR"
-        sudo fusermount -uz "mnt" 2>/dev/null || sudo umount "mnt" 2>/dev/null
+        sudo chown -R $(whoami) "$DUMP_DIR"
+        END_TIME=$(date +%s)
+        COPY_TIME=$((END_TIME - START_TIME))
+        log_success "Contents copied in ${COPY_TIME}s"
+        
+        sudo fusermount -uz "mnt"
         rm "$IMAGES_DIR/${part}.img"
 
-        # A. DEBLOATER (PRODUCT PARTITION ONLY)
-        if [ "$part" == "product" ]; then
-            echo "   🗑️  Debloating..."
-            echo "$BLOAT_LIST" | tr ' ' '\n' | grep -v "^\s*$" > "$TEMP_DIR/bloat_target_list.txt"
-            
-            BLOAT_COUNT=0
-            APK_COUNT=0
-            
-            echo "      🔍 Scanning for APKs in: $DUMP_DIR"
-            
-            while IFS= read -r apk_file; do
-                APK_COUNT=$((APK_COUNT + 1))
-                pkg_name=$(aapt dump badging "$apk_file" 2>/dev/null | grep "package: name=" | cut -d"'" -f2)
-                
-                if [ ! -z "$pkg_name" ]; then
-                    if grep -Fxq "$pkg_name" "$TEMP_DIR/bloat_target_list.txt"; then
-                        rm -rf "$(dirname "$apk_file")"
-                        echo "      ❌ Removed: $pkg_name ($(dirname "$apk_file"))"
-                        BLOAT_COUNT=$((BLOAT_COUNT + 1))
-                    fi
+        # A. DEBLOATER
+        log_info "🗑️  Running debloater..."
+        echo "$BLOAT_LIST" | tr ' ' '\n' | grep -v "^\s*$" > "$TEMP_DIR/bloat_target_list.txt"
+        REMOVED_COUNT=0
+        find "$DUMP_DIR" -type f -name "*.apk" | while read apk_file; do
+            pkg_name=$(aapt dump badging "$apk_file" 2>/dev/null | grep "package: name=" | cut -d"'" -f2)
+            if [ ! -z "$pkg_name" ]; then
+                if grep -Fxq "$pkg_name" "$TEMP_DIR/bloat_target_list.txt"; then
+                    rm -rf "$(dirname "$apk_file")"
+                    echo "$pkg_name" >> "$TEMP_DIR/removed_bloat.log"
+                    log_success "✓ Removed: $pkg_name"
                 fi
-            done < <(find "$DUMP_DIR" -type f -name "*.apk")
-            
-            echo "      📊 Scanned: $APK_COUNT APKs | Removed: $BLOAT_COUNT bloatware packages"
-        fi
+            fi
+        done
+        REMOVED_COUNT=$(wc -l < "$TEMP_DIR/removed_bloat.log" 2>/dev/null || echo 0)
+        log_success "Debloat complete: $REMOVED_COUNT apps removed"
 
         # B. GAPPS INJECTION
         if [ "$part" == "product" ] && [ -d "$GITHUB_WORKSPACE/gapps_src" ]; then
-            echo "   🔵 Injecting GApps..."
+            log_info "🔵 Injecting GApps..."
             APP_ROOT="$DUMP_DIR/app"
             PRIV_ROOT="$DUMP_DIR/priv-app"
             mkdir -p "$APP_ROOT" "$PRIV_ROOT"
             
-            echo "      📂 GApps source: $GITHUB_WORKSPACE/gapps_src"
-            
             P_APP="SoundPickerGoogle MiuiBiometric LatinImeGoogle GoogleTTS GooglePartnerSetup GeminiShell"
-            P_PRIV="Velvet Phonesky MIUIPackageInstaller GoogleRestore GooglePartnerSetup Assistant AndroidAutoStub"
+            P_PRIV="Wizard Velvet Phonesky MIUIPackageInstaller GoogleRestore GooglePartnerSetup Assistant AndroidAutoStub"
             
-            echo "      📦 Installing to /app..."
-            install_gapp_logic "$P_APP" "$APP_ROOT"
-            
-            echo "      📦 Installing to /priv-app..."
             install_gapp_logic "$P_PRIV" "$PRIV_ROOT"
-            
-            echo "      ✅ GApps injection complete"
-        elif [ "$part" == "product" ]; then
-            echo "   ⚠️ Skipping GApps injection (gapps_src not found)"
+            install_gapp_logic "$P_APP" "$APP_ROOT"
         fi
 
-        # C. KAORIOS FRAMEWORK PATCHER - REMOVED AS REQUESTED
-        # (Section removed entirely)
-
-        # D. MIUI BOOSTER PATCHING
+        # C. MIUI BOOSTER (VIA MOD.SH)
         if [ "$part" == "system_ext" ]; then
-            echo "   🚀 Kaorios: Patching MiuiBooster..."
+            log_info "🚀 Patching MiuiBooster for performance boost..."
             BOOST_JAR=$(find "$DUMP_DIR" -name "MiuiBooster.jar" -type f | head -n 1)
-            
-            if [ ! -z "$BOOST_JAR" ] && [ -f "$BOOST_JAR" ]; then
-                echo "      ✅ Found: $BOOST_JAR"
-                
-                cat <<'EOF_BOOST' > "$TEMP_DIR/patch_booster.py"
-import sys, re, os, subprocess
-
-jar_path = sys.argv[1]
-temp_dir = "bst_tmp_$$"
-
-ret = subprocess.call(f"apktool d -r -f '{jar_path}' -o {temp_dir} >/dev/null 2>&1", shell=True)
-if ret != 0:
-    print("      ❌ Decompile failed")
-    sys.exit(1)
-
-target_file = None
-for root, dirs, files in os.walk(temp_dir):
-    if "DeviceLevelUtils.smali" in files:
-        target_file = os.path.join(root, "DeviceLevelUtils.smali")
-        break
-
-if not target_file:
-    print("      ⚠️ DeviceLevelUtils.smali not found")
-    sys.exit(0)
-
-with open(target_file, 'r') as f:
-    content = f.read()
-
-method_body = """
-    .registers 2
-
-    const-string v0, "v:1,c:3,g:3"
-
-    .line 130
-    invoke-direct {p0, v0}, Lcom/miui/performance/DeviceLevelUtils;->parseDeviceLevelList(Ljava/lang/String;)V
-
-    .line 140
-    return-void
-"""
-
-pattern = re.compile(r'(\.method public initDeviceLevel\(\)V)(.*?)(\.end method)', re.DOTALL)
-new_content = pattern.sub(f"\\1{method_body}\\3", content)
-
-if content != new_content:
-    with open(target_file, 'w') as f:
-        f.write(new_content)
-    print("      ✅ Method replaced: initDeviceLevel()")
-    
-    ret = subprocess.call(f"apktool b -c {temp_dir} -o 'booster_patched.jar' >/dev/null 2>&1", shell=True)
-    if ret == 0 and os.path.exists("booster_patched.jar"):
-        os.replace("booster_patched.jar", jar_path)
-        print("      ✅ MiuiBooster repacked")
-    else:
-        print("      ❌ Recompile failed")
-else:
-    print("      ⚠️ Method already patched or not found")
-
-import shutil
-if os.path.exists(temp_dir):
-    shutil.rmtree(temp_dir)
-EOF_BOOST
-
-                python3 "$TEMP_DIR/patch_booster.py" "$BOOST_JAR"
-                rm -f "$TEMP_DIR/patch_booster.py"
+            if [ ! -z "$BOOST_JAR" ]; then
+                log_info "Target: $BOOST_JAR"
+                cat <<'EOF_MOD' > "$TEMP_DIR/mod.sh"
+#!/bin/bash
+JAR="$1"
+[ ! -f "$JAR" ] && exit 1
+rm -rf "bst_tmp"
+apktool d -r -f "$JAR" -o "bst_tmp" >/dev/null 2>&1
+SMALI=$(find "bst_tmp" -name "DeviceLevelUtils.smali" -type f | head -n 1)
+if [ -f "$SMALI" ]; then
+    python3 -c '
+import sys, re
+f=sys.argv[1]
+with open(f,"r") as h: c=h.read()
+p=r"(\.method.+initDeviceLevel\(\)V)(.*?)(\.end method)"
+r=r"\1\n    .registers 2\n    const-string v0, \"v:1,c:3,g:3\"\n    invoke-direct {p0, v0}, Lcom/miui/performance/DeviceLevelUtils;->parseDeviceLevelList(Ljava/lang/String;)V\n    return-void\n\3"
+with open(f,"w") as h: h.write(re.sub(p, r, c, flags=re.DOTALL))
+' "$SMALI"
+    apktool b -c "bst_tmp" -o "patched.jar" >/dev/null 2>&1
+    [ -f "patched.jar" ] && mv "patched.jar" "$JAR"
+fi
+rm -rf "bst_tmp"
+EOF_MOD
+                chmod +x "$TEMP_DIR/mod.sh"
+                cd "$TEMP_DIR"
+                ./mod.sh "$BOOST_JAR"
+                rm "mod.sh"
+                cd "$GITHUB_WORKSPACE"
+                log_success "✓ MiuiBooster patched (Device Level: v1, c3, g3)"
             else
-                echo "      ⚠️ MiuiBooster.jar not found, skipping..."
+                log_warning "MiuiBooster.jar not found"
             fi
         fi
 
-        # E. MIUI-FRAMEWORK (Baidu → Gboard)
+        # D. MIUI-FRAMEWORK (BAIDU->GBOARD)
         if [ "$part" == "system_ext" ]; then
-            echo "   ⌨️  Redirecting Baidu IME to Gboard..."
+            log_info "⌨️  Redirecting Baidu IME to Gboard..."
             MF_JAR=$(find "$DUMP_DIR" -name "miui-framework.jar" -type f | head -n 1)
-            
-            if [ ! -z "$MF_JAR" ] && [ -f "$MF_JAR" ]; then
-                echo "      ✅ Found: $MF_JAR"
+            if [ ! -z "$MF_JAR" ]; then
                 cp "$MF_JAR" "${MF_JAR}.bak"
                 rm -rf "$TEMP_DIR/mf.jar" "$TEMP_DIR/mf_src"
                 cp "$MF_JAR" "$TEMP_DIR/mf.jar"
-                
                 cd "$TEMP_DIR"
-                if timeout 5m apktool d -r -f "mf.jar" -o "mf_src" >/dev/null 2>&1; then
-                    echo "      📦 Decompiled successfully"
-                    PATCHED=0
+                if timeout 3m apktool d -r -f "mf.jar" -o "mf_src" >/dev/null 2>&1; then
+                    PATCHED_FILES=0
                     grep -rl "com.baidu.input_mi" "mf_src" | while read f; do
                         if [[ "$f" == *"InputMethodServiceInjector.smali"* ]]; then
-                            sed -i 's/com\.baidu\.input_mi/com.google.android.inputmethod.latin/g' "$f"
-                            echo "      ✅ Patched: $(basename $f)"
-                            PATCHED=1
+                            sed -i 's/com.baidu.input_mi/com.google.android.inputmethod.latin/g' "$f"
+                            PATCHED_FILES=$((PATCHED_FILES + 1))
+                            log_success "✓ Patched: InputMethodServiceInjector.smali"
                         fi
                     done
-                    
-                    if [ "$PATCHED" -eq 1 ] || grep -rq "com.google.android.inputmethod.latin" "mf_src"; then
-                        apktool b -c "mf_src" -o "mf_patched.jar" >/dev/null 2>&1
-                        if [ -f "mf_patched.jar" ]; then
-                            mv "mf_patched.jar" "$MF_JAR"
-                            echo "      ✅ miui-framework.jar repacked successfully"
-                        else
-                            echo "      ❌ Recompile failed"
-                        fi
-                    else
-                        echo "      ⚠️ No Baidu IME references found"
+                    apktool b -c "mf_src" -o "mf_patched.jar" >/dev/null 2>&1
+                    if [ -f "mf_patched.jar" ]; then
+                        mv "mf_patched.jar" "$MF_JAR"
+                        log_success "✓ miui-framework.jar patched successfully"
                     fi
                 else
-                    echo "      ❌ Decompile failed"
+                    log_warning "miui-framework decompile timeout - skipping"
                 fi
                 cd "$GITHUB_WORKSPACE"
             else
-                echo "      ⚠️ miui-framework.jar not found, skipping..."
+                log_warning "miui-framework.jar not found"
             fi
         fi
 
-        # F. MIUI FREQUENT PHRASE (PRODUCT PARTITION)
-        if [ "$part" == "product" ]; then
-            MFP_APK=$(find "$DUMP_DIR" -name "MIUIFrequentPhrase.apk" -type f -print -quit)
-            if [ ! -z "$MFP_APK" ] && [ -f "$MFP_APK" ]; then
-                echo "   🎨 Modding MIUIFrequentPhrase..."
-                echo "      ✅ Found: $MFP_APK"
+        # E. MIUI FREQUENT PHRASE (COLORS + GBOARD)
+        MFP_APK=$(find "$DUMP_DIR" -name "MIUIFrequentPhrase.apk" -type f -print -quit)
+        if [ ! -z "$MFP_APK" ]; then
+            log_info "🎨 Modding MIUIFrequentPhrase..."
             rm -rf "$TEMP_DIR/mfp.apk" "$TEMP_DIR/mfp_src"
             cp "$MFP_APK" "$TEMP_DIR/mfp.apk"
-            
             cd "$TEMP_DIR"
-            if timeout 5m apktool d -f "mfp.apk" -o "mfp_src" >/dev/null 2>&1; then
-                echo "      📦 Decompiled successfully"
+            if timeout 3m apktool d -f "mfp.apk" -o "mfp_src" >/dev/null 2>&1; then
+                # Redirect to Gboard
+                find "mfp_src" -name "InputMethodBottomManager.smali" -exec sed -i 's/com.baidu.input_mi/com.google.android.inputmethod.latin/g' {} +
+                log_success "✓ Redirected IME to Gboard"
                 
-                # Patch IME
-                IME_FILES=$(find "mfp_src" -name "InputMethodBottomManager.smali" | wc -l)
-                if [ "$IME_FILES" -gt 0 ]; then
-                    find "mfp_src" -name "InputMethodBottomManager.smali" -exec sed -i 's/com\.baidu\.input_mi/com.google.android.inputmethod.latin/g' {} +
-                    echo "      ✅ Patched IME redirect (Baidu → Gboard)"
-                else
-                    echo "      ⚠️ InputMethodBottomManager.smali not found"
-                fi
-                
+                # Update colors
                 if [ -f "mfp_src/res/values/colors.xml" ]; then
                     sed -i 's|<color name="input_bottom_background_color">.*</color>|<color name="input_bottom_background_color">@android:color/system_neutral1_50</color>|g' "mfp_src/res/values/colors.xml"
-                    echo "      ✅ Patched colors.xml (light theme)"
+                    log_success "✓ Updated light theme colors"
                 fi
                 if [ -f "mfp_src/res/values-night/colors.xml" ]; then
                     sed -i 's|<color name="input_bottom_background_color">.*</color>|<color name="input_bottom_background_color">@android:color/system_neutral1_900</color>|g' "mfp_src/res/values-night/colors.xml"
-                    echo "      ✅ Patched colors.xml (dark theme)"
+                    log_success "✓ Updated dark theme colors"
                 fi
                 
                 apktool b -c "mfp_src" -o "mfp_patched.apk" >/dev/null 2>&1
                 if [ -f "mfp_patched.apk" ]; then
-                    echo "      📦 Recompiled successfully"
-                    sign_apk "mfp_patched.apk"
                     mv "mfp_patched.apk" "$MFP_APK"
-                    echo "      ✅ MIUIFrequentPhrase patched & signed"
-                else
-                    echo "      ❌ Recompile failed"
+                    log_success "✓ MIUIFrequentPhrase patched successfully"
                 fi
             else
-                echo "      ❌ Decompile failed"
+                log_warning "MIUIFrequentPhrase decompile timeout - skipping"
             fi
             cd "$GITHUB_WORKSPACE"
-            fi
         fi
 
-        # G. NEXPACKAGE INJECTION
+        # F. NEXPACKAGE
         if [ "$part" == "product" ]; then
-            echo "   📦 Injecting NexPackage Assets..."
+            log_info "📦 Injecting NexPackage assets..."
             PERM_DIR="$DUMP_DIR/etc/permissions"
             DEF_PERM_DIR="$DUMP_DIR/etc/default-permissions"
             OVERLAY_DIR="$DUMP_DIR/overlay"
             MEDIA_DIR="$DUMP_DIR/media"
             THEME_DIR="$DUMP_DIR/media/theme/default"
-            KAORIOS_PRIV="$DUMP_DIR/priv-app/KaoriosToolbox"
             
-            mkdir -p "$PERM_DIR" "$DEF_PERM_DIR" "$OVERLAY_DIR" "$MEDIA_DIR" "$THEME_DIR" "$KAORIOS_PRIV"
+            mkdir -p "$PERM_DIR" "$DEF_PERM_DIR" "$OVERLAY_DIR" "$MEDIA_DIR" "$THEME_DIR"
             
-            echo "      🌸 Installing Kaorios Toolbox..."
-            if [ -f "$KAORIOS_DIR/KaoriosToolbox.apk" ]; then
-                cp "$KAORIOS_DIR/KaoriosToolbox.apk" "$KAORIOS_PRIV/"
-                echo "         ✅ KaoriosToolbox.apk → /priv-app/KaoriosToolbox/"
-            else
-                echo "         ⚠️ KaoriosToolbox.apk not found"
-            fi
-            
-            if [ -f "$KAORIOS_DIR/kaorios_perm.xml" ]; then
-                cp "$KAORIOS_DIR/kaorios_perm.xml" "$PERM_DIR/"
-                echo "         ✅ kaorios_perm.xml → /etc/permissions/"
-            else
-                echo "         ⚠️ kaorios_perm.xml not found"
-            fi
-
             if [ -d "$GITHUB_WORKSPACE/nex_pkg" ]; then
-                echo "      📂 Installing NexPackage assets..."
-                
+                # Permissions
                 DEF_XML="default-permissions-google.xml"
                 if [ -f "$GITHUB_WORKSPACE/nex_pkg/$DEF_XML" ]; then
                     cp "$GITHUB_WORKSPACE/nex_pkg/$DEF_XML" "$DEF_PERM_DIR/"
                     chmod 644 "$DEF_PERM_DIR/$DEF_XML"
-                    echo "         ✅ $DEF_XML → /etc/default-permissions/"
+                    log_success "✓ Installed: $DEF_XML"
                 fi
                 
-                XML_COUNT=$(find "$GITHUB_WORKSPACE/nex_pkg" -maxdepth 1 -name "*.xml" ! -name "$DEF_XML" | wc -l)
-                if [ "$XML_COUNT" -gt 0 ]; then
-                    find "$GITHUB_WORKSPACE/nex_pkg" -maxdepth 1 -name "*.xml" ! -name "$DEF_XML" -exec cp {} "$PERM_DIR/" \;
-                    echo "         ✅ $XML_COUNT permission XML(s) → /etc/permissions/"
-                fi
+                PERM_COUNT=$(find "$GITHUB_WORKSPACE/nex_pkg" -maxdepth 1 -name "*.xml" ! -name "$DEF_XML" -exec cp {} "$PERM_DIR/" \; -print | wc -l)
+                log_success "✓ Installed $PERM_COUNT permission files"
                 
-                APK_COUNT=$(find "$GITHUB_WORKSPACE/nex_pkg" -maxdepth 1 -name "*.apk" | wc -l)
-                if [ "$APK_COUNT" -gt 0 ]; then
-                    find "$GITHUB_WORKSPACE/nex_pkg" -maxdepth 1 -name "*.apk" -exec cp {} "$OVERLAY_DIR/" \;
-                    echo "         ✅ $APK_COUNT overlay APK(s) → /overlay/"
-                fi
+                # Overlays
+                OVERLAY_COUNT=$(find "$GITHUB_WORKSPACE/nex_pkg" -maxdepth 1 -name "*.apk" -exec cp {} "$OVERLAY_DIR/" \; -print | wc -l)
+                log_success "✓ Installed $OVERLAY_COUNT overlay APKs"
                 
+                # Boot animation
                 if [ -f "$GITHUB_WORKSPACE/nex_pkg/bootanimation.zip" ]; then
                     cp "$GITHUB_WORKSPACE/nex_pkg/bootanimation.zip" "$MEDIA_DIR/"
-                    echo "         ✅ bootanimation.zip → /media/"
+                    log_success "✓ Installed: bootanimation.zip"
                 fi
                 
+                # Lock wallpaper
                 if [ -f "$GITHUB_WORKSPACE/nex_pkg/lock_wallpaper" ]; then
                     cp "$GITHUB_WORKSPACE/nex_pkg/lock_wallpaper" "$THEME_DIR/"
-                    echo "         ✅ lock_wallpaper → /media/theme/default/"
+                    log_success "✓ Installed: lock_wallpaper"
                 fi
                 
-                echo "      ✅ NexPackage assets deployed"
+                log_success "NexPackage assets injection complete"
             else
-                echo "      ⚠️ NexPackage directory not found, skipping..."
-            fi
-        fi
-        
-        # H. PROVISION PATCHER (DIRECT DEX EDITING - NO MANIFEST TOUCH)
-        # Provision.apk is located in system_ext/priv-app
-        if [ "$part" == "system_ext" ]; then
-            PROV_APK=$(find "$DUMP_DIR" -name "Provision.apk" -type f -print -quit)
-            if [ ! -z "$PROV_APK" ] && [ -f "$PROV_APK" ]; then
-                echo "   🔧 Patching Provision.apk (Direct Dex Method)..."
-                echo "      ✅ Found: $PROV_APK"
-            
-            PROV_WORK="$TEMP_DIR/prov_dex_$$"
-            mkdir -p "$PROV_WORK"
-            
-            # Extract ONLY dex files
-            echo "      📦 Extracting dex files (manifest untouched)..."
-            DEX_EXTRACTED=$(unzip -j "$PROV_APK" 'classes*.dex' -d "$PROV_WORK/" 2>/dev/null | grep -c "inflating:" || echo "0")
-            echo "      📊 Extracted $DEX_EXTRACTED dex file(s)"
-            
-            # Process each dex
-            PATCHED_COUNT=0
-            for dex_file in "$PROV_WORK"/classes*.dex; do
-                [ ! -f "$dex_file" ] && continue
-                
-                dex_name=$(basename "$dex_file" .dex)
-                smali_out="$PROV_WORK/${dex_name}_smali"
-                
-                echo "      🔍 Processing $dex_name.dex..."
-                
-                # Decompile dex to smali
-                java -jar "$BIN_DIR/baksmali.jar" d "$dex_file" -o "$smali_out" 2>/dev/null
-                
-                if [ -d "$smali_out" ]; then
-                    # Patch IS_INTERNATIONAL_BUILD checks
-                    SMALI_COUNT=$(find "$smali_out" -type f -name "*.smali" -exec grep -l "IS_INTERNATIONAL_BUILD" {} \; | wc -l)
-                    
-                    if [ "$SMALI_COUNT" -gt 0 ]; then
-                        echo "         ✅ Found $SMALI_COUNT file(s) with IS_INTERNATIONAL_BUILD"
-                        find "$smali_out" -type f -name "*.smali" -exec grep -l "IS_INTERNATIONAL_BUILD" {} \; | while read smali_file; do
-                            sed -i -E 's/sget-boolean ([vp][0-9]+), Lmiui\/os\/Build;->IS_INTERNATIONAL_BUILD:Z/const\/4 \1, 0x1/g' "$smali_file"
-                        done
-                        PATCHED_COUNT=$((PATCHED_COUNT + 1))
-                    else
-                        echo "         ⚠️ No IS_INTERNATIONAL_BUILD references found"
-                    fi
-                    
-                    # Recompile smali to dex
-                    java -jar "$BIN_DIR/smali.jar" a "$smali_out" -o "${dex_file}.patched" 2>/dev/null
-                    
-                    if [ -f "${dex_file}.patched" ]; then
-                        mv "${dex_file}.patched" "$dex_file"
-                        echo "         ✅ Recompiled: $dex_name.dex"
-                    fi
-                fi
-            done
-            
-            echo "      📦 Injecting patched dex files back into APK..."
-            # Inject patched dex back into APK (preserving manifest)
-            cd "$PROV_WORK"
-            for dex_file in classes*.dex; do
-                [ ! -f "$dex_file" ] && continue
-                zip -d "$PROV_APK" "$dex_file" 2>/dev/null
-                zip -u "$PROV_APK" "$dex_file" 2>/dev/null
-            done
-            
-            # Verify manifest integrity
-            MANIFEST_HASH=$(unzip -p "$PROV_APK" AndroidManifest.xml 2>/dev/null | md5sum | cut -d' ' -f1)
-            echo "      📋 Manifest Hash: $MANIFEST_HASH (unchanged)"
-            echo "      ✅ Provision.apk patched successfully ($PATCHED_COUNT dex file(s) modified)"
-            
-            cd "$GITHUB_WORKSPACE"
-            rm -rf "$PROV_WORK"
-            else
-                echo "   ⚠️ Provision.apk not found in system_ext, skipping..."
+                log_warning "NexPackage directory not found"
             fi
         fi
 
-        # I. SETTINGS.APK PATCH (DIRECT DEX EDITING - NO MANIFEST TOUCH)
-        # Settings.apk is located in system_ext/priv-app
-        if [ "$part" == "system_ext" ]; then
-            SETTINGS_APK=$(find "$DUMP_DIR" -name "Settings.apk" -type f -print -quit)
-            if [ ! -z "$SETTINGS_APK" ] && [ -f "$SETTINGS_APK" ]; then
-                echo "   💊 Modding Settings.apk (Direct Dex Method)..."
-                echo "      ✅ Found: $SETTINGS_APK"
-            
-            SETTINGS_WORK="$TEMP_DIR/settings_dex_$$"
-            mkdir -p "$SETTINGS_WORK"
-            
-            # Extract ONLY dex files
-            echo "      📦 Extracting dex files (manifest untouched)..."
-            DEX_EXTRACTED=$(unzip -j "$SETTINGS_APK" 'classes*.dex' -d "$SETTINGS_WORK/" 2>/dev/null | grep -c "inflating:" || echo "0")
-            echo "      📊 Extracted $DEX_EXTRACTED dex file(s)"
-            
-            # Process each dex
-            PATCHED=0
-            for dex_file in "$SETTINGS_WORK"/classes*.dex; do
-                [ ! -f "$dex_file" ] && continue
-                
-                dex_name=$(basename "$dex_file" .dex)
-                smali_out="$SETTINGS_WORK/${dex_name}_smali"
-                
-                echo "      🔍 Processing $dex_name.dex..."
-                
-                # Decompile
-                java -jar "$BIN_DIR/baksmali.jar" d "$dex_file" -o "$smali_out" 2>/dev/null
-                
-                if [ -d "$smali_out" ]; then
-                    # Find and patch isAiSupported method
-                    TARGET_FILE=$(find "$smali_out" -path "*/com/android/settings/InternalDeviceUtils.smali" -type f)
-                    
-                    if [ ! -z "$TARGET_FILE" ] && [ -f "$TARGET_FILE" ]; then
-                        echo "         ✅ Found InternalDeviceUtils.smali"
-                        # Patch the method to always return true
-                        python3 <<'PYTHON_PATCHER' "$TARGET_FILE"
-import sys
-import re
-
-smali_file = sys.argv[1]
-
-with open(smali_file, 'r') as f:
-    content = f.read()
-
-# Pattern to find isAiSupported method and replace its body
-pattern = r'(\.method .*isAiSupported\(\)Z)(.*?)(\.end method)'
-
-replacement = r'''\1
-    .registers 1
-    const/4 v0, 0x1
-    return v0
-\3'''
-
-new_content = re.sub(pattern, replacement, content, flags=re.DOTALL)
-
-if content != new_content:
-    with open(smali_file, 'w') as f:
-        f.write(new_content)
-    print("         ✅ Patched: isAiSupported() → return true")
-else:
-    print("         ⚠️ Method not found or already patched")
-PYTHON_PATCHER
-                        PATCHED=1
-                    fi
-                    
-                    # Recompile
-                    java -jar "$BIN_DIR/smali.jar" a "$smali_out" -o "${dex_file}.patched" 2>/dev/null
-                    
-                    if [ -f "${dex_file}.patched" ]; then
-                        mv "${dex_file}.patched" "$dex_file"
-                        echo "         ✅ Recompiled: $dex_name.dex"
-                    fi
-                fi
-            done
-            
-            echo "      📦 Injecting patched dex files back into APK..."
-            # Inject back
-            cd "$SETTINGS_WORK"
-            for dex_file in classes*.dex; do
-                [ ! -f "$dex_file" ] && continue
-                zip -d "$SETTINGS_APK" "$dex_file" 2>/dev/null
-                zip -u "$SETTINGS_APK" "$dex_file" 2>/dev/null
-            done
-            
-            if [ "$PATCHED" -eq 1 ]; then
-                echo "      ✅ Settings.apk patched successfully (AI Support enabled)"
-            else
-                echo "      ⚠️ Settings.apk processed but no patches applied"
-            fi
-            
-            cd "$GITHUB_WORKSPACE"
-            rm -rf "$SETTINGS_WORK"
-            else
-                echo "   ⚠️ Settings.apk not found in system_ext, skipping..."
-            fi
-        fi
-
-        # J. ADD PROPS
-        echo "   📝 Injecting build.prop tweaks..."
-        find "$DUMP_DIR" -name "build.prop" | while read prop; do 
+        # G. BUILD PROPS
+        log_info "📝 Adding custom build properties..."
+        PROPS_ADDED=0
+        find "$DUMP_DIR" -name "build.prop" | while read prop; do
             echo "$PROPS_CONTENT" >> "$prop"
-            echo "      ✅ Modified: $prop"
+            PROPS_ADDED=$((PROPS_ADDED + 1))
+            log_success "✓ Updated: $prop"
         done
 
-        # K. REPACK PARTITION
-        echo "   📦 Repacking $part partition..."
-        sudo mkfs.erofs -zlz4hc,9 "$SUPER_DIR/${part}.img" "$DUMP_DIR" 2>&1 | grep -v "^$"
+        # H. REPACK
+        log_info "📦 Repacking ${part} partition..."
+        START_TIME=$(date +%s)
+        sudo mkfs.erofs -zlz4 "$SUPER_DIR/${part}.img" "$DUMP_DIR" 2>&1 | grep -E "Build.*completed|ERROR"
+        END_TIME=$(date +%s)
+        REPACK_TIME=$((END_TIME - START_TIME))
         
         if [ -f "$SUPER_DIR/${part}.img" ]; then
-            echo "      ✅ $part.img created successfully"
-            sudo rm -rf "$DUMP_DIR"
+            IMG_SIZE=$(du -h "$SUPER_DIR/${part}.img" | cut -f1)
+            log_success "✓ Repacked ${part}.img (${IMG_SIZE}) in ${REPACK_TIME}s"
         else
-            echo "      ❌ Failed to create $part.img"
-            exit 1
+            log_error "Failed to repack ${part}.img"
         fi
-    else
-        echo ""
-        echo "========================================"
-        echo "   SKIPPING: $part"
-        echo "========================================"
-        echo "   ⚠️  Partition image not found: $IMAGES_DIR/${part}.img"
-        echo "   ℹ️  This partition was not extracted from payload.bin"
-        echo ""
+        
+        sudo rm -rf "$DUMP_DIR"
     fi
 done
-
-# Clean up mount point
-sudo rm -rf "mnt"
 
 # =========================================================
 #  6. PACKAGING & UPLOAD
 # =========================================================
-echo ""
-echo "========================================"
-echo "   FINAL PACKAGING"
-echo "========================================"
-
+log_step "📦 Creating Final Package..."
 PACK_DIR="$OUTPUT_DIR/Final_Pack"
 mkdir -p "$PACK_DIR/super" "$PACK_DIR/images"
 
-# Move super partitions
-echo "📦 Organizing super partitions..."
+log_info "Organizing super partitions..."
 SUPER_TARGETS="system system_ext product mi_ext vendor odm system_dlkm vendor_dlkm"
+SUPER_COUNT=0
 for img in $SUPER_TARGETS; do
     if [ -f "$SUPER_DIR/${img}.img" ]; then
         mv "$SUPER_DIR/${img}.img" "$PACK_DIR/super/"
-        echo "   ✅ $img.img"
+        SUPER_COUNT=$((SUPER_COUNT + 1))
+        log_success "✓ Added to package: ${img}.img"
     elif [ -f "$IMAGES_DIR/${img}.img" ]; then
         mv "$IMAGES_DIR/${img}.img" "$PACK_DIR/super/"
-        echo "   ✅ $img.img (from images)"
+        SUPER_COUNT=$((SUPER_COUNT + 1))
+        log_success "✓ Added to package: ${img}.img"
     fi
 done
+log_info "Total super partitions: $SUPER_COUNT"
 
-# Move firmware images
-echo "📦 Organizing firmware images..."
-find "$IMAGES_DIR" -maxdepth 1 -type f -name "*.img" -exec mv {} "$PACK_DIR/images/" \;
+log_info "Organizing firmware images..."
+IMAGES_COUNT=$(find "$IMAGES_DIR" -maxdepth 1 -type f -name "*.img" -exec mv {} "$PACK_DIR/images/" \; -print | wc -l)
+log_success "✓ Moved $IMAGES_COUNT firmware images"
 
-# Create flash script
+log_info "Creating flash script..."
 cat <<'EOF' > "$PACK_DIR/flash_rom.bat"
 @echo off
 echo ========================================
-echo      NEXDROID FLASHER v58
+echo      NEXDROID FLASHER
 echo ========================================
-echo.
-echo Checking fastboot...
-fastboot --version >nul 2>&1
-if errorlevel 1 (
-    echo ERROR: Fastboot not found! Install Android Platform Tools.
-    pause
-    exit /b 1
-)
-echo.
-echo WARNING: This will ERASE all data!
-echo Press Ctrl+C to cancel, or
-pause
-echo.
 fastboot set_active a
 echo [1/3] Flashing Firmware...
-for %%f in (images\*.img) do (
-    echo    Flashing %%~nf...
-    fastboot flash %%~nf "%%f"
-)
-echo.
+for %%f in (images\*.img) do fastboot flash %%~nf "%%f"
 echo [2/3] Flashing Super Partitions...
-for %%f in (super\*.img) do (
-    echo    Flashing %%~nf...
-    fastboot flash %%~nf "%%f"
-)
-echo.
+for %%f in (super\*.img) do fastboot flash %%~nf "%%f"
 echo [3/3] Wiping Data...
 fastboot erase userdata
-fastboot erase metadata
-echo.
-echo ========================================
-echo      DONE! Rebooting...
-echo ========================================
 fastboot reboot
-echo.
 pause
 EOF
+log_success "✓ Created flash_rom.bat"
 
-# Create Linux flash script
-cat <<'EOF' > "$PACK_DIR/flash_rom.sh"
-#!/bin/bash
-echo "========================================"
-echo "      NEXDROID FLASHER v58"
-echo "========================================"
-echo ""
-if ! command -v fastboot &> /dev/null; then
-    echo "ERROR: Fastboot not found!"
-    exit 1
-fi
-echo "WARNING: This will ERASE all data!"
-read -p "Press Enter to continue or Ctrl+C to cancel..."
-echo ""
-fastboot set_active a
-echo "[1/3] Flashing Firmware..."
-for img in images/*.img; do
-    name=$(basename "$img" .img)
-    echo "   Flashing $name..."
-    fastboot flash "$name" "$img"
-done
-echo ""
-echo "[2/3] Flashing Super Partitions..."
-for img in super/*.img; do
-    name=$(basename "$img" .img)
-    echo "   Flashing $name..."
-    fastboot flash "$name" "$img"
-done
-echo ""
-echo "[3/3] Wiping Data..."
-fastboot erase userdata
-fastboot erase metadata
-echo ""
-echo "========================================"
-echo "      DONE! Rebooting..."
-echo "========================================"
-fastboot reboot
-EOF
-chmod +x "$PACK_DIR/flash_rom.sh"
-
-# Create ZIP
+log_step "🗜️  Compressing package..."
 cd "$PACK_DIR"
 SUPER_ZIP="ota-nexdroid-${OS_VER}_${DEVICE_CODE}_${ANDROID_VER}.zip"
-echo "📦 Creating final package: $SUPER_ZIP"
-7z a -tzip -mx1 -mmt=$(nproc) "$SUPER_ZIP" . >/dev/null 2>&1
+log_info "Target: $SUPER_ZIP"
+
+START_TIME=$(date +%s)
+7z a -tzip -mx1 -mmt=$(nproc) "$SUPER_ZIP" . > /dev/null
+END_TIME=$(date +%s)
+ZIP_TIME=$((END_TIME - START_TIME))
 
 if [ -f "$SUPER_ZIP" ]; then
-    SIZE=$(du -h "$SUPER_ZIP" | cut -f1)
-    echo "   ✅ Package created: $SIZE"
+    ZIP_SIZE=$(du -h "$SUPER_ZIP" | cut -f1)
+    log_success "✓ Package created: $SUPER_ZIP (${ZIP_SIZE}) in ${ZIP_TIME}s"
     mv "$SUPER_ZIP" "$OUTPUT_DIR/"
 else
-    echo "   ❌ Failed to create package"
+    log_error "Failed to create package!"
     exit 1
 fi
 
-# =========================================================
-#  7. UPLOAD & NOTIFY
-# =========================================================
-echo ""
-echo "☁️  Uploading to PixelDrain..."
+log_step "☁️  Uploading to PixelDrain..."
 cd "$OUTPUT_DIR"
 
 upload() {
     local file=$1
     [ ! -f "$file" ] && return
-    
-    echo "   ⬆️ Uploading $file..."
+    log_info "Uploading $file..."
     if [ -z "$PIXELDRAIN_KEY" ]; then
         curl -s -T "$file" "https://pixeldrain.com/api/file/" | jq -r '"https://pixeldrain.com/u/" + .id'
     else
-        curl -s -T "$file" -u ":$PIXELDRAIN_KEY" "https://pixeldrain.com/api/file/" | jq -r '"https://pixeldrain.com/u/" + .id'
+        curl -s -T "$file" -u :$PIXELDRAIN_KEY "https://pixeldrain.com/api/file/" | jq -r '"https://pixeldrain.com/u/" + .id'
     fi
 }
 
 LINK_ZIP=$(upload "$SUPER_ZIP")
 
 if [ -z "$LINK_ZIP" ] || [ "$LINK_ZIP" == "null" ]; then
-    echo "   ❌ Upload failed"
+    log_error "Upload failed!"
     LINK_ZIP="https://pixeldrain.com"
     BTN_TEXT="Upload Failed"
 else
-    echo "   ✅ Upload successful"
-    echo "   🔗 $LINK_ZIP"
+    log_success "✓ Upload successful!"
+    log_success "Download link: $LINK_ZIP"
     BTN_TEXT="Download ROM"
 fi
 
-# Telegram notification
+# =========================================================
+#  7. TELEGRAM NOTIFICATION
+# =========================================================
 if [ ! -z "$TELEGRAM_TOKEN" ] && [ ! -z "$CHAT_ID" ]; then
-    echo ""
-    echo "📣 Sending Telegram notification..."
-    BUILD_DATE=$(date +"%Y-%m-%d %H:%M UTC")
+    log_step "📣 Sending Telegram notification..."
+    BUILD_DATE=$(date +"%Y-%m-%d %H:%M")
     
-    MSG_TEXT="🤖 **NEXDROID BUILD COMPLETE**
-━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    MSG_TEXT="**NEXDROID BUILD COMPLETE**
+---------------------------
 \`Device  : $DEVICE_CODE\`
 \`Version : $OS_VER\`
 \`Android : $ANDROID_VER\`
-\`Built   : $BUILD_DATE\`
-━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+\`Built   : $BUILD_DATE\`"
 
     JSON_PAYLOAD=$(jq -n \
         --arg chat_id "$CHAT_ID" \
@@ -1057,30 +669,33 @@ if [ ! -z "$TELEGRAM_TOKEN" ] && [ ! -z "$CHAT_ID" ]; then
             }
         }')
 
-    HTTP_CODE=$(curl -s -w "%{http_code}" -o /tmp/tg_response.json \
-        -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
+    RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
         -H "Content-Type: application/json" \
         -d "$JSON_PAYLOAD")
     
-    if [ "$HTTP_CODE" == "200" ]; then
-        echo "   ✅ Telegram notification sent"
+    if [[ "$RESPONSE" == *"200"* ]]; then
+        log_success "✓ Telegram notification sent"
     else
-        echo "   ⚠️ Telegram API returned: $HTTP_CODE"
-        echo "   Attempting text fallback..."
+        log_warning "Telegram notification failed, trying fallback..."
         curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
             -d chat_id="$CHAT_ID" \
-            -d text="✅ NexDroid Build Complete: $LINK_ZIP" >/dev/null
+            -d text="✅ Build Done: $LINK_ZIP" >/dev/null
     fi
 else
-    echo "⚠️ Skipping Telegram notification (credentials not provided)"
+    log_warning "Skipping Telegram notification (Missing TOKEN/CHAT_ID)"
 fi
 
-echo ""
-echo "========================================"
-echo "   ✅ BUILD COMPLETE!"
-echo "========================================"
-echo "Package: $SUPER_ZIP"
-echo "Link: $LINK_ZIP"
-echo ""
+# =========================================================
+#  8. BUILD SUMMARY
+# =========================================================
+log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+log_step "           BUILD SUMMARY"
+log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+log_success "Device: $DEVICE_CODE"
+log_success "OS Version: $OS_VER"
+log_success "Android: $ANDROID_VER"
+log_success "Package: $SUPER_ZIP"
+log_success "Download: $LINK_ZIP"
+log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 exit 0
