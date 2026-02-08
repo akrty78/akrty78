@@ -323,10 +323,231 @@ EXTRACT_TIME=$((END_TIME - START_TIME))
 rm payload.bin
 log_success "Firmware extracted in ${EXTRACT_TIME}s"
 
-# Patch VBMeta
-log_info "Patching vbmeta for AVB verification bypass..."
-python3 -c "import sys; open(sys.argv[1], 'r+b').write(b'\x03', 123) if __name__=='__main__' else None" "$IMAGES_DIR/vbmeta.img" 2>/dev/null
-log_success "vbmeta patched"
+# =========================================================
+#  4.5. VBMETA VERIFICATION DISABLER (PROFESSIONAL)
+# =========================================================
+log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+log_step "🔓 VBMETA VERIFICATION DISABLER"
+log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+# Create professional vbmeta patcher
+cat > "$BIN_DIR/vbmeta_patcher.py" <<'PYTHON_EOF'
+#!/usr/bin/env python3
+import sys
+import struct
+import os
+
+class VBMetaPatcher:
+    """Professional AVB vbmeta image patcher"""
+    
+    AVB_MAGIC = b'AVB0'
+    AVB_VERSION_MAJOR = 1
+    AVB_VERSION_MINOR = 0
+    
+    # AVB Header offsets
+    MAGIC_OFFSET = 0
+    VERSION_MAJOR_OFFSET = 4
+    VERSION_MINOR_OFFSET = 8
+    FLAGS_OFFSET = 123  # Critical: flags field location
+    
+    # Flags to disable verification
+    FLAG_VERIFICATION_DISABLED = 0x01
+    FLAG_HASHTREE_DISABLED = 0x02
+    DISABLE_FLAGS = FLAG_VERIFICATION_DISABLED | FLAG_HASHTREE_DISABLED  # 0x03
+    
+    def __init__(self, filepath):
+        self.filepath = filepath
+        self.original_size = os.path.getsize(filepath)
+        
+    def read_header(self):
+        """Read and validate AVB header"""
+        print(f"[ACTION] Reading vbmeta header from {os.path.basename(self.filepath)}")
+        
+        with open(self.filepath, 'rb') as f:
+            # Read magic
+            f.seek(self.MAGIC_OFFSET)
+            magic = f.read(4)
+            
+            if magic != self.AVB_MAGIC:
+                print(f"[ERROR] Invalid AVB magic: {magic.hex()} (expected: {self.AVB_MAGIC.hex()})")
+                return False
+            
+            print(f"[SUCCESS] Valid AVB magic found: {magic.decode('ascii')}")
+            
+            # Read version
+            f.seek(self.VERSION_MAJOR_OFFSET)
+            major = struct.unpack('>I', f.read(4))[0]
+            minor = struct.unpack('>I', f.read(4))[0]
+            
+            print(f"[INFO] AVB Version: {major}.{minor}")
+            
+            # Read current flags
+            f.seek(self.FLAGS_OFFSET)
+            current_flags = struct.unpack('B', f.read(1))[0]
+            
+            print(f"[INFO] Current flags at offset {self.FLAGS_OFFSET}: 0x{current_flags:02X}")
+            
+            if current_flags == self.DISABLE_FLAGS:
+                print("[INFO] Verification already disabled")
+                return True
+            
+            return True
+    
+    def patch(self):
+        """Patch vbmeta to disable verification"""
+        print(f"[ACTION] Patching flags at offset {self.FLAGS_OFFSET}")
+        
+        try:
+            # Read entire file
+            with open(self.filepath, 'rb') as f:
+                data = bytearray(f.read())
+            
+            original_flag = data[self.FLAGS_OFFSET]
+            print(f"[INFO] Original flag value: 0x{original_flag:02X}")
+            
+            # Set disable flags
+            data[self.FLAGS_OFFSET] = self.DISABLE_FLAGS
+            
+            print(f"[ACTION] Setting new flag value: 0x{self.DISABLE_FLAGS:02X}")
+            print(f"[INFO] Verification Disabled: {'YES' if self.DISABLE_FLAGS & 0x01 else 'NO'}")
+            print(f"[INFO] Hashtree Disabled: {'YES' if self.DISABLE_FLAGS & 0x02 else 'NO'}")
+            
+            # Write back
+            with open(self.filepath, 'wb') as f:
+                f.write(data)
+            
+            print(f"[SUCCESS] Flags patched successfully")
+            
+            return True
+            
+        except Exception as e:
+            print(f"[ERROR] Patching failed: {str(e)}")
+            return False
+    
+    def verify(self):
+        """Verify the patch was applied correctly"""
+        print(f"[ACTION] Verifying patch...")
+        
+        with open(self.filepath, 'rb') as f:
+            f.seek(self.FLAGS_OFFSET)
+            patched_flag = struct.unpack('B', f.read(1))[0]
+        
+        if patched_flag == self.DISABLE_FLAGS:
+            print(f"[SUCCESS] Verification complete: Flags = 0x{patched_flag:02X}")
+            return True
+        else:
+            print(f"[ERROR] Verification failed: Flags = 0x{patched_flag:02X} (expected: 0x{self.DISABLE_FLAGS:02X})")
+            return False
+    
+    def get_info(self):
+        """Get image information"""
+        size_kb = self.original_size / 1024
+        size_mb = size_kb / 1024
+        
+        if size_mb >= 1:
+            return f"{size_mb:.2f}M"
+        else:
+            return f"{size_kb:.2f}K"
+
+def main():
+    if len(sys.argv) != 2:
+        print("[ERROR] Usage: vbmeta_patcher.py <vbmeta_image>")
+        sys.exit(1)
+    
+    filepath = sys.argv[1]
+    
+    if not os.path.exists(filepath):
+        print(f"[ERROR] File not found: {filepath}")
+        sys.exit(1)
+    
+    patcher = VBMetaPatcher(filepath)
+    
+    # Show file info
+    print(f"[INFO] File: {os.path.basename(filepath)}")
+    print(f"[INFO] Size: {patcher.get_info()}")
+    
+    # Read and validate header
+    if not patcher.read_header():
+        print("[ERROR] Invalid vbmeta image")
+        sys.exit(1)
+    
+    # Patch
+    if not patcher.patch():
+        print("[ERROR] Patching failed")
+        sys.exit(1)
+    
+    # Verify
+    if not patcher.verify():
+        print("[ERROR] Verification failed")
+        sys.exit(1)
+    
+    print("[SUCCESS] vbmeta patching completed successfully!")
+    sys.exit(0)
+
+if __name__ == "__main__":
+    main()
+PYTHON_EOF
+
+chmod +x "$BIN_DIR/vbmeta_patcher.py"
+log_success "✓ Professional vbmeta patcher ready"
+
+# Patch vbmeta.img
+VBMETA_IMG="$IMAGES_DIR/vbmeta.img"
+if [ -f "$VBMETA_IMG" ]; then
+    log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    log_info "Patching vbmeta.img..."
+    log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    
+    if python3 "$BIN_DIR/vbmeta_patcher.py" "$VBMETA_IMG" 2>&1 | while IFS= read -r line; do
+        if [[ "$line" == *"[ACTION]"* ]]; then
+            log_info "${line#*[ACTION] }"
+        elif [[ "$line" == *"[SUCCESS]"* ]]; then
+            log_success "${line#*[SUCCESS] }"
+        elif [[ "$line" == *"[ERROR]"* ]]; then
+            log_error "${line#*[ERROR] }"
+        elif [[ "$line" == *"[INFO]"* ]]; then
+            log_info "${line#*[INFO] }"
+        fi
+    done; then
+        log_success "✓ vbmeta.img patched successfully"
+    else
+        log_error "✗ vbmeta.img patching failed"
+    fi
+else
+    log_warning "⚠️  vbmeta.img not found"
+fi
+
+# Patch vbmeta_system.img
+VBMETA_SYSTEM_IMG="$IMAGES_DIR/vbmeta_system.img"
+if [ -f "$VBMETA_SYSTEM_IMG" ]; then
+    log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    log_info "Patching vbmeta_system.img..."
+    log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    
+    if python3 "$BIN_DIR/vbmeta_patcher.py" "$VBMETA_SYSTEM_IMG" 2>&1 | while IFS= read -r line; do
+        if [[ "$line" == *"[ACTION]"* ]]; then
+            log_info "${line#*[ACTION] }"
+        elif [[ "$line" == *"[SUCCESS]"* ]]; then
+            log_success "${line#*[SUCCESS] }"
+        elif [[ "$line" == *"[ERROR]"* ]]; then
+            log_error "${line#*[ERROR] }"
+        elif [[ "$line" == *"[INFO]"* ]]; then
+            log_info "${line#*[INFO] }"
+        fi
+    done; then
+        log_success "✓ vbmeta_system.img patched successfully"
+    else
+        log_error "✗ vbmeta_system.img patching failed"
+    fi
+else
+    log_info "ℹ️  vbmeta_system.img not found (may not exist in this ROM)"
+fi
+
+log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+log_success "✅ AVB VERIFICATION DISABLED"
+log_success "   Effect: Device will boot modified system partitions"
+log_success "   Status: Secure Boot bypassed"
+log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 # =========================================================
 #  5. PARTITION MODIFICATION LOOP
