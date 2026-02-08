@@ -343,6 +343,23 @@ for part in $LOGICALS; do
         echo "   PROCESSING: $part"
         echo "========================================"
         
+        # Show what will be processed in this partition
+        case "$part" in
+            "system")
+                echo "   📋 Tasks: build.prop injection"
+                ;;
+            "system_ext")
+                echo "   📋 Tasks: MiuiBooster, MIUI-framework, Provision.apk, Settings.apk"
+                ;;
+            "product")
+                echo "   📋 Tasks: Debloater, GApps, MIUIFrequentPhrase, NexPackage"
+                ;;
+            *)
+                echo "   📋 Tasks: build.prop injection"
+                ;;
+        esac
+        echo ""
+        
         DUMP_DIR="$GITHUB_WORKSPACE/${part}_dump"
         mkdir -p "$DUMP_DIR" "mnt"
         
@@ -358,29 +375,31 @@ for part in $LOGICALS; do
         sudo fusermount -uz "mnt" 2>/dev/null || sudo umount "mnt" 2>/dev/null
         rm "$IMAGES_DIR/${part}.img"
 
-        # A. DEBLOATER
-        echo "   🗑️  Debloating..."
-        echo "$BLOAT_LIST" | tr ' ' '\n' | grep -v "^\s*$" > "$TEMP_DIR/bloat_target_list.txt"
-        
-        BLOAT_COUNT=0
-        APK_COUNT=0
-        
-        echo "      🔍 Scanning for APKs in: $DUMP_DIR"
-        
-        while IFS= read -r apk_file; do
-            APK_COUNT=$((APK_COUNT + 1))
-            pkg_name=$(aapt dump badging "$apk_file" 2>/dev/null | grep "package: name=" | cut -d"'" -f2)
+        # A. DEBLOATER (PRODUCT PARTITION ONLY)
+        if [ "$part" == "product" ]; then
+            echo "   🗑️  Debloating..."
+            echo "$BLOAT_LIST" | tr ' ' '\n' | grep -v "^\s*$" > "$TEMP_DIR/bloat_target_list.txt"
             
-            if [ ! -z "$pkg_name" ]; then
-                if grep -Fxq "$pkg_name" "$TEMP_DIR/bloat_target_list.txt"; then
-                    rm -rf "$(dirname "$apk_file")"
-                    echo "      ❌ Removed: $pkg_name ($(dirname "$apk_file"))"
-                    BLOAT_COUNT=$((BLOAT_COUNT + 1))
+            BLOAT_COUNT=0
+            APK_COUNT=0
+            
+            echo "      🔍 Scanning for APKs in: $DUMP_DIR"
+            
+            while IFS= read -r apk_file; do
+                APK_COUNT=$((APK_COUNT + 1))
+                pkg_name=$(aapt dump badging "$apk_file" 2>/dev/null | grep "package: name=" | cut -d"'" -f2)
+                
+                if [ ! -z "$pkg_name" ]; then
+                    if grep -Fxq "$pkg_name" "$TEMP_DIR/bloat_target_list.txt"; then
+                        rm -rf "$(dirname "$apk_file")"
+                        echo "      ❌ Removed: $pkg_name ($(dirname "$apk_file"))"
+                        BLOAT_COUNT=$((BLOAT_COUNT + 1))
+                    fi
                 fi
-            fi
-        done < <(find "$DUMP_DIR" -type f -name "*.apk")
-        
-        echo "      📊 Scanned: $APK_COUNT APKs | Removed: $BLOAT_COUNT bloatware packages"
+            done < <(find "$DUMP_DIR" -type f -name "*.apk")
+            
+            echo "      📊 Scanned: $APK_COUNT APKs | Removed: $BLOAT_COUNT bloatware packages"
+        fi
 
         # B. GAPPS INJECTION
         if [ "$part" == "product" ] && [ -d "$GITHUB_WORKSPACE/gapps_src" ]; then
@@ -524,11 +543,12 @@ EOF_BOOST
             fi
         fi
 
-        # F. MIUI FREQUENT PHRASE
-        MFP_APK=$(find "$DUMP_DIR" -name "MIUIFrequentPhrase.apk" -type f -print -quit)
-        if [ ! -z "$MFP_APK" ] && [ -f "$MFP_APK" ]; then
-            echo "   🎨 Modding MIUIFrequentPhrase..."
-            echo "      ✅ Found: $MFP_APK"
+        # F. MIUI FREQUENT PHRASE (PRODUCT PARTITION)
+        if [ "$part" == "product" ]; then
+            MFP_APK=$(find "$DUMP_DIR" -name "MIUIFrequentPhrase.apk" -type f -print -quit)
+            if [ ! -z "$MFP_APK" ] && [ -f "$MFP_APK" ]; then
+                echo "   🎨 Modding MIUIFrequentPhrase..."
+                echo "      ✅ Found: $MFP_APK"
             rm -rf "$TEMP_DIR/mfp.apk" "$TEMP_DIR/mfp_src"
             cp "$MFP_APK" "$TEMP_DIR/mfp.apk"
             
@@ -567,6 +587,7 @@ EOF_BOOST
                 echo "      ❌ Decompile failed"
             fi
             cd "$GITHUB_WORKSPACE"
+            fi
         fi
 
         # G. NEXPACKAGE INJECTION
@@ -635,10 +656,12 @@ EOF_BOOST
         fi
         
         # H. PROVISION PATCHER (DIRECT DEX EDITING - NO MANIFEST TOUCH)
-        PROV_APK=$(find "$DUMP_DIR" -name "Provision.apk" -type f -print -quit)
-        if [ ! -z "$PROV_APK" ] && [ -f "$PROV_APK" ]; then
-            echo "   🔧 Patching Provision.apk (Direct Dex Method)..."
-            echo "      ✅ Found: $PROV_APK"
+        # Provision.apk is located in system_ext/priv-app
+        if [ "$part" == "system_ext" ]; then
+            PROV_APK=$(find "$DUMP_DIR" -name "Provision.apk" -type f -print -quit)
+            if [ ! -z "$PROV_APK" ] && [ -f "$PROV_APK" ]; then
+                echo "   🔧 Patching Provision.apk (Direct Dex Method)..."
+                echo "      ✅ Found: $PROV_APK"
             
             PROV_WORK="$TEMP_DIR/prov_dex_$$"
             mkdir -p "$PROV_WORK"
@@ -701,15 +724,18 @@ EOF_BOOST
             
             cd "$GITHUB_WORKSPACE"
             rm -rf "$PROV_WORK"
-        else
-            echo "   ⚠️ Provision.apk not found, skipping..."
+            else
+                echo "   ⚠️ Provision.apk not found in system_ext, skipping..."
+            fi
         fi
 
         # I. SETTINGS.APK PATCH (DIRECT DEX EDITING - NO MANIFEST TOUCH)
-        SETTINGS_APK=$(find "$DUMP_DIR" -name "Settings.apk" -type f -print -quit)
-        if [ ! -z "$SETTINGS_APK" ] && [ -f "$SETTINGS_APK" ]; then
-            echo "   💊 Modding Settings.apk (Direct Dex Method)..."
-            echo "      ✅ Found: $SETTINGS_APK"
+        # Settings.apk is located in system_ext/priv-app
+        if [ "$part" == "system_ext" ]; then
+            SETTINGS_APK=$(find "$DUMP_DIR" -name "Settings.apk" -type f -print -quit)
+            if [ ! -z "$SETTINGS_APK" ] && [ -f "$SETTINGS_APK" ]; then
+                echo "   💊 Modding Settings.apk (Direct Dex Method)..."
+                echo "      ✅ Found: $SETTINGS_APK"
             
             SETTINGS_WORK="$TEMP_DIR/settings_dex_$$"
             mkdir -p "$SETTINGS_WORK"
@@ -796,8 +822,9 @@ PYTHON_PATCHER
             
             cd "$GITHUB_WORKSPACE"
             rm -rf "$SETTINGS_WORK"
-        else
-            echo "   ⚠️ Settings.apk not found, skipping..."
+            else
+                echo "   ⚠️ Settings.apk not found in system_ext, skipping..."
+            fi
         fi
 
         # J. ADD PROPS
