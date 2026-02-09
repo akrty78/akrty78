@@ -15,14 +15,19 @@ patch_miui_service() {
     log_step "🌏 MIUI SERVICE CN→GLOBAL PATCH"
     log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     
-    # Find miui-service.jar
-    MIUI_SERVICE_JAR=$(find "$SYSTEM_EXT_DUMP" -name "miui-service.jar" -type f | head -n 1)
+    # Find miui-service.jar (search in multiple locations)
+    log_info "Searching for miui-service.jar..."
+    
+    MIUI_SERVICE_JAR=$(find "$SYSTEM_EXT_DUMP" -name "miui-service*.jar" -type f | head -n 1)
     
     if [ -z "$MIUI_SERVICE_JAR" ]; then
-        log_warning "⚠️  miui-service.jar not found in system_ext/framework"
+        log_warning "⚠️  miui-service.jar not found in system_ext"
+        log_info "This may be normal for some ROM versions"
+        cd "$WORKSPACE"
         return 0
     fi
     
+    log_success "✓ Found: $(basename "$MIUI_SERVICE_JAR")"
     log_info "Located: $MIUI_SERVICE_JAR"
     
     # Create complex multi-patcher script

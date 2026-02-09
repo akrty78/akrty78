@@ -15,14 +15,26 @@ patch_systemui_volte() {
     log_step "📶 SYSTEMUI VOLTE ICON PATCH"
     log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     
-    # Find SystemUI.apk
-    SYSTEMUI_APK=$(find "$SYSTEM_EXT_DUMP" -path "*/priv-app/SystemUI/SystemUI.apk" -type f | head -n 1)
+    # Find SystemUI.apk (try multiple names)
+    log_info "Searching for SystemUI..."
+    
+    SYSTEMUI_APK=""
+    
+    # Try MiuiSystemUI first (more common in MIUI)
+    SYSTEMUI_APK=$(find "$SYSTEM_EXT_DUMP" -name "MiuiSystemUI.apk" -type f | head -n 1)
     
     if [ -z "$SYSTEMUI_APK" ]; then
-        log_warning "⚠️  SystemUI.apk not found in system_ext/priv-app"
+        # Try standard SystemUI
+        SYSTEMUI_APK=$(find "$SYSTEM_EXT_DUMP" -name "SystemUI.apk" -type f | head -n 1)
+    fi
+    
+    if [ -z "$SYSTEMUI_APK" ]; then
+        log_warning "⚠️  SystemUI.apk or MiuiSystemUI.apk not found"
+        cd "$WORKSPACE"
         return 0
     fi
     
+    log_success "✓ Found: $(basename "$SYSTEMUI_APK")"
     log_info "Located: $SYSTEMUI_APK"
     
     # Target classes
