@@ -239,6 +239,9 @@ patch_dex_file() {
     local PATCHER_SCRIPT="$4"
     local IS_JAR="${5:-false}"
     
+    # CRITICAL: Save current directory
+    local ORIGINAL_DIR="$PWD"
+    
     log_info "File: $(basename "$FILE_PATH")"
     log_info "Size: $(du -h "$FILE_PATH" | cut -f1)"
     
@@ -251,6 +254,7 @@ patch_dex_file() {
     
     # Extract DEX
     if ! extract_dex "$FILE_PATH" "$WORK_DIR"; then
+        cd "$ORIGINAL_DIR"
         return 1
     fi
     
@@ -259,6 +263,7 @@ patch_dex_file() {
     
     # Decompile
     if ! decompile_dex "$TARGET_DEX" "smali_out"; then
+        cd "$ORIGINAL_DIR"
         return 1
     fi
     
@@ -268,6 +273,7 @@ patch_dex_file() {
     
     if [ -z "$SMALI_FILE" ]; then
         log_error "✗ Class not found: $TARGET_CLASS"
+        cd "$ORIGINAL_DIR"
         return 1
     fi
     
@@ -276,20 +282,27 @@ patch_dex_file() {
     
     # Patch
     if ! run_python_patcher "$PATCHER_SCRIPT" "$SMALI_FILE"; then
+        cd "$ORIGINAL_DIR"
         return 1
     fi
     
     # Recompile
     if ! recompile_dex "smali_out" "classes_patched.dex"; then
+        cd "$ORIGINAL_DIR"
         return 1
     fi
     
     # Inject
     if ! inject_dex "$FILE_PATH" "classes_patched.dex" "$TARGET_DEX" "$IS_JAR"; then
+        cd "$ORIGINAL_DIR"
         return 1
     fi
     
     log_success "✓ Patching completed successfully!"
+    
+    # CRITICAL: Return to original directory
+    cd "$ORIGINAL_DIR"
+    
     return 0
 }
 

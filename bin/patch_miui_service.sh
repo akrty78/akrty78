@@ -8,6 +8,9 @@
 patch_miui_service() {
     local SYSTEM_EXT_DUMP="$1"
     
+    # CRITICAL: Save workspace
+    local WORKSPACE="$GITHUB_WORKSPACE"
+    
     log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     log_step "🌏 MIUI SERVICE CN→GLOBAL PATCH"
     log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -235,7 +238,7 @@ PYTHON_EOF
         cp "${MIUI_SERVICE_JAR}.bak" "$MIUI_SERVICE_JAR"
     fi
     
-    cd "$GITHUB_WORKSPACE"
+    cd "$WORKSPACE"
     rm -rf "$WORK_DIR"
 }
 

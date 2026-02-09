@@ -8,6 +8,9 @@
 patch_settings_ai_support() {
     local SYSTEM_EXT_DUMP="$1"
     
+    # CRITICAL: Save workspace
+    local WORKSPACE="$GITHUB_WORKSPACE"
+    
     log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     log_step "🤖 SETTINGS.APK AI SUPPORT PATCH"
     log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -123,6 +126,7 @@ PYTHON_EOF
     fi
     
     # Cleanup
+    cd "$WORKSPACE"
     rm -rf "$WORK_DIR"
 }
 

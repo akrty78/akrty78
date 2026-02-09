@@ -8,6 +8,9 @@
 patch_provision_gms() {
     local SYSTEM_EXT_DUMP="$1"
     
+    # CRITICAL: Save workspace
+    local WORKSPACE="$GITHUB_WORKSPACE"
+    
     log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     log_step "📱 PROVISION GMS SUPPORT PATCH"
     log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -112,6 +115,7 @@ PYTHON_EOF
     fi
     
     # Cleanup
+    cd "$WORKSPACE"
     rm -rf "$WORK_DIR"
 }
 

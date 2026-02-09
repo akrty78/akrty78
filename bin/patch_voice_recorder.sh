@@ -8,33 +8,33 @@
 patch_voice_recorder() {
     local SYSTEM_DUMP="$1"
     
+    # CRITICAL: Save workspace
+    local WORKSPACE="$GITHUB_WORKSPACE"
+    
     log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     log_step "🎙️  AI VOICE RECORDER PATCH"
     log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     
-    # Find voice recorder APK (multiple possible names)
+    # Find voice recorder APK by package name
+    log_info "Searching for voice recorder app (package: com.android.soundrecorder)..."
+    
     RECORDER_APK=""
-    POSSIBLE_NAMES=(
-        "SoundRecorder"
-        "Recorder"
-        "MiuiSoundRecorder"
-        "VoiceRecorder"
-        "MIUIVoiceRecorder"
-    )
     
-    log_info "Searching for voice recorder app..."
-    
-    for name in "${POSSIBLE_NAMES[@]}"; do
-        FOUND=$(find "$SYSTEM_DUMP" -name "${name}.apk" -type f | head -n 1)
-        if [ ! -z "$FOUND" ]; then
-            RECORDER_APK="$FOUND"
-            log_success "✓ Found: $(basename "$RECORDER_APK")"
-            break
+    # Search all APKs for the target package
+    while IFS= read -r apk_file; do
+        if [ -f "$apk_file" ]; then
+            pkg_name=$(aapt dump badging "$apk_file" 2>/dev/null | grep "package: name=" | cut -d"'" -f2)
+            if [ "$pkg_name" == "com.android.soundrecorder" ]; then
+                RECORDER_APK="$apk_file"
+                log_success "✓ Found: $(basename "$RECORDER_APK") (package: $pkg_name)"
+                break
+            fi
         fi
-    done
+    done < <(find "$SYSTEM_DUMP" -name "*.apk" -type f)
     
     if [ -z "$RECORDER_APK" ]; then
-        log_warning "⚠️  Voice recorder app not found (tried: ${POSSIBLE_NAMES[*]})"
+        log_warning "⚠️  Voice recorder app not found (package: com.android.soundrecorder)"
+        cd "$WORKSPACE"
         return 0
     fi
     
@@ -205,7 +205,7 @@ PYTHON_EOF
         cp "${RECORDER_APK}.bak" "$RECORDER_APK"
     fi
     
-    cd "$GITHUB_WORKSPACE"
+    cd "$WORKSPACE"
     rm -rf "$WORK_DIR"
 }
 

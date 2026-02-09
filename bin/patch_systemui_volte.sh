@@ -8,6 +8,9 @@
 patch_systemui_volte() {
     local SYSTEM_EXT_DUMP="$1"
     
+    # CRITICAL: Save workspace
+    local WORKSPACE="$GITHUB_WORKSPACE"
+    
     log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     log_step "📶 SYSTEMUI VOLTE ICON PATCH"
     log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -228,7 +231,7 @@ PYTHON_EOF
         cp "${SYSTEMUI_APK}.bak" "$SYSTEMUI_APK"
     fi
     
-    cd "$GITHUB_WORKSPACE"
+    cd "$WORKSPACE"
     rm -rf "$WORK_DIR"
 }
 
