@@ -241,7 +241,7 @@ fi
 # Baksmali & Smali (for DEX editing)
 if [ ! -f "$BIN_DIR/baksmali.jar" ] || [ ! -f "$BIN_DIR/smali.jar" ]; then
     log_info "Downloading baksmali/smali v2.5.2..."
-    BAKSMALI_URL="https://github.com/JesusFreke/smali/releases/download/v2.5.2/baksmali-2.5.2.jar"
+    BAKSMALI_URL="https://github.com/baksmali/smali/releases/download/v3.0.9/baksmali-3.0.9-fat.jar"
     SMALI_URL="https://github.com/JesusFreke/smali/releases/download/v2.5.2/smali-2.5.2.jar"
     
     wget -q -O "$BIN_DIR/baksmali.jar" "$BAKSMALI_URL"
