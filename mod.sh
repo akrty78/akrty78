@@ -238,22 +238,65 @@ else
     log_info "payload-dumper-go already installed"
 fi
 
-# Baksmali & Smali (for DEX editing)
+# Baksmali & Smali (for DEX editing) - v3.0.9 FAT JAR
+log_info "Checking baksmali/smali tools..."
+
+# Remove potentially corrupted files
+if [ -f "$BIN_DIR/baksmali.jar" ]; then
+    if ! java -jar "$BIN_DIR/baksmali.jar" --version &>/dev/null; then
+        log_warning "Removing corrupted baksmali.jar..."
+        rm -f "$BIN_DIR/baksmali.jar"
+    fi
+fi
+
+if [ -f "$BIN_DIR/smali.jar" ]; then
+    if ! java -jar "$BIN_DIR/smali.jar" --version &>/dev/null; then
+        log_warning "Removing corrupted smali.jar..."
+        rm -f "$BIN_DIR/smali.jar"
+    fi
+fi
+
 if [ ! -f "$BIN_DIR/baksmali.jar" ] || [ ! -f "$BIN_DIR/smali.jar" ]; then
-    log_info "Downloading baksmali/smali v2.5.2..."
+    log_info "Downloading baksmali/smali v3.0.9 (fat jars)..."
     BAKSMALI_URL="https://github.com/baksmali/smali/releases/download/v3.0.9/baksmali-3.0.9-fat.jar"
-    SMALI_URL="https://github.com/JesusFreke/smali/releases/download/v2.5.2/smali-2.5.2.jar"
+    SMALI_URL="https://github.com/baksmali/smali/releases/download/v3.0.9/smali-3.0.9-fat.jar"
     
-    wget -q -O "$BIN_DIR/baksmali.jar" "$BAKSMALI_URL"
-    wget -q -O "$BIN_DIR/smali.jar" "$SMALI_URL"
+    # Download baksmali with retry
+    for i in 1 2 3; do
+        if wget -q --show-progress -O "$BIN_DIR/baksmali.jar" "$BAKSMALI_URL" 2>&1; then
+            if java -jar "$BIN_DIR/baksmali.jar" --version &>/dev/null; then
+                log_success "✓ baksmali.jar v3.0.9 validated"
+                break
+            else
+                log_warning "Download attempt $i failed validation, retrying..."
+                rm -f "$BIN_DIR/baksmali.jar"
+            fi
+        fi
+        sleep 2
+    done
     
-    if [ -f "$BIN_DIR/baksmali.jar" ] && [ -f "$BIN_DIR/smali.jar" ]; then
-        log_success "✓ baksmali/smali v2.5.2 installed"
+    # Download smali with retry
+    for i in 1 2 3; do
+        if wget -q --show-progress -O "$BIN_DIR/smali.jar" "$SMALI_URL" 2>&1; then
+            if java -jar "$BIN_DIR/smali.jar" --version &>/dev/null; then
+                log_success "✓ smali.jar v3.0.9 validated"
+                break
+            else
+                log_warning "Download attempt $i failed validation, retrying..."
+                rm -f "$BIN_DIR/smali.jar"
+            fi
+        fi
+        sleep 2
+    done
+    
+    if [ ! -f "$BIN_DIR/baksmali.jar" ] || [ ! -f "$BIN_DIR/smali.jar" ]; then
+        log_error "Failed to download valid baksmali/smali tools"
+        log_error "DEX patching will be DISABLED"
     else
-        log_error "Failed to download baksmali/smali tools"
+        log_success "✓ baksmali/smali v3.0.9 ready"
     fi
 else
-    log_info "baksmali/smali already installed"
+    log_success "✓ baksmali/smali already installed"
 fi
 
 # =========================================================
@@ -573,26 +616,33 @@ for part in $LOGICALS; do
         log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         
         DUMP_DIR="$GITHUB_WORKSPACE/${part}_dump"
-        mkdir -p "$DUMP_DIR" "mnt"
+        MNT_DIR="$GITHUB_WORKSPACE/mnt"
+        
+        # Ensure directories exist
+        mkdir -p "$DUMP_DIR"
+        mkdir -p "$MNT_DIR"
+        
+        # Ensure we're in workspace
+        cd "$GITHUB_WORKSPACE"
         
         log_info "Mounting ${part}.img..."
-        sudo erofsfuse "$IMAGES_DIR/${part}.img" "mnt"
-        if [ -z "$(sudo ls -A mnt)" ]; then
+        sudo erofsfuse "$IMAGES_DIR/${part}.img" "$MNT_DIR"
+        if [ -z "$(sudo ls -A "$MNT_DIR")" ]; then
             log_error "Mount failed for ${part}!"
-            sudo fusermount -uz "mnt"
+            sudo fusermount -uz "$MNT_DIR"
             continue
         fi
         log_success "Mounted successfully"
         
         log_info "Copying partition contents..."
         START_TIME=$(date +%s)
-        sudo cp -a "mnt/." "$DUMP_DIR/"
+        sudo cp -a "$MNT_DIR/." "$DUMP_DIR/"
         sudo chown -R $(whoami) "$DUMP_DIR"
         END_TIME=$(date +%s)
         COPY_TIME=$((END_TIME - START_TIME))
         log_success "Contents copied in ${COPY_TIME}s"
         
-        sudo fusermount -uz "mnt"
+        sudo fusermount -uz "$MNT_DIR"
         rm "$IMAGES_DIR/${part}.img"
 
         # A. DEBLOATER
@@ -874,6 +924,7 @@ PYTHON_EOF
             if [ -f "$BIN_DIR/patch_signature_verifier.sh" ]; then
                 source "$BIN_DIR/patch_signature_verifier.sh"
                 patch_signature_verification "$DUMP_DIR"
+                cd "$GITHUB_WORKSPACE"  # CRITICAL: Return to workspace
             else
                 log_warning "patch_signature_verifier.sh not found, skipping"
             fi
@@ -884,6 +935,7 @@ PYTHON_EOF
             if [ -f "$BIN_DIR/patch_voice_recorder.sh" ]; then
                 source "$BIN_DIR/patch_voice_recorder.sh"
                 patch_voice_recorder "$DUMP_DIR"
+                cd "$GITHUB_WORKSPACE"  # CRITICAL: Return to workspace
             else
                 log_warning "patch_voice_recorder.sh not found, skipping"
             fi
@@ -894,6 +946,7 @@ PYTHON_EOF
             if [ -f "$BIN_DIR/patch_settings_ai.sh" ]; then
                 source "$BIN_DIR/patch_settings_ai.sh"
                 patch_settings_ai_support "$DUMP_DIR"
+                cd "$GITHUB_WORKSPACE"  # CRITICAL: Return to workspace
             else
                 log_warning "patch_settings_ai.sh not found, skipping"
             fi
@@ -904,6 +957,7 @@ PYTHON_EOF
             if [ -f "$BIN_DIR/patch_provision_gms.sh" ]; then
                 source "$BIN_DIR/patch_provision_gms.sh"
                 patch_provision_gms "$DUMP_DIR"
+                cd "$GITHUB_WORKSPACE"  # CRITICAL: Return to workspace
             else
                 log_warning "patch_provision_gms.sh not found, skipping"
             fi
@@ -914,6 +968,7 @@ PYTHON_EOF
             if [ -f "$BIN_DIR/patch_miui_service.sh" ]; then
                 source "$BIN_DIR/patch_miui_service.sh"
                 patch_miui_service "$DUMP_DIR"
+                cd "$GITHUB_WORKSPACE"  # CRITICAL: Return to workspace
             else
                 log_warning "patch_miui_service.sh not found, skipping"
             fi
@@ -924,10 +979,12 @@ PYTHON_EOF
             if [ -f "$BIN_DIR/patch_systemui_volte.sh" ]; then
                 source "$BIN_DIR/patch_systemui_volte.sh"
                 patch_systemui_volte "$DUMP_DIR"
+                cd "$GITHUB_WORKSPACE"  # CRITICAL: Return to workspace
             else
                 log_warning "patch_systemui_volte.sh not found, skipping"
             fi
         fi
+
 
 
         # E. MIUI-FRAMEWORK (BAIDU->GBOARD)
