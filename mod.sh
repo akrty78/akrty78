@@ -239,64 +239,68 @@ else
 fi
 
 # Baksmali & Smali (for DEX editing) - v3.0.9 FAT JAR
-log_info "Checking baksmali/smali tools..."
+log_info "Setting up baksmali/smali tools..."
 
-# Remove potentially corrupted files
+# NUCLEAR OPTION: Delete potentially corrupt files first
 if [ -f "$BIN_DIR/baksmali.jar" ]; then
-    if ! java -jar "$BIN_DIR/baksmali.jar" --version &>/dev/null; then
-        log_warning "Removing corrupted baksmali.jar..."
-        rm -f "$BIN_DIR/baksmali.jar"
-    fi
+    log_warning "Removing existing baksmali.jar to ensure clean state..."
+    rm -f "$BIN_DIR/baksmali.jar"
 fi
 
 if [ -f "$BIN_DIR/smali.jar" ]; then
-    if ! java -jar "$BIN_DIR/smali.jar" --version &>/dev/null; then
-        log_warning "Removing corrupted smali.jar..."
-        rm -f "$BIN_DIR/smali.jar"
-    fi
+    log_warning "Removing existing smali.jar to ensure clean state..."
+    rm -f "$BIN_DIR/smali.jar"
 fi
 
-if [ ! -f "$BIN_DIR/baksmali.jar" ] || [ ! -f "$BIN_DIR/smali.jar" ]; then
-    log_info "Downloading baksmali/smali v3.0.9 (fat jars)..."
-    BAKSMALI_URL="https://github.com/baksmali/smali/releases/download/v3.0.9/baksmali-3.0.9-fat.jar"
-    SMALI_URL="https://github.com/baksmali/smali/releases/download/v3.0.9/smali-3.0.9-fat.jar"
-    
-    # Download baksmali with retry
-    for i in 1 2 3; do
-        if wget -q --show-progress -O "$BIN_DIR/baksmali.jar" "$BAKSMALI_URL" 2>&1; then
-            if java -jar "$BIN_DIR/baksmali.jar" --version &>/dev/null; then
-                log_success "✓ baksmali.jar v3.0.9 validated"
-                break
-            else
-                log_warning "Download attempt $i failed validation, retrying..."
-                rm -f "$BIN_DIR/baksmali.jar"
-            fi
+# Download fresh copies
+log_info "Downloading baksmali/smali v3.0.9 (fat jars)..."
+BAKSMALI_URL="https://github.com/baksmali/smali/releases/download/v3.0.9/baksmali-3.0.9-fat.jar"
+SMALI_URL="https://github.com/baksmali/smali/releases/download/v3.0.9/smali-3.0.9-fat.jar"
+
+# Download baksmali with retry
+BAKSMALI_SUCCESS=false
+for i in 1 2 3; do
+    log_info "Downloading baksmali.jar (attempt $i/3)..."
+    if wget -q --show-progress -O "$BIN_DIR/baksmali.jar" "$BAKSMALI_URL" 2>&1; then
+        # Verify file size (should be > 1MB)
+        FILE_SIZE=$(stat -c%s "$BIN_DIR/baksmali.jar" 2>/dev/null || echo "0")
+        if [ "$FILE_SIZE" -gt 1000000 ]; then
+            log_success "✓ baksmali.jar downloaded (${FILE_SIZE} bytes)"
+            BAKSMALI_SUCCESS=true
+            break
+        else
+            log_warning "Downloaded file too small ($FILE_SIZE bytes), retrying..."
+            rm -f "$BIN_DIR/baksmali.jar"
         fi
-        sleep 2
-    done
-    
-    # Download smali with retry
-    for i in 1 2 3; do
-        if wget -q --show-progress -O "$BIN_DIR/smali.jar" "$SMALI_URL" 2>&1; then
-            if java -jar "$BIN_DIR/smali.jar" --version &>/dev/null; then
-                log_success "✓ smali.jar v3.0.9 validated"
-                break
-            else
-                log_warning "Download attempt $i failed validation, retrying..."
-                rm -f "$BIN_DIR/smali.jar"
-            fi
-        fi
-        sleep 2
-    done
-    
-    if [ ! -f "$BIN_DIR/baksmali.jar" ] || [ ! -f "$BIN_DIR/smali.jar" ]; then
-        log_error "Failed to download valid baksmali/smali tools"
-        log_error "DEX patching will be DISABLED"
-    else
-        log_success "✓ baksmali/smali v3.0.9 ready"
     fi
+    sleep 2
+done
+
+# Download smali with retry
+SMALI_SUCCESS=false
+for i in 1 2 3; do
+    log_info "Downloading smali.jar (attempt $i/3)..."
+    if wget -q --show-progress -O "$BIN_DIR/smali.jar" "$SMALI_URL" 2>&1; then
+        # Verify file size (should be > 1MB)
+        FILE_SIZE=$(stat -c%s "$BIN_DIR/smali.jar" 2>/dev/null || echo "0")
+        if [ "$FILE_SIZE" -gt 1000000 ]; then
+            log_success "✓ smali.jar downloaded (${FILE_SIZE} bytes)"
+            SMALI_SUCCESS=true
+            break
+        else
+            log_warning "Downloaded file too small ($FILE_SIZE bytes), retrying..."
+            rm -f "$BIN_DIR/smali.jar"
+        fi
+    fi
+    sleep 2
+done
+
+if [ "$BAKSMALI_SUCCESS" = true ] && [ "$SMALI_SUCCESS" = true ]; then
+    log_success "✓ baksmali/smali v3.0.9 ready"
 else
-    log_success "✓ baksmali/smali already installed"
+    log_error "CRITICAL: Failed to download valid baksmali/smali tools"
+    log_error "DEX patching will be DISABLED"
+    exit 1
 fi
 
 # =========================================================
