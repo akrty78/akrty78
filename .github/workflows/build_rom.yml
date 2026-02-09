@@ -71,3 +71,7 @@ jobs:
           \`\`\`
           
           🔍 Check GitHub Actions for full details."
+      - name: Setup Baksmali
+        run: |
+            mkdir -p bin
+            curl -L https://github.com/baksmali/smali/releases/download/3.0.9/baksmali-3.0.9-fat.jar
