@@ -256,6 +256,17 @@ else
     log_info "baksmali/smali already installed"
 fi
 
+# =========================================================
+#  3.5. LOAD DEX PATCHER LIBRARY
+# =========================================================
+log_info "Loading DEX patcher library..."
+if [ -f "$BIN_DIR/dex_patcher_lib.sh" ]; then
+    source "$BIN_DIR/dex_patcher_lib.sh"
+    log_success "✓ DEX patcher library loaded"
+else
+    log_warning "DEX patcher library not found, patching features may be limited"
+fi
+
 # GApps
 if [ ! -d "gapps_src" ]; then
     log_info "Downloading GApps package..."
@@ -853,322 +864,71 @@ PYTHON_EOF
             fi
         fi
 
-        # D. SETTINGS.APK - AI SUPPORT ENABLER (DIRECT DEX PATCHING)
-        if [ "$part" == "system_ext" ]; then
-            log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            log_step "🤖 SETTINGS.APK AI SUPPORT PATCH"
-            log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            
-            SETTINGS_APK=$(find "$DUMP_DIR" -path "*/priv-app/Settings/Settings.apk" -type f | head -n 1)
-            
-            if [ ! -z "$SETTINGS_APK" ]; then
-                log_info "Located: $SETTINGS_APK"
-                APK_SIZE=$(du -h "$SETTINGS_APK" | cut -f1)
-                log_info "Original APK size: $APK_SIZE"
-                
-                # Create backup
-                log_info "Creating backup..."
-                cp "$SETTINGS_APK" "${SETTINGS_APK}.bak"
-                log_success "✓ Backup created: ${SETTINGS_APK}.bak"
-                
-                # Setup working directory
-                rm -rf "$TEMP_DIR/settings_work"
-                mkdir -p "$TEMP_DIR/settings_work"
-                cd "$TEMP_DIR/settings_work"
-                
-                # Extract classes.dex
-                log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                log_info "PHASE 1: DEX EXTRACTION"
-                log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                log_info "Extracting classes.dex from APK..."
-                
-                if unzip -q "$SETTINGS_APK" "classes*.dex" 2>&1; then
-                    DEX_COUNT=$(ls -1 classes*.dex 2>/dev/null | wc -l)
-                    log_success "✓ Extracted $DEX_COUNT DEX file(s)"
-                    
-                    for dex in classes*.dex; do
-                        DEX_SIZE=$(du -h "$dex" | cut -f1)
-                        log_info "  - $dex ($DEX_SIZE)"
-                    done
-                    
-                    # Determine which DEX contains our target class
-                    log_info "Searching for target class in DEX files..."
-                    TARGET_DEX=""
-                    
-                    for dex in classes*.dex; do
-                        log_info "Scanning $dex..."
-                        # Quick scan using strings
-                        if strings "$dex" | grep -q "InternalDeviceUtils"; then
-                            TARGET_DEX="$dex"
-                            log_success "✓ Found InternalDeviceUtils in $dex"
-                            break
-                        fi
-                    done
-                    
-                    if [ -z "$TARGET_DEX" ]; then
-                        log_warning "Target class not found in any DEX, defaulting to classes.dex"
-                        TARGET_DEX="classes.dex"
-                    fi
-                    
-                    # Decompile DEX with baksmali
-                    log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                    log_info "PHASE 2: DECOMPILATION (baksmali)"
-                    log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                    log_info "Decompiling $TARGET_DEX with baksmali..."
-                    START_TIME=$(date +%s)
-                    
-                    if java -jar "$BIN_DIR/baksmali.jar" d "$TARGET_DEX" -o "smali_out" 2>&1 | tee baksmali.log | grep -q "baksmali"; then
-                        END_TIME=$(date +%s)
-                        DECOMPILE_TIME=$((END_TIME - START_TIME))
-                        log_success "✓ Decompiled successfully in ${DECOMPILE_TIME}s"
-                        
-                        SMALI_COUNT=$(find smali_out -name "*.smali" | wc -l)
-                        log_info "Generated $SMALI_COUNT smali files"
-                        
-                        # Find target smali file
-                        log_info "Searching for InternalDeviceUtils.smali..."
-                        SMALI_FILE=$(find smali_out -type f -path "*/com/android/settings/InternalDeviceUtils.smali" | head -n 1)
-                        
-                        if [ -f "$SMALI_FILE" ]; then
-                            SMALI_REL_PATH=$(echo "$SMALI_FILE" | sed "s|smali_out/||")
-                            log_success "✓ Found: $SMALI_REL_PATH"
-                            SMALI_SIZE=$(wc -l < "$SMALI_FILE")
-                            log_info "File size: $SMALI_SIZE lines"
-                            
-                            # Show original method
-                            log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                            log_info "PHASE 3: METHOD PATCHING"
-                            log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                            log_info "Extracting original method signature..."
-                            
-                            ORIG_METHOD=$(grep -A 3 "\.method public static isAiSupported(Landroid/content/Context;)Z" "$SMALI_FILE" 2>/dev/null | head -n 4)
-                            if [ ! -z "$ORIG_METHOD" ]; then
-                                log_info "Original method found:"
-                                echo "$ORIG_METHOD" | while IFS= read -r line; do
-                                    log_info "  $line"
-                                done
-                            fi
-                            
-                            # Create Python patcher
-                            log_info "Preparing method replacement patcher..."
-                            cat > "dex_patcher.py" <<'PYTHON_EOF'
-import sys
-import re
 
-def patch_ai_support(smali_file):
-    """Replace isAiSupported method to always return true"""
-    
-    print(f"[ACTION] Reading {smali_file}")
-    with open(smali_file, 'r', encoding='utf-8') as f:
-        content = f.read()
-    
-    original_length = len(content)
-    print(f"[ACTION] Original file size: {original_length} bytes")
-    
-    # New optimized method that always returns true
-    new_method = """.method public static isAiSupported(Landroid/content/Context;)Z
-    .registers 1
-
-    const/4 v0, 0x1
-
-    return v0
-.end method"""
-    
-    # Pattern to match the entire isAiSupported method
-    print("[ACTION] Searching for isAiSupported method...")
-    pattern = r'\.method\s+public\s+static\s+isAiSupported\(Landroid/content/Context;\)Z.*?\.end\s+method'
-    
-    matches = re.findall(pattern, content, flags=re.DOTALL)
-    if matches:
-        orig_lines = matches[0].count('\n') + 1
-        print(f"[ACTION] Found method ({orig_lines} lines)")
-        print("[ACTION] Original method structure:")
-        # Show first few lines
-        orig_preview = matches[0].split('\n')[:6]
-        for line in orig_preview:
-            if line.strip():
-                print(f"         {line}")
-        if orig_lines > 6:
-            print(f"         ... (+{orig_lines - 6} more lines)")
-    else:
-        print("[ERROR] Method not found!")
-        return False
-    
-    # Perform replacement
-    print("[ACTION] Replacing method with AI-enabled version...")
-    new_content = re.sub(pattern, new_method, content, flags=re.DOTALL)
-    
-    if new_content != content:
-        new_length = len(new_content)
-        size_diff = original_length - new_length
-        print(f"[ACTION] New file size: {new_length} bytes (reduced by {size_diff} bytes)")
+        # =====================================================
+        #  MODULAR PATCHING FEATURES (ALL 6)
+        # =====================================================
         
-        # Show new method
-        print("[ACTION] New method structure:")
-        for line in new_method.split('\n'):
-            if line.strip():
-                print(f"         {line}")
-        
-        print(f"[ACTION] Writing patched content to {smali_file}")
-        with open(smali_file, 'w', encoding='utf-8') as f:
-            f.write(new_content)
-        
-        print("[SUCCESS] Method replacement completed!")
-        return True
-    else:
-        print("[ERROR] No changes made - pattern didn't match")
-        return False
-
-if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("[ERROR] Usage: python3 dex_patcher.py <smali_file>")
-        sys.exit(1)
-    
-    smali_file = sys.argv[1]
-    success = patch_ai_support(smali_file)
-    sys.exit(0 if success else 1)
-PYTHON_EOF
-                            
-                            log_success "✓ Patcher ready"
-                            
-                            # Execute patcher
-                            log_info "Executing method replacement..."
-                            
-                            if python3 "dex_patcher.py" "$SMALI_FILE" 2>&1 | while IFS= read -r line; do
-                                if [[ "$line" == *"[ACTION]"* ]]; then
-                                    log_info "${line#*[ACTION] }"
-                                elif [[ "$line" == *"[SUCCESS]"* ]]; then
-                                    log_success "${line#*[SUCCESS] }"
-                                elif [[ "$line" == *"[ERROR]"* ]]; then
-                                    log_error "${line#*[ERROR] }"
-                                else
-                                    echo "         $line"
-                                fi
-                            done; then
-                                PATCH_SUCCESS=true
-                            else
-                                PATCH_SUCCESS=false
-                            fi
-                            
-                            if [ "$PATCH_SUCCESS" = true ]; then
-                                log_success "✓ Method patched successfully!"
-                                
-                                # Verify patch
-                                log_info "Verifying patch..."
-                                if grep -q 'const/4 v0, 0x1' "$SMALI_FILE" && grep -q 'return v0' "$SMALI_FILE"; then
-                                    log_success "✓ Verification passed: AI support enabled"
-                                else
-                                    log_error "✗ Verification failed"
-                                fi
-                                
-                                # Recompile with smali
-                                log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                                log_info "PHASE 4: RECOMPILATION (smali)"
-                                log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                                log_info "Recompiling smali to DEX with smali assembler..."
-                                START_TIME=$(date +%s)
-                                
-                                if java -jar "$BIN_DIR/smali.jar" a "smali_out" -o "classes_patched.dex" 2>&1 | tee smali.log | grep -q "smali"; then
-                                    END_TIME=$(date +%s)
-                                    COMPILE_TIME=$((END_TIME - START_TIME))
-                                    log_success "✓ Recompiled successfully in ${COMPILE_TIME}s"
-                                    
-                                    if [ -f "classes_patched.dex" ]; then
-                                        PATCHED_DEX_SIZE=$(du -h "classes_patched.dex" | cut -f1)
-                                        log_info "Patched DEX size: $PATCHED_DEX_SIZE"
-                                        
-                                        # Inject back into APK
-                                        log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                                        log_info "PHASE 5: DEX INJECTION"
-                                        log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                                        log_info "Injecting patched DEX into APK..."
-                                        log_info "Method: Direct replacement (MT Manager style)"
-                                        
-                                        # Copy original APK
-                                        cp "$SETTINGS_APK" "Settings_temp.apk"
-                                        
-                                        # Remove old DEX and inject new one
-                                        log_info "Removing original $TARGET_DEX from APK..."
-                                        zip -q -d "Settings_temp.apk" "$TARGET_DEX" 2>&1
-                                        
-                                        log_info "Injecting patched DEX as $TARGET_DEX..."
-                                        cp "classes_patched.dex" "$TARGET_DEX"
-                                        zip -q -u "Settings_temp.apk" "$TARGET_DEX" 2>&1
-                                        
-                                        if [ -f "Settings_temp.apk" ]; then
-                                            FINAL_SIZE=$(du -h "Settings_temp.apk" | cut -f1)
-                                            log_success "✓ DEX injection completed"
-                                            log_info "Final APK size: $FINAL_SIZE"
-                                            
-                                            # Install patched APK
-                                            log_info "Installing patched APK..."
-                                            mv "Settings_temp.apk" "$SETTINGS_APK"
-                                            log_success "✓ Settings.apk successfully patched!"
-                                            
-                                            log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                                            log_success "✅ AI SUPPORT ENABLED"
-                                            log_success "   Method: isAiSupported() → Always True"
-                                            log_success "   Effect: Xiaomi AI features unlocked"
-                                            log_success "   Status: No manifest modification required"
-                                            log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                                        else
-                                            log_error "✗ APK injection failed"
-                                            log_info "Restoring original from backup..."
-                                            cp "${SETTINGS_APK}.bak" "$SETTINGS_APK"
-                                            log_warning "Original restored"
-                                        fi
-                                    else
-                                        log_error "✗ Patched DEX not found after compilation"
-                                        log_info "Restoring original from backup..."
-                                        cp "${SETTINGS_APK}.bak" "$SETTINGS_APK"
-                                        log_warning "Original restored"
-                                    fi
-                                else
-                                    log_error "✗ Smali recompilation failed"
-                                    if [ -f "smali.log" ]; then
-                                        log_error "Compilation errors:"
-                                        tail -10 smali.log | while IFS= read -r line; do
-                                            log_error "   $line"
-                                        done
-                                    fi
-                                    log_info "Restoring original from backup..."
-                                    cp "${SETTINGS_APK}.bak" "$SETTINGS_APK"
-                                    log_warning "Original restored"
-                                fi
-                            else
-                                log_error "✗ Method patching failed"
-                                log_info "Restoring original from backup..."
-                                cp "${SETTINGS_APK}.bak" "$SETTINGS_APK"
-                                log_warning "Original restored"
-                            fi
-                        else
-                            log_error "✗ InternalDeviceUtils.smali not found"
-                            log_info "Expected path: */com/android/settings/InternalDeviceUtils.smali"
-                        fi
-                    else
-                        END_TIME=$(date +%s)
-                        DECOMPILE_TIME=$((END_TIME - START_TIME))
-                        log_error "✗ Baksmali decompilation failed (${DECOMPILE_TIME}s)"
-                        
-                        if [ -f "baksmali.log" ]; then
-                            log_error "Decompile errors:"
-                            tail -10 baksmali.log | while IFS= read -r line; do
-                                log_error "   $line"
-                            done
-                        fi
-                    fi
-                else
-                    log_error "✗ Failed to extract DEX files from APK"
-                fi
-                
-                # Cleanup
-                cd "$GITHUB_WORKSPACE"
-                rm -rf "$TEMP_DIR/settings_work"
+        # D1. SIGNATURE VERIFICATION DISABLER (system partition)
+        if [ "$part" == "system" ]; then
+            if [ -f "$BIN_DIR/patch_signature_verifier.sh" ]; then
+                source "$BIN_DIR/patch_signature_verifier.sh"
+                patch_signature_verification "$DUMP_DIR"
             else
-                log_warning "⚠️  Settings.apk not found in system_ext/priv-app"
-                log_info "This may be normal for some ROM versions"
+                log_warning "patch_signature_verifier.sh not found, skipping"
             fi
         fi
+        
+        # D2. VOICE RECORDER AI (system partition)
+        if [ "$part" == "system" ]; then
+            if [ -f "$BIN_DIR/patch_voice_recorder.sh" ]; then
+                source "$BIN_DIR/patch_voice_recorder.sh"
+                patch_voice_recorder "$DUMP_DIR"
+            else
+                log_warning "patch_voice_recorder.sh not found, skipping"
+            fi
+        fi
+        
+        # D3. SETTINGS AI SUPPORT (system_ext partition) - FIXED
+        if [ "$part" == "system_ext" ]; then
+            if [ -f "$BIN_DIR/patch_settings_ai.sh" ]; then
+                source "$BIN_DIR/patch_settings_ai.sh"
+                patch_settings_ai_support "$DUMP_DIR"
+            else
+                log_warning "patch_settings_ai.sh not found, skipping"
+            fi
+        fi
+        
+        # D4. PROVISION GMS SUPPORT (system_ext partition)
+        if [ "$part" == "system_ext" ]; then
+            if [ -f "$BIN_DIR/patch_provision_gms.sh" ]; then
+                source "$BIN_DIR/patch_provision_gms.sh"
+                patch_provision_gms "$DUMP_DIR"
+            else
+                log_warning "patch_provision_gms.sh not found, skipping"
+            fi
+        fi
+        
+        # D5. MIUI SERVICE CN→GLOBAL (system_ext partition)
+        if [ "$part" == "system_ext" ]; then
+            if [ -f "$BIN_DIR/patch_miui_service.sh" ]; then
+                source "$BIN_DIR/patch_miui_service.sh"
+                patch_miui_service "$DUMP_DIR"
+            else
+                log_warning "patch_miui_service.sh not found, skipping"
+            fi
+        fi
+        
+        # D6. SYSTEMUI VOLTE ICON (system_ext partition)
+        if [ "$part" == "system_ext" ]; then
+            if [ -f "$BIN_DIR/patch_systemui_volte.sh" ]; then
+                source "$BIN_DIR/patch_systemui_volte.sh"
+                patch_systemui_volte "$DUMP_DIR"
+            else
+                log_warning "patch_systemui_volte.sh not found, skipping"
+            fi
+        fi
+
 
         # E. MIUI-FRAMEWORK (BAIDU->GBOARD)
         if [ "$part" == "system_ext" ]; then
