@@ -106,6 +106,14 @@ recompile_dex() {
     local SMALI_DIR="$1"
     local OUTPUT_DEX="$2"
     
+    # Check if smali.jar exists
+    if [ ! -f "$PATCHER_BIN_DIR/smali.jar" ]; then
+        log_error "smali.jar not found - cannot recompile"
+        log_error "This usually means smali.jar was not uploaded to Google Drive"
+        log_error "Please upload smali.jar and update SMALI_GDRIVE ID in script"
+        return 1
+    fi
+    
     log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     log_info "PHASE 4: RECOMPILATION (smali)"
     log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -265,10 +273,41 @@ patch_dex_file() {
         return 1
     fi
     
-    # Determine which DEX contains target class
-    TARGET_DEX="classes.dex"
+    # Search ALL DEX files for target class
+    log_info "Searching for target class across all DEX files..."
+    TARGET_DEX=""
+    CLASS_SMALI_PATH="${TARGET_CLASS}.smali"
     
-    # Decompile
+    for dex in classes*.dex; do
+        if [ ! -f "$dex" ]; then
+            continue
+        fi
+        
+        log_info "Checking $dex..."
+        
+        # Quick decompile to test
+        rm -rf "smali_test" 2>/dev/null
+        if java -jar "$PATCHER_BIN_DIR/baksmali.jar" d "$dex" -o "smali_test" &>/dev/null; then
+            # Check if target class exists (handle both / and filesystem paths)
+            FOUND=$(find "smali_test" -name "$(basename "$CLASS_SMALI_PATH")" -path "*${TARGET_CLASS}.smali" 2>/dev/null | head -n 1)
+            
+            if [ ! -z "$FOUND" ]; then
+                TARGET_DEX="$dex"
+                log_success "✓ Target class found in $dex"
+                rm -rf "smali_test"
+                break
+            fi
+            rm -rf "smali_test"
+        fi
+    done
+    
+    if [ -z "$TARGET_DEX" ]; then
+        log_error "✗ Class $TARGET_CLASS not found in any DEX file"
+        cd "$ORIGINAL_DIR"
+        return 1
+    fi
+    
+    # Decompile the correct DEX
     if ! decompile_dex "$TARGET_DEX" "smali_out"; then
         cd "$ORIGINAL_DIR"
         return 1

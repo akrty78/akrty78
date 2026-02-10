@@ -15,27 +15,44 @@ patch_voice_recorder() {
     log_step "🎙️  AI VOICE RECORDER PATCH"
     log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     
-    # Find voice recorder APK by package name (same method as debloater)
-    log_info "Searching for voice recorder app (package: com.android.soundrecorder)..."
+    # Find voice recorder APK by package name (try multiple possibilities)
+    log_info "Searching for voice recorder app..."
     
     RECORDER_APK=""
+    POSSIBLE_PACKAGES=(
+        "com.android.soundrecorder"
+        "com.miui.soundrecorder"
+        "com.xiaomi.soundrecorder"
+        "com.android.recorder"
+    )
     
-    # Search all APKs for the target package
-    find "$SYSTEM_DUMP" -type f -name "*.apk" | while read apk_file; do
-        pkg_name=$(aapt dump badging "$apk_file" 2>/dev/null | grep "package: name=" | cut -d"'" -f2)
-        if [ "$pkg_name" == "com.android.soundrecorder" ]; then
-            echo "$apk_file" > "$TEMP_DIR/recorder_apk_path.tmp"
+    # Search all APKs for any of the target packages
+    for pkg_name in "${POSSIBLE_PACKAGES[@]}"; do
+        log_info "Trying package: $pkg_name"
+        
+        find "$SYSTEM_DUMP" -type f -name "*.apk" | while read apk_file; do
+            found_pkg=$(aapt dump badging "$apk_file" 2>/dev/null | grep "package: name=" | cut -d"'" -f2)
+            if [ "$found_pkg" == "$pkg_name" ]; then
+                echo "$apk_file" > "$TEMP_DIR/recorder_apk_path.tmp"
+                echo "$found_pkg" > "$TEMP_DIR/recorder_pkg_name.tmp"
+                break
+            fi
+        done
+        
+        if [ -f "$TEMP_DIR/recorder_apk_path.tmp" ]; then
+            RECORDER_APK=$(cat "$TEMP_DIR/recorder_apk_path.tmp")
+            FOUND_PKG=$(cat "$TEMP_DIR/recorder_pkg_name.tmp")
+            rm -f "$TEMP_DIR/recorder_apk_path.tmp" "$TEMP_DIR/recorder_pkg_name.tmp"
+            log_success "✓ Found: $(basename "$RECORDER_APK")"
+            log_info "Package: $FOUND_PKG"
+            log_info "Located: $RECORDER_APK"
             break
         fi
     done
     
-    if [ -f "$TEMP_DIR/recorder_apk_path.tmp" ]; then
-        RECORDER_APK=$(cat "$TEMP_DIR/recorder_apk_path.tmp")
-        rm -f "$TEMP_DIR/recorder_apk_path.tmp"
-        log_success "✓ Found: $(basename "$RECORDER_APK")"
-        log_info "Located: $RECORDER_APK"
-    else
-        log_warning "⚠️  Voice recorder app not found (package: com.android.soundrecorder)"
+    if [ -z "$RECORDER_APK" ]; then
+        log_warning "⚠️  Voice recorder app not found"
+        log_info "Tried packages: ${POSSIBLE_PACKAGES[*]}"
         cd "$WORKSPACE"
         return 0
     fi
