@@ -51,6 +51,13 @@ decompile_dex() {
     local DEX_FILE="$1"
     local OUTPUT_DIR="$2"
     
+    # Check if baksmali exists
+    if [ ! -f "$PATCHER_BIN_DIR/baksmali.jar" ]; then
+        log_error "baksmali.jar not found - cannot decompile"
+        log_error "This usually means the download failed during setup"
+        return 1
+    fi
+    
     log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     log_info "PHASE 2: DECOMPILATION (baksmali)"
     log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
