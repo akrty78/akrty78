@@ -15,13 +15,19 @@ patch_miui_service() {
     log_step "🌏 MIUI SERVICE CN→GLOBAL PATCH"
     log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     
-    # Find miui-service.jar (search in multiple locations)
-    log_info "Searching for miui-service.jar..."
+    # Find miui-services.jar (exclude hovermode variants)
+    log_info "Searching for miui-services.jar..."
     
-    MIUI_SERVICE_JAR=$(find "$SYSTEM_EXT_DUMP" -name "miui-service*.jar" -type f | head -n 1)
+    # Try exact name first
+    MIUI_SERVICE_JAR=$(find "$SYSTEM_EXT_DUMP" -name "miui-services.jar" -type f | head -n 1)
     
     if [ -z "$MIUI_SERVICE_JAR" ]; then
-        log_warning "⚠️  miui-service.jar not found in system_ext"
+        # Try with wildcard but exclude .hovermode
+        MIUI_SERVICE_JAR=$(find "$SYSTEM_EXT_DUMP" -name "miui-service*.jar" -type f | grep -v "hovermode" | grep -v "\.odex" | head -n 1)
+    fi
+    
+    if [ -z "$MIUI_SERVICE_JAR" ]; then
+        log_warning "⚠️  miui-services.jar not found in system_ext"
         log_info "This may be normal for some ROM versions"
         cd "$WORKSPACE"
         return 0

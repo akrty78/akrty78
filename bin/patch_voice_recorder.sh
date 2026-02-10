@@ -15,30 +15,30 @@ patch_voice_recorder() {
     log_step "🎙️  AI VOICE RECORDER PATCH"
     log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     
-    # Find voice recorder APK by package name
+    # Find voice recorder APK by package name (same method as debloater)
     log_info "Searching for voice recorder app (package: com.android.soundrecorder)..."
     
     RECORDER_APK=""
     
     # Search all APKs for the target package
-    while IFS= read -r apk_file; do
-        if [ -f "$apk_file" ]; then
-            pkg_name=$(aapt dump badging "$apk_file" 2>/dev/null | grep "package: name=" | cut -d"'" -f2)
-            if [ "$pkg_name" == "com.android.soundrecorder" ]; then
-                RECORDER_APK="$apk_file"
-                log_success "✓ Found: $(basename "$RECORDER_APK") (package: $pkg_name)"
-                break
-            fi
+    find "$SYSTEM_DUMP" -type f -name "*.apk" | while read apk_file; do
+        pkg_name=$(aapt dump badging "$apk_file" 2>/dev/null | grep "package: name=" | cut -d"'" -f2)
+        if [ "$pkg_name" == "com.android.soundrecorder" ]; then
+            echo "$apk_file" > "$TEMP_DIR/recorder_apk_path.tmp"
+            break
         fi
-    done < <(find "$SYSTEM_DUMP" -name "*.apk" -type f)
+    done
     
-    if [ -z "$RECORDER_APK" ]; then
+    if [ -f "$TEMP_DIR/recorder_apk_path.tmp" ]; then
+        RECORDER_APK=$(cat "$TEMP_DIR/recorder_apk_path.tmp")
+        rm -f "$TEMP_DIR/recorder_apk_path.tmp"
+        log_success "✓ Found: $(basename "$RECORDER_APK")"
+        log_info "Located: $RECORDER_APK"
+    else
         log_warning "⚠️  Voice recorder app not found (package: com.android.soundrecorder)"
         cd "$WORKSPACE"
         return 0
     fi
-    
-    log_info "Located: $RECORDER_APK"
     
     # Create patcher script
     PATCHER_SCRIPT="$TEMP_DIR/voice_recorder_patcher.py"
