@@ -121,6 +121,10 @@ recompile_dex() {
     
     START_TIME=$(date +%s)
     
+    # Count original classes for verification
+    ORIG_SMALI_COUNT=$(find "$SMALI_DIR" -name "*.smali" | wc -l)
+    log_info "Original smali files: $ORIG_SMALI_COUNT"
+    
     # Add --api 35 to support Android 16 API level
     # Prevents "Hidden API restrictions are only supported on api 29" errors
     if java -jar "$PATCHER_BIN_DIR/smali.jar" a "$SMALI_DIR" -o "$OUTPUT_DEX" --api 35 2>&1 | tee smali.log; then
@@ -129,6 +133,53 @@ recompile_dex() {
         
         if [ -f "$OUTPUT_DEX" ]; then
             PATCHED_DEX_SIZE=$(du -h "$OUTPUT_DEX" | cut -f1)
+            
+            # CRITICAL: Verify class count in recompiled DEX
+            if command -v dexdump &>/dev/null; then
+                RECOMPILED_CLASS_COUNT=$(dexdump -f "$OUTPUT_DEX" 2>/dev/null | grep "Class descriptor" | wc -l)
+                
+                if [ "$RECOMPILED_CLASS_COUNT" -gt 0 ]; then
+                    # Allow small margin (99%) for inner class variations
+                    MIN_EXPECTED=$((ORIG_SMALI_COUNT * 99 / 100))
+                    
+                    log_info "Recompiled classes: $RECOMPILED_CLASS_COUNT"
+                    
+                    if [ "$RECOMPILED_CLASS_COUNT" -lt "$MIN_EXPECTED" ]; then
+                        MISSING=$((ORIG_SMALI_COUNT - RECOMPILED_CLASS_COUNT))
+                        log_error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                        log_error "✗ CRITICAL: SILENT COMPILATION FAILURE!"
+                        log_error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                        log_error "Original classes: $ORIG_SMALI_COUNT"
+                        log_error "Recompiled classes: $RECOMPILED_CLASS_COUNT"
+                        log_error "MISSING CLASSES: $MISSING"
+                        log_error ""
+                        log_error "Smali skipped $MISSING classes due to errors!"
+                        log_error "Injecting this DEX would cause BOOTLOOP!"
+                        log_error "ABORTING to prevent corruption!"
+                        log_error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                        
+                        # Show compilation errors
+                        if [ -f "smali.log" ]; then
+                            log_error ""
+                            log_error "Compilation errors (first 20):"
+                            grep -E "error|Error|ERROR|\[" smali.log | grep -v "^I/" | head -20 | while read line; do
+                                log_error "   $line"
+                            done
+                        fi
+                        
+                        rm -f "$OUTPUT_DEX"
+                        return 1
+                    else
+                        log_success "✓ Class count verified: $RECOMPILED_CLASS_COUNT/$ORIG_SMALI_COUNT"
+                    fi
+                else
+                    log_warning "Could not verify class count (dexdump failed)"
+                fi
+            else
+                log_warning "dexdump not available - cannot verify class count"
+                log_warning "THIS IS DANGEROUS - recompilation may have failed silently!"
+            fi
+            
             log_success "✓ Recompiled successfully in ${COMPILE_TIME}s"
             log_info "Patched DEX size: $PATCHED_DEX_SIZE"
             return 0

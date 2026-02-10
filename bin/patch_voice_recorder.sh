@@ -193,8 +193,28 @@ PYTHON_EOF
         log_info "PHASE 4: RECOMPILATION"
         log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         
+        # Count original classes
+        ORIG_SMALI_COUNT=$(find smali_out -name "*.smali" | wc -l)
+        log_info "Original smali files: $ORIG_SMALI_COUNT"
+        
         # Add --api 35 for Android 16 support
         if java -jar "$BIN_DIR/smali.jar" a "smali_out" -o "classes_patched.dex" --api 35 2>&1 | tee smali.log; then
+            
+            # Verify class count
+            if command -v dexdump &>/dev/null; then
+                RECOMPILED_COUNT=$(dexdump -f "classes_patched.dex" 2>/dev/null | grep "Class descriptor" | wc -l)
+                MIN_EXPECTED=$((ORIG_SMALI_COUNT * 99 / 100))
+                
+                if [ "$RECOMPILED_COUNT" -gt 0 ] && [ "$RECOMPILED_COUNT" -lt "$MIN_EXPECTED" ]; then
+                    log_error "✗ CRITICAL: Recompiled only $RECOMPILED_COUNT/$ORIG_SMALI_COUNT classes!"
+                    log_error "Missing $((ORIG_SMALI_COUNT - RECOMPILED_COUNT)) classes - would cause crashes!"
+                    cp "${RECORDER_APK}.bak" "$RECORDER_APK"
+                    cd "$WORKSPACE"
+                    return 1
+                fi
+                log_success "✓ Class count verified: $RECOMPILED_COUNT classes"
+            fi
+            
             log_success "✓ Recompiled successfully"
             
             # Inject

@@ -207,12 +207,35 @@ PYTHON_EOF
                     out_dex="classes${dex_num}.dex"
                 fi
                 
+                # Count original classes
+                ORIG_SMALI_COUNT=$(find "$smali_dir" -name "*.smali" | wc -l)
+                
                 log_info "Recompiling $smali_dir → $out_dex..."
+                log_info "Original smali files: $ORIG_SMALI_COUNT"
+                
                 java -jar "$BIN_DIR/smali.jar" a "$smali_dir" -o "${out_dex}.new" --api 35 2>&1 | tee -a smali.log
                 
                 if [ -f "${out_dex}.new" ]; then
+                    # Verify class count
+                    if command -v dexdump &>/dev/null; then
+                        RECOMPILED_COUNT=$(dexdump -f "${out_dex}.new" 2>/dev/null | grep "Class descriptor" | wc -l)
+                        MIN_EXPECTED=$((ORIG_SMALI_COUNT * 99 / 100))
+                        
+                        if [ "$RECOMPILED_COUNT" -gt 0 ] && [ "$RECOMPILED_COUNT" -lt "$MIN_EXPECTED" ]; then
+                            log_error "✗ CRITICAL: $out_dex has only $RECOMPILED_COUNT/$ORIG_SMALI_COUNT classes!"
+                            log_error "Missing $((ORIG_SMALI_COUNT - RECOMPILED_COUNT)) classes!"
+                            cd "$WORKSPACE"
+                            return 1
+                        fi
+                        log_info "Class count verified: $RECOMPILED_COUNT"
+                    fi
+                    
                     mv "${out_dex}.new" "$out_dex"
                     log_success "✓ Recompiled $out_dex"
+                else
+                    log_error "✗ Failed to recompile $smali_dir"
+                    cd "$WORKSPACE"
+                    return 1
                 fi
             fi
         done
