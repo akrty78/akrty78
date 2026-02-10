@@ -212,7 +212,7 @@ PYTHON_EOF
         log_info "PHASE 4: RECOMPILATION"
         log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         
-        if java -jar "$BIN_DIR/smali.jar" a "smali_out" -o "classes_patched.dex" 2>&1 | tee smali.log; then
+        if java -jar "$BIN_DIR/smali.jar" a "smali_out" -o "classes_patched.dex" --api 35 2>&1 | tee smali.log; then
             log_success "✓ Recompiled successfully"
             
             # Inject back

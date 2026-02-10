@@ -208,7 +208,7 @@ PYTHON_EOF
                 fi
                 
                 log_info "Recompiling $smali_dir → $out_dex..."
-                java -jar "$BIN_DIR/smali.jar" a "$smali_dir" -o "${out_dex}.new" 2>&1 | tee -a smali.log
+                java -jar "$BIN_DIR/smali.jar" a "$smali_dir" -o "${out_dex}.new" --api 35 2>&1 | tee -a smali.log
                 
                 if [ -f "${out_dex}.new" ]; then
                     mv "${out_dex}.new" "$out_dex"

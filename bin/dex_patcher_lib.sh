@@ -121,7 +121,9 @@ recompile_dex() {
     
     START_TIME=$(date +%s)
     
-    if java -jar "$PATCHER_BIN_DIR/smali.jar" a "$SMALI_DIR" -o "$OUTPUT_DEX" 2>&1 | tee smali.log; then
+    # Add --api 35 to support Android 16 API level
+    # Prevents "Hidden API restrictions are only supported on api 29" errors
+    if java -jar "$PATCHER_BIN_DIR/smali.jar" a "$SMALI_DIR" -o "$OUTPUT_DEX" --api 35 2>&1 | tee smali.log; then
         END_TIME=$(date +%s)
         COMPILE_TIME=$((END_TIME - START_TIME))
         

@@ -18,9 +18,9 @@ patch_voice_recorder() {
     # Find voice recorder APK by package name (try multiple possibilities)
     log_info "Searching for voice recorder app..."
     
-    RECORDER_APK="MIUISOundRecorderTargetSdk30.apk"
+    RECORDER_APK=""
     POSSIBLE_PACKAGES=(
-        "Recorder.apk"
+        "com.android.soundrecorder"
         "com.miui.soundrecorder"
         "com.xiaomi.soundrecorder"
         "com.android.recorder"
@@ -193,7 +193,8 @@ PYTHON_EOF
         log_info "PHASE 4: RECOMPILATION"
         log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         
-        if java -jar "$BIN_DIR/smali.jar" a "smali_out" -o "classes_patched.dex" 2>&1 | tee smali.log; then
+        # Add --api 35 for Android 16 support
+        if java -jar "$BIN_DIR/smali.jar" a "smali_out" -o "classes_patched.dex" --api 35 2>&1 | tee smali.log; then
             log_success "✓ Recompiled successfully"
             
             # Inject
