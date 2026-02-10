@@ -238,68 +238,42 @@ else
     log_info "payload-dumper-go already installed"
 fi
 
-# Baksmali & Smali (for DEX editing) - v3.0.9 FAT JAR
+# Baksmali & Smali (from Google Drive)
 log_info "Setting up baksmali/smali tools..."
 
 # Clean slate
 rm -f "$BIN_DIR/baksmali.jar" "$BIN_DIR/smali.jar" 2>/dev/null
 
-# Download URLs
-BAKSMALI_URL="https://github.com/baksmali/smali/releases/download/v3.0.9/baksmali-3.0.9-fat.jar"
-SMALI_URL="https://github.com/baksmali/smali/releases/download/v3.0.9/smali-3.0.9-fat.jar"
+# Google Drive links
+BAKSMALI_GDRIVE="1RS_lmqeVoMO4-mnCQ-BOV5A9qoa_8VHu"  # Your baksmali.jar
+SMALI_GDRIVE="YOUR_SMALI_JAR_ID"  # Need smali.jar ID too
 
-log_info "Downloading baksmali v3.0.9..."
-if wget -O "$BIN_DIR/baksmali.jar" "$BAKSMALI_URL" 2>&1 | grep -v "^--" | grep -E "(saved|Downloaded|failed|error)" || true; then
+log_info "Downloading baksmali.jar from Google Drive..."
+if gdown "$BAKSMALI_GDRIVE" -O "$BIN_DIR/baksmali.jar" --fuzzy -q 2>&1 | grep -E "(Download|saved)" || true; then
     if [ -f "$BIN_DIR/baksmali.jar" ]; then
         FILE_SIZE=$(stat -c%s "$BIN_DIR/baksmali.jar" 2>/dev/null || echo "0")
         if [ "$FILE_SIZE" -gt 1000000 ]; then
             log_success "✓ baksmali.jar: ${FILE_SIZE} bytes"
         else
-            log_error "baksmali.jar is too small (${FILE_SIZE} bytes) - probably an error page"
-            log_error "URL: $BAKSMALI_URL"
-            log_warning "Trying alternative method..."
-            
-            # Try with curl as fallback
-            if command -v curl &>/dev/null; then
-                log_info "Trying with curl instead..."
-                curl -L -o "$BIN_DIR/baksmali.jar" "$BAKSMALI_URL" 2>&1 | tail -5
-                FILE_SIZE=$(stat -c%s "$BIN_DIR/baksmali.jar" 2>/dev/null || echo "0")
-                if [ "$FILE_SIZE" -gt 1000000 ]; then
-                    log_success "✓ baksmali.jar: ${FILE_SIZE} bytes (via curl)"
-                else
-                    log_error "FAILED: Cannot download baksmali.jar"
-                    rm -f "$BIN_DIR/baksmali.jar"
-                fi
-            fi
+            log_error "baksmali.jar download failed (${FILE_SIZE} bytes)"
         fi
     fi
+else
+    log_error "Failed to download baksmali.jar from Google Drive"
 fi
 
-log_info "Downloading smali v3.0.9..."
-if wget -O "$BIN_DIR/smali.jar" "$SMALI_URL" 2>&1 | grep -v "^--" | grep -E "(saved|Downloaded|failed|error)" || true; then
+log_info "Downloading smali.jar from Google Drive..."
+if gdown "$SMALI_GDRIVE" -O "$BIN_DIR/smali.jar" --fuzzy -q 2>&1 | grep -E "(Download|saved)" || true; then
     if [ -f "$BIN_DIR/smali.jar" ]; then
         FILE_SIZE=$(stat -c%s "$BIN_DIR/smali.jar" 2>/dev/null || echo "0")
         if [ "$FILE_SIZE" -gt 1000000 ]; then
             log_success "✓ smali.jar: ${FILE_SIZE} bytes"
         else
-            log_error "smali.jar is too small (${FILE_SIZE} bytes) - probably an error page"
-            log_error "URL: $SMALI_URL"
-            log_warning "Trying alternative method..."
-            
-            # Try with curl as fallback
-            if command -v curl &>/dev/null; then
-                log_info "Trying with curl instead..."
-                curl -L -o "$BIN_DIR/smali.jar" "$SMALI_URL" 2>&1 | tail -5
-                FILE_SIZE=$(stat -c%s "$BIN_DIR/smali.jar" 2>/dev/null || echo "0")
-                if [ "$FILE_SIZE" -gt 1000000 ]; then
-                    log_success "✓ smali.jar: ${FILE_SIZE} bytes (via curl)"
-                else
-                    log_error "FAILED: Cannot download smali.jar"
-                    rm -f "$BIN_DIR/smali.jar"
-                fi
-            fi
+            log_error "smali.jar download failed (${FILE_SIZE} bytes)"
         fi
     fi
+else
+    log_error "Failed to download smali.jar from Google Drive"
 fi
 
 # Final check
@@ -308,16 +282,12 @@ if [ -f "$BIN_DIR/baksmali.jar" ] && [ -f "$BIN_DIR/smali.jar" ]; then
     SMALI_SIZE=$(stat -c%s "$BIN_DIR/smali.jar" 2>/dev/null || echo "0")
     
     if [ "$BAKSMALI_SIZE" -gt 1000000 ] && [ "$SMALI_SIZE" -gt 1000000 ]; then
-        log_success "✓ baksmali/smali v3.0.9 ready"
+        log_success "✓ baksmali/smali tools ready (from Google Drive)"
     else
-        log_error "Downloaded files are invalid"
-        log_error "This usually means GitHub is being blocked by your network/firewall"
-        log_warning "DEX patching will be SKIPPED (not fatal, build continues)"
+        log_warning "DEX tools may not be valid - DEX patching may fail"
     fi
 else
-    log_error "Failed to download baksmali/smali"
-    log_error "Check your internet connection and GitHub access"
-    log_warning "DEX patching will be SKIPPED (not fatal, build continues)"
+    log_warning "baksmali/smali not available - DEX patching will be SKIPPED"
 fi
 
 # =========================================================
