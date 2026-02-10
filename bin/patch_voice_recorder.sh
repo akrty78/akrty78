@@ -18,9 +18,9 @@ patch_voice_recorder() {
     # Find voice recorder APK by package name (try multiple possibilities)
     log_info "Searching for voice recorder app..."
     
-    RECORDER_APK=""
+    RECORDER_APK="MIUISOundRecorderTargetSdk30.apk"
     POSSIBLE_PACKAGES=(
-        "com.android.soundrecorder"
+        "Recorder.apk"
         "com.miui.soundrecorder"
         "com.xiaomi.soundrecorder"
         "com.android.recorder"
