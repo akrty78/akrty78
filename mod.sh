@@ -913,7 +913,7 @@ PYTHON_EOF
         # D1. SIGNATURE VERIFICATION DISABLER (system partition)
         if [ "$part" == "system" ]; then
             if [ -f "$BIN_DIR/patch_signature_verifier.sh" ]; then
-                source "$BIN_DIR/patch_signature_verifier.sh"
+                source "$BIN_DIR/patch_signature_verifier_apktool.sh"
                 patch_signature_verification "$DUMP_DIR"
                 cd "$GITHUB_WORKSPACE"  # CRITICAL: Return to workspace
             else
@@ -968,7 +968,7 @@ PYTHON_EOF
         # D6. SYSTEMUI VOLTE ICON (system_ext partition)
         if [ "$part" == "system_ext" ]; then
             if [ -f "$BIN_DIR/patch_systemui_volte.sh" ]; then
-                source "$BIN_DIR/patch_systemui_volte.sh"
+                source "$BIN_DIR/patch_systemui_volte_apktool.sh"
                 patch_systemui_volte "$DUMP_DIR"
                 cd "$GITHUB_WORKSPACE"  # CRITICAL: Return to workspace
             else
