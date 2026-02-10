@@ -246,7 +246,7 @@ rm -f "$BIN_DIR/baksmali.jar" "$BIN_DIR/smali.jar" 2>/dev/null
 
 # Google Drive links
 BAKSMALI_GDRIVE="1RS_lmqeVoMO4-mnCQ-BOV5A9qoa_8VHu"  # Your baksmali.jar
-SMALI_GDRIVE="YOUR_SMALI_JAR_ID"  # Need smali.jar ID too
+SMALI_GDRIVE="1KTMCWGOcLs-yeuLwHSoc53J0kpXTZht_"  # Need smali.jar ID too
 
 log_info "Downloading baksmali.jar from Google Drive..."
 if gdown "$BAKSMALI_GDRIVE" -O "$BIN_DIR/baksmali.jar" --fuzzy -q 2>&1 | grep -E "(Download|saved)" || true; then
