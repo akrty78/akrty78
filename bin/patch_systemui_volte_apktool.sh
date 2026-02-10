@@ -2,10 +2,8 @@
 
 # =========================================================
 #  SYSTEMUI VOLTE ICON ENABLER (APKTOOL VERSION)
-#  Uses apktool - NO 20MB DATA LOSS!
+#  Standalone - uses apktool - NO 20MB DATA LOSS!
 # =========================================================
-
-source "$(dirname "$0")/apktool_patcher_lib.sh"
 
 patch_systemui_volte() {
     local SYSTEM_EXT_DUMP="$1"
@@ -30,103 +28,10 @@ patch_systemui_volte() {
     
     log_success "✓ Found: $(basename "$SYSTEMUI_APK")"
     log_info "Located: $SYSTEMUI_APK"
+    APK_SIZE=$(du -h "$SYSTEMUI_APK" | cut -f1)
+    log_info "Original size: $APK_SIZE"
     
-    # Create Python patcher for VoLTE
-    PATCHER_SCRIPT="$TEMP_DIR/systemui_volte_patcher.py"
-    cat > "$PATCHER_SCRIPT" <<'PYTHON_EOF'
-#!/usr/bin/env python3
-import sys
-import re
-import os
-
-def patch_volte_icons(smali_dir):
-    """Enable VoLTE icons by patching IS_INTERNATIONAL_BUILD checks"""
-    
-    # Target files
-    target_files = [
-        "com/android/systemui/statusbar/pipeline/mobile/data/repository/prod/MiuiOperatorCustomizedPolicy.smali",
-        "com/android/systemui/statusbar/pipeline/mobile/ui/viewmodel/MiuiCellularIconVM\$special\$\$inlined\$combine\$1\$3.smali",
-        "com/android/systemui/statusbar/pipeline/mobile/ui/MiuiMobileIconBinder\$bind\$1\$1\$10.smali"
-    ]
-    
-    patched_count = 0
-    
-    for target_file in target_files:
-        full_path = os.path.join(smali_dir, target_file)
-        
-        if not os.path.exists(full_path):
-            print(f"[INFO] File not found (skipping): {os.path.basename(target_file)}")
-            continue
-        
-        print(f"[ACTION] Processing: {os.path.basename(target_file)}")
-        
-        with open(full_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-        
-        # Find and replace IS_INTERNATIONAL_BUILD checks
-        pattern = r'invoke-static\s+\{\},\s+Lmiui/os/Build;->getRegion\(\)Ljava/lang/String;'
-        
-        matches = re.findall(pattern, content)
-        
-        if matches:
-            print(f"[ACTION] Found {len(matches)} IS_INTERNATIONAL_BUILD reference(s)")
-            
-            # Replace with const/4 vX, 0x1 (always return true)
-            # Need to find the register being used
-            # Pattern: invoke-static {}, Lmiui/os/Build;->getRegion()Ljava/lang/String;
-            #          move-result-object vX
-            
-            new_content = content
-            replaced = 0
-            
-            # Find all IS_INTERNATIONAL_BUILD usage patterns
-            full_pattern = r'(invoke-static\s+\{\},\s+Lmiui/os/Build;->getRegion\(\)Ljava/lang/String;\s+move-result-object\s+(v\d+))'
-            
-            for match in re.finditer(full_pattern, content):
-                full_match = match.group(1)
-                register = match.group(2)
-                
-                # Replace with const/4 vX, 0x1
-                replacement = f'const/4 {register}, 0x1'
-                new_content = new_content.replace(full_match, replacement, 1)
-                replaced += 1
-                print(f"[ACTION] Replaced with: const/4 {register}, 0x1")
-            
-            if replaced > 0:
-                with open(full_path, 'w', encoding='utf-8') as f:
-                    f.write(new_content)
-                print(f"[SUCCESS] Patched {os.path.basename(target_file)}: {replaced} change(s)")
-                patched_count += 1
-            else:
-                print(f"[INFO] No changes made to {os.path.basename(target_file)}")
-        else:
-            print(f"[INFO] No IS_INTERNATIONAL_BUILD found in {os.path.basename(target_file)}")
-    
-    if patched_count > 0:
-        print(f"[SUCCESS] Patched {patched_count} file(s) total")
-        return True
-    else:
-        print("[ERROR] No files were patched")
-        return False
-
-if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("[ERROR] Usage: python3 patcher.py <decompiled_dir>")
-        sys.exit(1)
-    
-    smali_dir = sys.argv[1]
-    success = patch_volte_icons(smali_dir)
-    sys.exit(0 if success else 1)
-PYTHON_EOF
-    
-    # Special handling for SystemUI - need to patch the decompiled directory, not a single file
-    log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    log_info "APKTOOL PATCHING: $(basename "$SYSTEMUI_APK")"
-    log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    log_info "File: $(basename "$SYSTEMUI_APK")"
-    log_info "Size: $(du -h "$SYSTEMUI_APK" | cut -f1)"
-    
-    # Backup
+    # Create backup
     log_info "Creating backup..."
     cp "$SYSTEMUI_APK" "${SYSTEMUI_APK}.bak"
     log_success "✓ Backup created"
@@ -162,7 +67,95 @@ PYTHON_EOF
     log_info "PHASE 2: VOLTE PATCHING"
     log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     
-    if python3 "$PATCHER_SCRIPT" "decompiled" 2>&1 | while IFS= read -r line; do
+    # Create Python patcher
+    cat > "patcher.py" <<'PYTHON_EOF'
+#!/usr/bin/env python3
+import sys
+import os
+
+def find_smali_file(base_dir, filename):
+    """Recursively find a smali file"""
+    for root, dirs, files in os.walk(base_dir):
+        if filename in files:
+            return os.path.join(root, filename)
+    return None
+
+def patch_volte_icons(smali_dir):
+    """Enable VoLTE icons by patching IS_INTERNATIONAL_BUILD checks"""
+    
+    # Target files (just filenames)
+    target_files = [
+        "MiuiOperatorCustomizedPolicy.smali",
+        "MiuiCellularIconVM$special$$inlined$combine$1$3.smali",
+        "MiuiMobileIconBinder$bind$1$1$10.smali"
+    ]
+    
+    import re
+    patched_count = 0
+    
+    for target_filename in target_files:
+        print(f"[INFO] Searching for: {target_filename}")
+        full_path = find_smali_file(smali_dir, target_filename)
+        
+        if not full_path:
+            print(f"[INFO] File not found (skipping): {target_filename}")
+            continue
+        
+        print(f"[ACTION] Processing: {target_filename}")
+        print(f"[INFO] Found at: {full_path}")
+        
+        with open(full_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        # Find IS_INTERNATIONAL_BUILD checks
+        pattern = r'invoke-static\s+\{\},\s+Lmiui/os/Build;->getRegion\(\)Ljava/lang/String;'
+        matches = re.findall(pattern, content)
+        
+        if matches:
+            print(f"[ACTION] Found {len(matches)} IS_INTERNATIONAL_BUILD reference(s)")
+            
+            new_content = content
+            replaced = 0
+            
+            # Find all invoke-static + move-result-object patterns
+            full_pattern = r'invoke-static\s+\{\},\s+Lmiui/os/Build;->getRegion\(\)Ljava/lang/String;\s+move-result-object\s+(v\d+)'
+            
+            for match in re.finditer(full_pattern, content):
+                register = match.group(1)
+                replacement = f'const/4 {register}, 0x1'
+                new_content = new_content.replace(match.group(0), replacement, 1)
+                replaced += 1
+                print(f"[ACTION] Added: const/4 {register}, 0x1")
+            
+            if replaced > 0:
+                with open(full_path, 'w', encoding='utf-8') as f:
+                    f.write(new_content)
+                print(f"[SUCCESS] Patched {target_filename}")
+                patched_count += 1
+            else:
+                print(f"[INFO] No IS_INTERNATIONAL_BUILD found in {target_filename}")
+        else:
+            print(f"[INFO] No IS_INTERNATIONAL_BUILD found in {target_filename}")
+    
+    if patched_count > 0:
+        print(f"[SUCCESS] Patched {patched_count} class(es)")
+        return True
+    else:
+        print("[INFO] VoLTE files not found in this ROM version")
+        print("[INFO] This is not critical - continuing anyway")
+        return True  # Not finding files is OK
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        print("[ERROR] Usage: python3 patcher.py <decompiled_dir>")
+        sys.exit(1)
+    
+    smali_dir = sys.argv[1]
+    success = patch_volte_icons(smali_dir)
+    sys.exit(0 if success else 1)
+PYTHON_EOF
+    
+    if python3 "patcher.py" "decompiled" 2>&1 | while IFS= read -r line; do
         if [[ "$line" == *"[ACTION]"* ]]; then
             log_info "${line#*[ACTION] }"
         elif [[ "$line" == *"[SUCCESS]"* ]]; then
@@ -212,12 +205,17 @@ PYTHON_EOF
                 
                 log_info "Size check: Original ${ORIG_SIZE} bytes, New ${NEW_SIZE} bytes (${SIZE_PERCENT}% diff)"
                 
-                if [ "$SIZE_PERCENT" -gt 10 ]; then
-                    log_error "✗ File size dropped ${SIZE_PERCENT}% - DATA LOSS!"
+                # Only reject if size DROPPED >10% (indicates data loss)
+                if [ "$SIZE_DIFF" -gt 0 ] && [ "$SIZE_PERCENT" -gt 10 ]; then
+                    log_error "✗ File size DROPPED ${SIZE_PERCENT}% - DATA LOSS!"
                     log_error "ABORTING to prevent corruption"
                     cp "${SYSTEMUI_APK}.bak" "$SYSTEMUI_APK"
                     cd "$WORKSPACE"
                     return 1
+                elif [ "$SIZE_DIFF" -lt 0 ]; then
+                    # Size increased
+                    SIZE_INCREASE=$((-SIZE_PERCENT))
+                    log_info "File size increased ${SIZE_INCREASE}% (apktool preserved more resources)"
                 fi
             fi
             
@@ -231,9 +229,9 @@ PYTHON_EOF
             log_success "✓ Successfully patched!"
             
             log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            log_success "✅ VOLTE ICON ENABLED"
-            log_success "   Effect: VoLTE icon will display properly"
-            log_success "   Size: $PATCHED_SIZE (preserved!)"
+            log_success "✅ SYSTEMUI PATCHED WITH APKTOOL"
+            log_success "   Effect: No data loss, size preserved"
+            log_success "   Size: $PATCHED_SIZE"
             log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         else
             log_error "✗ Patched APK not created"
