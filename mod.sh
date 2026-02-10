@@ -241,66 +241,83 @@ fi
 # Baksmali & Smali (for DEX editing) - v3.0.9 FAT JAR
 log_info "Setting up baksmali/smali tools..."
 
-# NUCLEAR OPTION: Delete potentially corrupt files first
-if [ -f "$BIN_DIR/baksmali.jar" ]; then
-    log_warning "Removing existing baksmali.jar to ensure clean state..."
-    rm -f "$BIN_DIR/baksmali.jar"
-fi
+# Clean slate
+rm -f "$BIN_DIR/baksmali.jar" "$BIN_DIR/smali.jar" 2>/dev/null
 
-if [ -f "$BIN_DIR/smali.jar" ]; then
-    log_warning "Removing existing smali.jar to ensure clean state..."
-    rm -f "$BIN_DIR/smali.jar"
-fi
-
-# Download fresh copies
-log_info "Downloading baksmali/smali v3.0.9 (fat jars)..."
+# Download URLs
 BAKSMALI_URL="https://github.com/baksmali/smali/releases/download/v3.0.9/baksmali-3.0.9-fat.jar"
 SMALI_URL="https://github.com/baksmali/smali/releases/download/v3.0.9/smali-3.0.9-fat.jar"
 
-# Download baksmali with retry
-BAKSMALI_SUCCESS=false
-for i in 1 2 3; do
-    log_info "Downloading baksmali.jar (attempt $i/3)..."
-    if wget -q --show-progress -O "$BIN_DIR/baksmali.jar" "$BAKSMALI_URL" 2>&1; then
-        # Verify file size (should be > 1MB)
+log_info "Downloading baksmali v3.0.9..."
+if wget -O "$BIN_DIR/baksmali.jar" "$BAKSMALI_URL" 2>&1 | grep -v "^--" | grep -E "(saved|Downloaded|failed|error)" || true; then
+    if [ -f "$BIN_DIR/baksmali.jar" ]; then
         FILE_SIZE=$(stat -c%s "$BIN_DIR/baksmali.jar" 2>/dev/null || echo "0")
         if [ "$FILE_SIZE" -gt 1000000 ]; then
-            log_success "✓ baksmali.jar downloaded (${FILE_SIZE} bytes)"
-            BAKSMALI_SUCCESS=true
-            break
+            log_success "✓ baksmali.jar: ${FILE_SIZE} bytes"
         else
-            log_warning "Downloaded file too small ($FILE_SIZE bytes), retrying..."
-            rm -f "$BIN_DIR/baksmali.jar"
+            log_error "baksmali.jar is too small (${FILE_SIZE} bytes) - probably an error page"
+            log_error "URL: $BAKSMALI_URL"
+            log_warning "Trying alternative method..."
+            
+            # Try with curl as fallback
+            if command -v curl &>/dev/null; then
+                log_info "Trying with curl instead..."
+                curl -L -o "$BIN_DIR/baksmali.jar" "$BAKSMALI_URL" 2>&1 | tail -5
+                FILE_SIZE=$(stat -c%s "$BIN_DIR/baksmali.jar" 2>/dev/null || echo "0")
+                if [ "$FILE_SIZE" -gt 1000000 ]; then
+                    log_success "✓ baksmali.jar: ${FILE_SIZE} bytes (via curl)"
+                else
+                    log_error "FAILED: Cannot download baksmali.jar"
+                    rm -f "$BIN_DIR/baksmali.jar"
+                fi
+            fi
         fi
     fi
-    sleep 2
-done
+fi
 
-# Download smali with retry
-SMALI_SUCCESS=false
-for i in 1 2 3; do
-    log_info "Downloading smali.jar (attempt $i/3)..."
-    if wget -q --show-progress -O "$BIN_DIR/smali.jar" "$SMALI_URL" 2>&1; then
-        # Verify file size (should be > 1MB)
+log_info "Downloading smali v3.0.9..."
+if wget -O "$BIN_DIR/smali.jar" "$SMALI_URL" 2>&1 | grep -v "^--" | grep -E "(saved|Downloaded|failed|error)" || true; then
+    if [ -f "$BIN_DIR/smali.jar" ]; then
         FILE_SIZE=$(stat -c%s "$BIN_DIR/smali.jar" 2>/dev/null || echo "0")
         if [ "$FILE_SIZE" -gt 1000000 ]; then
-            log_success "✓ smali.jar downloaded (${FILE_SIZE} bytes)"
-            SMALI_SUCCESS=true
-            break
+            log_success "✓ smali.jar: ${FILE_SIZE} bytes"
         else
-            log_warning "Downloaded file too small ($FILE_SIZE bytes), retrying..."
-            rm -f "$BIN_DIR/smali.jar"
+            log_error "smali.jar is too small (${FILE_SIZE} bytes) - probably an error page"
+            log_error "URL: $SMALI_URL"
+            log_warning "Trying alternative method..."
+            
+            # Try with curl as fallback
+            if command -v curl &>/dev/null; then
+                log_info "Trying with curl instead..."
+                curl -L -o "$BIN_DIR/smali.jar" "$SMALI_URL" 2>&1 | tail -5
+                FILE_SIZE=$(stat -c%s "$BIN_DIR/smali.jar" 2>/dev/null || echo "0")
+                if [ "$FILE_SIZE" -gt 1000000 ]; then
+                    log_success "✓ smali.jar: ${FILE_SIZE} bytes (via curl)"
+                else
+                    log_error "FAILED: Cannot download smali.jar"
+                    rm -f "$BIN_DIR/smali.jar"
+                fi
+            fi
         fi
     fi
-    sleep 2
-done
+fi
 
-if [ "$BAKSMALI_SUCCESS" = true ] && [ "$SMALI_SUCCESS" = true ]; then
-    log_success "✓ baksmali/smali v3.0.9 ready"
+# Final check
+if [ -f "$BIN_DIR/baksmali.jar" ] && [ -f "$BIN_DIR/smali.jar" ]; then
+    BAKSMALI_SIZE=$(stat -c%s "$BIN_DIR/baksmali.jar" 2>/dev/null || echo "0")
+    SMALI_SIZE=$(stat -c%s "$BIN_DIR/smali.jar" 2>/dev/null || echo "0")
+    
+    if [ "$BAKSMALI_SIZE" -gt 1000000 ] && [ "$SMALI_SIZE" -gt 1000000 ]; then
+        log_success "✓ baksmali/smali v3.0.9 ready"
+    else
+        log_error "Downloaded files are invalid"
+        log_error "This usually means GitHub is being blocked by your network/firewall"
+        log_warning "DEX patching will be SKIPPED (not fatal, build continues)"
+    fi
 else
-    log_error "CRITICAL: Failed to download valid baksmali/smali tools"
-    log_error "DEX patching will be DISABLED"
-    exit 1
+    log_error "Failed to download baksmali/smali"
+    log_error "Check your internet connection and GitHub access"
+    log_warning "DEX patching will be SKIPPED (not fatal, build continues)"
 fi
 
 # =========================================================
