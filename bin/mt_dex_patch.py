@@ -112,6 +112,12 @@ def find_method_code_off(d, class_descriptor, method_name):
     """
     Return (code_off, orig_insns_size) for the named method in the class.
     Returns (None, None) if not found.
+
+    DEX encoded_method format:
+      Each section (direct_methods, virtual_methods) independently
+      starts method_idx_diff encoding from 0. We MUST reset midx=0
+      when crossing from direct→virtual, otherwise we compute wrong
+      method indices in the virtual section.
     """
     cd_off = find_class_data_off(d, class_descriptor)
     if not cd_off:
@@ -128,15 +134,24 @@ def find_method_code_off(d, class_descriptor, method_name):
         _, off = read_uleb128(d, off)  # field_idx_diff
         _, off = read_uleb128(d, off)  # access_flags
 
+    # ── direct methods (static, private, constructor) ──────────────
     midx = 0
-    for _ in range(dm + vm):
+    for _ in range(dm):
         diff, off = read_uleb128(d, off);  midx += diff
         _,    off = read_uleb128(d, off)   # access_flags
         code_off, off = read_uleb128(d, off)
-
         if dex_method_name(d, midx) == method_name and code_off != 0:
-            insns_size = u32(d, code_off + 12)   # 16-bit code units
-            return code_off, insns_size
+            return code_off, u32(d, code_off + 12)
+
+    # ── virtual methods (public/protected non-static) ───────────────
+    # CRITICAL: reset to 0 — virtual section restarts diff-encoding
+    midx = 0
+    for _ in range(vm):
+        diff, off = read_uleb128(d, off);  midx += diff
+        _,    off = read_uleb128(d, off)   # access_flags
+        code_off, off = read_uleb128(d, off)
+        if dex_method_name(d, midx) == method_name and code_off != 0:
+            return code_off, u32(d, code_off + 12)
 
     return None, None
 
@@ -263,30 +278,60 @@ def read_dex_from_apk(apk_path, dex_name):
     with zipfile.ZipFile(apk_path, 'r') as zf:
         return zf.read(dex_name)
 
+def has_class_def(d, descriptor):
+    """
+    Return True if the class is actually DEFINED in this DEX
+    (has a class_def_item entry). This is different from being
+    *referenced* as a type — another class's method signature can
+    reference 'Lcom/foo/Bar;' without Bar being defined in this DEX.
+    """
+    n    = u32(d, HDR_CLASS_DEFS_SIZE)
+    base = u32(d, HDR_CLASS_DEFS_OFF)
+    for i in range(n):
+        cdef = base + i * 32
+        if dex_type(d, u32(d, cdef)) == descriptor:
+            return True
+    return False
+
+
 def find_dex_with_class(apk_path, class_name):
-    """Return the dex_name that contains the class, or None."""
-    descriptor = ('L' + class_name + ';').encode()
+    """
+    Return the dex_name that DEFINES the class (has class_def), or None.
+    IMPORTANT: byte-search alone is not enough — another DEX may reference
+    the class as a parameter type without defining it.
+    """
+    descriptor = 'L' + class_name + ';'
     for dex_name in list_dex_in_apk(apk_path):
         raw = read_dex_from_apk(apk_path, dex_name)
-        if descriptor in raw:
+        # Fast pre-filter: descriptor bytes must appear somewhere
+        if descriptor.encode() not in raw:
+            continue
+        # Precise check: class must have a class_def_item in this DEX
+        if has_class_def(raw, descriptor):
             return dex_name
     return None
 
 def inject_dex_into_apk(apk_path, dex_name, dex_bytes):
-    """Write dex_bytes to a temp file then zip -u it into the APK."""
+    """
+    Write dex_bytes to a temp file then zip -u it into the APK.
+    CRITICAL: -0 flag = STORE only, no compression.
+    DEX files in APKs MUST be uncompressed so the runtime can mmap them.
+    Without -0, zip recompresses and the APK shrinks (50M→44M) which
+    breaks installation.
+    """
     work = tempfile.mkdtemp(prefix='mt_dex_')
     try:
         tmp = os.path.join(work, dex_name)
         with open(tmp, 'wb') as f:
             f.write(dex_bytes)
         rc = subprocess.run(
-            f'zip -u "{apk_path}" "{dex_name}"',
+            f'zip -0 -u "{apk_path}" "{dex_name}"',   # -0 = STORE, no compress
             shell=True, cwd=work,
             capture_output=True, text=True
         )
         # rc=0 → updated, rc=12 → nothing changed (already same), both fine
         if rc.returncode not in (0, 12):
-            raise RuntimeError(f"zip -u failed (rc={rc.returncode}): {rc.stderr}")
+            raise RuntimeError(f"zip -0 -u failed (rc={rc.returncode}): {rc.stderr}")
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
@@ -346,21 +391,31 @@ def cmd_patch_method(args):
         # List available methods to help debug
         cd_off = find_class_data_off(dex, descriptor)
         if cd_off:
-            log('INFO', "Methods in this class:")
+            log('INFO', "Methods available in this class:")
             off = cd_off
-            sf, off = read_uleb128(dex, off)
+            sf,  off = read_uleb128(dex, off)
             inf, off = read_uleb128(dex, off)
-            dm, off = read_uleb128(dex, off)
-            vm, off = read_uleb128(dex, off)
+            dm,  off = read_uleb128(dex, off)
+            vm,  off = read_uleb128(dex, off)
             for _ in range(sf + inf):
                 _, off = read_uleb128(dex, off)
                 _, off = read_uleb128(dex, off)
             midx = 0
-            for _ in range(dm + vm):
-                d2, off = read_uleb128(dex, off); midx += d2
-                _, off  = read_uleb128(dex, off)
-                _, off  = read_uleb128(dex, off)
-                log('INFO', f"  → {dex_method_name(dex, midx)}")
+            log('INFO', "  [direct methods]")
+            for _ in range(dm):
+                d2, off  = read_uleb128(dex, off); midx += d2
+                _,  off  = read_uleb128(dex, off)
+                co, off  = read_uleb128(dex, off)
+                log('INFO', f"    {dex_method_name(dex, midx)}  (code_off=0x{co:08X})")
+            midx = 0   # reset for virtual section
+            log('INFO', "  [virtual methods]")
+            for _ in range(vm):
+                d2, off  = read_uleb128(dex, off); midx += d2
+                _,  off  = read_uleb128(dex, off)
+                co, off  = read_uleb128(dex, off)
+                log('INFO', f"    {dex_method_name(dex, midx)}  (code_off=0x{co:08X})")
+        else:
+            log('INFO', f"  (class_data_off=0 or class not found — no methods to list)")
         return False
 
     log('SUCCESS', f"Method found:  code_off=0x{code_off:08X}  insns={orig_insns_size} units ({orig_insns_size*2}B)")
@@ -631,7 +686,18 @@ def cmd_list_methods(args):
         _, off = read_uleb128(dex, off)
 
     midx = 0
-    for _ in range(dm + vm):
+    log('INFO', "  [direct methods]")
+    for _ in range(dm):
+        d2,      off = read_uleb128(dex, off); midx += d2
+        flags,   off = read_uleb128(dex, off)
+        code_off,off = read_uleb128(dex, off)
+        name = dex_method_name(dex, midx)
+        insns = u32(dex, code_off + 12) if code_off else 0
+        log('INFO', f"  {name:60s}  code_off=0x{code_off:08X}  insns={insns} units")
+
+    midx = 0  # RESET for virtual section
+    log('INFO', "  [virtual methods]")
+    for _ in range(vm):
         d2,      off = read_uleb128(dex, off); midx += d2
         flags,   off = read_uleb128(dex, off)
         code_off,off = read_uleb128(dex, off)
