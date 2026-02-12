@@ -269,37 +269,78 @@ else
 fi
 
 cd "$GITHUB_WORKSPACE"
-# baksmali is kept as a debug/inspection tool (used by apktool internally anyway)
-log_info "Setting up baksmali tool..."
+# ─────────────────────────────────────────────────────────────────
+#  baksmali + smali — BOTH required for all DEX patching
+#
+#  baksmali: APK/JAR → smali text files
+#  smali:    smali text files → DEX bytecode
+#
+#  Upload smali.jar to Google Drive and set SMALI_GDRIVE below.
+#  Download from: https://github.com/google/smali/releases/tag/v2.5.2
+# ─────────────────────────────────────────────────────────────────
+log_info "Setting up baksmali + smali tools..."
 
-rm -f "$BIN_DIR/baksmali.jar" 2>/dev/null
+BAKSMALI_GDRIVE="1RS_lmqeVoMO4-mnCQ-BOV5A9qoa_8VHu"
+SMALI_GDRIVE="YOUR_SMALI_GDRIVE_ID"   # ← Upload smali-2.5.2.jar to GDrive, paste ID here
 
-BAKSMALI_GDRIVE="1RS_lmqeVoMO4-mnCQ-BOV5A9qoa_8VHu"  # baksmali.jar on Google Drive
+_download_jar() {
+    local name="$1" gdrive_id="$2" fallback_url="$3"
+    local dest="$BIN_DIR/$name"
 
-log_info "Downloading baksmali.jar from Google Drive..."
-if gdown "$BAKSMALI_GDRIVE" -O "$BIN_DIR/baksmali.jar" --fuzzy -q 2>&1 | grep -E "(Download|saved)" || true; then
-    if [ -f "$BIN_DIR/baksmali.jar" ]; then
-        FILE_SIZE=$(stat -c%s "$BIN_DIR/baksmali.jar" 2>/dev/null || echo "0")
-        if [ "$FILE_SIZE" -gt 1000000 ]; then
-            log_success "✓ baksmali.jar ready: ${FILE_SIZE} bytes"
-        else
-            log_warning "baksmali.jar may be invalid (${FILE_SIZE} bytes) — continuing anyway"
-        fi
+    # Skip if already valid
+    local sz; sz=$(stat -c%s "$dest" 2>/dev/null || echo 0)
+    [ "$sz" -gt 500000 ] && { log_success "✓ $name already present (${sz}B)"; return 0; }
+
+    rm -f "$dest"
+
+    # Try Google Drive first (fastest in CI, no rate limit)
+    if [ "$gdrive_id" != "YOUR_SMALI_GDRIVE_ID" ] && command -v gdown &>/dev/null; then
+        log_info "Downloading $name from Google Drive..."
+        gdown "$gdrive_id" -O "$dest" --fuzzy -q 2>/dev/null || true
     fi
+
+    # Fallback: GitHub releases (public, no auth needed)
+    sz=$(stat -c%s "$dest" 2>/dev/null || echo 0)
+    if [ "$sz" -lt 500000 ]; then
+        log_info "Downloading $name from GitHub releases..."
+        curl -fsSL --retry 3 -o "$dest" "$fallback_url" 2>/dev/null || true
+    fi
+
+    sz=$(stat -c%s "$dest" 2>/dev/null || echo 0)
+    if [ "$sz" -gt 500000 ]; then
+        log_success "✓ $name ready (${sz}B)"
+        return 0
+    else
+        log_error "✗ $name download failed (${sz}B) — DEX patching will be skipped"
+        return 1
+    fi
+}
+
+_download_jar "baksmali.jar" "$BAKSMALI_GDRIVE" \
+    "https://github.com/google/smali/releases/download/v2.5.2/baksmali-2.5.2.jar"
+
+_download_jar "smali.jar" "$SMALI_GDRIVE" \
+    "https://github.com/google/smali/releases/download/v2.5.2/smali-2.5.2.jar"
+
+# Quick smoke-test: both jars must be loadable by Java
+SMALI_TOOLS_OK=0
+if java -jar "$BIN_DIR/baksmali.jar" --version &>/dev/null && \
+   java -jar "$BIN_DIR/smali.jar"    --version &>/dev/null; then
+    log_success "✓ baksmali + smali verified and ready"
+    SMALI_TOOLS_OK=1
 else
-    log_warning "baksmali.jar download failed — continuing (not required for binary patching)"
+    log_error "baksmali/smali verification failed — DEX patching will be skipped"
 fi
-# Note: smali.jar is NOT needed — all DEX patches use mt_dex_patch.py binary surgery
 
 # =========================================================
 #  3.5. LOAD DEX PATCHER LIBRARY
 # =========================================================
 log_info "Loading DEX patcher library..."
-if [ -f "$BIN_DIR/dex_patcher_lib.sh" ]; then
-    source "$BIN_DIR/dex_patcher_lib.sh"
-    log_success "✓ DEX patcher library loaded"
+if [ -f "$BIN_DIR/smali_tools.sh" ]; then
+    source "$BIN_DIR/smali_tools.sh"
+    log_success "✓ smali_tools.sh loaded"
 else
-    log_warning "DEX patcher library not found, patching features may be limited"
+    log_warning "smali_tools.sh not found — patching will be limited"
 fi
 
 # GApps
@@ -911,13 +952,26 @@ PYTHON_EOF
         # =====================================================
         #  MODULAR PATCHING FEATURES (ALL 6)
         # =====================================================
-        
-        # D1. SIGNATURE VERIFICATION DISABLER (system partition)
-        if [ "$part" == "system" ]; then
-            if [ -f "$BIN_DIR/patch_signature_verifier.sh" ]; then
+
+        # ── Load patchers once per partition (smali_tools already loaded globally)
+        if [ "${SMALI_TOOLS_OK:-0}" -eq 1 ]; then
+            if [ -f "$BIN_DIR/patch_signature_verifier.sh" ] && \
+               ! declare -f patch_signature_verification &>/dev/null; then
                 source "$BIN_DIR/patch_signature_verifier.sh"
+            fi
+            if [ -f "$BIN_DIR/dex_patchers.sh" ] && \
+               ! declare -f patch_settings_ai &>/dev/null; then
+                source "$BIN_DIR/dex_patchers.sh"
+            fi
+        else
+            log_warning "smali tools not ready — all DEX patches will be skipped for $part"
+        fi
+
+        # D1. SIGNATURE VERIFICATION DISABLER (system partition)
+        if [ "$part" == "system" ] && [ "${SMALI_TOOLS_OK:-0}" -eq 1 ]; then
+            if declare -f patch_signature_verification &>/dev/null; then
                 patch_signature_verification "$DUMP_DIR"
-                cd "$GITHUB_WORKSPACE"  # CRITICAL: Return to workspace
+                cd "$GITHUB_WORKSPACE"
             else
                 log_warning "patch_signature_verifier.sh not found, skipping"
             fi
@@ -928,40 +982,33 @@ PYTHON_EOF
             if [ -f "$BIN_DIR/patch_voice_recorder.sh" ]; then
                 source "$BIN_DIR/patch_voice_recorder.sh"
                 patch_voice_recorder "$DUMP_DIR"
-                cd "$GITHUB_WORKSPACE"  # CRITICAL: Return to workspace
+                cd "$GITHUB_WORKSPACE"
             else
                 log_warning "patch_voice_recorder.sh not found, skipping"
             fi
         fi
-        
-        # ── Load all DEX patchers (MT Manager binary style) ──────────────
-        if [ -f "$BIN_DIR/dex_patchers.sh" ]; then
-            source "$BIN_DIR/dex_patchers.sh"
-        else
-            log_warning "dex_patchers.sh not found — DEX patches will be skipped"
-        fi
 
         # D3. SETTINGS AI SUPPORT (system_ext partition)
-        if [ "$part" == "system_ext" ]; then
-            patch_settings_ai "$DUMP_DIR"
+        if [ "$part" == "system_ext" ] && [ "${SMALI_TOOLS_OK:-0}" -eq 1 ]; then
+            declare -f patch_settings_ai &>/dev/null && patch_settings_ai "$DUMP_DIR"
             cd "$GITHUB_WORKSPACE"
         fi
 
         # D4. PROVISION GMS SUPPORT (system_ext partition)
-        if [ "$part" == "system_ext" ]; then
-            patch_provision_gms "$DUMP_DIR"
+        if [ "$part" == "system_ext" ] && [ "${SMALI_TOOLS_OK:-0}" -eq 1 ]; then
+            declare -f patch_provision_gms &>/dev/null && patch_provision_gms "$DUMP_DIR"
             cd "$GITHUB_WORKSPACE"
         fi
 
         # D5. MIUI SERVICE CN→GLOBAL (system_ext partition)
-        if [ "$part" == "system_ext" ]; then
-            patch_miui_service "$DUMP_DIR"
+        if [ "$part" == "system_ext" ] && [ "${SMALI_TOOLS_OK:-0}" -eq 1 ]; then
+            declare -f patch_miui_service &>/dev/null && patch_miui_service "$DUMP_DIR"
             cd "$GITHUB_WORKSPACE"
         fi
 
         # D6. SYSTEMUI VOLTE ICON (system_ext partition)
-        if [ "$part" == "system_ext" ]; then
-            patch_systemui_volte "$DUMP_DIR"
+        if [ "$part" == "system_ext" ] && [ "${SMALI_TOOLS_OK:-0}" -eq 1 ]; then
+            declare -f patch_systemui_volte &>/dev/null && patch_systemui_volte "$DUMP_DIR"
             cd "$GITHUB_WORKSPACE"
         fi
 
