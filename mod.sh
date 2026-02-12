@@ -238,7 +238,37 @@ else
     log_info "payload-dumper-go already installed"
 fi
 
-# Baksmali & Smali (from Google Drive)
+# Android SDK Tools (for dexdump)
+log_info "Installing Android SDK build tools..."
+
+# Create SDK directory
+mkdir -p "$BIN_DIR/android-sdk"
+cd "$BIN_DIR/android-sdk"
+
+# Download minimal Android SDK command-line tools
+SDK_TOOLS_URL="https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
+if wget -q "$SDK_TOOLS_URL" -O cmdline-tools.zip; then
+    unzip -q cmdline-tools.zip
+    rm cmdline-tools.zip
+    
+    # Install build-tools (contains dexdump)
+    yes | ./cmdline-tools/bin/sdkmanager --sdk_root="$BIN_DIR/android-sdk" "build-tools;34.0.0" 2>&1 | grep -v "=" || true
+    
+    # Add to PATH
+    export PATH="$BIN_DIR/android-sdk/build-tools/34.0.0:$PATH"
+    
+    # Verify dexdump is available
+    if command -v dexdump &>/dev/null; then
+        log_success "✓ dexdump installed and available"
+    else
+        log_warning "dexdump installation may have failed"
+    fi
+else
+    log_warning "Could not download Android SDK tools"
+    log_warning "Class count verification will not be available"
+fi
+
+cd "$GITHUB_WORKSPACE"
 log_info "Setting up baksmali/smali tools..."
 
 # Clean slate
@@ -246,7 +276,7 @@ rm -f "$BIN_DIR/baksmali.jar" "$BIN_DIR/smali.jar" 2>/dev/null
 
 # Google Drive links
 BAKSMALI_GDRIVE="1RS_lmqeVoMO4-mnCQ-BOV5A9qoa_8VHu"  # Your baksmali.jar
-SMALI_GDRIVE="1KTMCWGOcLs-yeuLwHSoc53J0kpXTZht_"  # Need smali.jar ID too
+SMALI_GDRIVE="YOUR_SMALI_JAR_ID"  # Need smali.jar ID too
 
 log_info "Downloading baksmali.jar from Google Drive..."
 if gdown "$BAKSMALI_GDRIVE" -O "$BIN_DIR/baksmali.jar" --fuzzy -q 2>&1 | grep -E "(Download|saved)" || true; then
@@ -913,7 +943,7 @@ PYTHON_EOF
         # D1. SIGNATURE VERIFICATION DISABLER (system partition)
         if [ "$part" == "system" ]; then
             if [ -f "$BIN_DIR/patch_signature_verifier.sh" ]; then
-                source "$BIN_DIR/patch_signature_verifier_apktool.sh"
+                source "$BIN_DIR/patch_signature_verifier.sh"
                 patch_signature_verification "$DUMP_DIR"
                 cd "$GITHUB_WORKSPACE"  # CRITICAL: Return to workspace
             else
@@ -932,48 +962,35 @@ PYTHON_EOF
             fi
         fi
         
-        # D3. SETTINGS AI SUPPORT (system_ext partition) - FIXED
-        if [ "$part" == "system_ext" ]; then
-            if [ -f "$BIN_DIR/patch_settings_ai.sh" ]; then
-                source "$BIN_DIR/patch_settings_ai.sh"
-                patch_settings_ai_support "$DUMP_DIR"
-                cd "$GITHUB_WORKSPACE"  # CRITICAL: Return to workspace
-            else
-                log_warning "patch_settings_ai.sh not found, skipping"
-            fi
+        # ── Load all DEX patchers (MT Manager binary style) ──────────────
+        if [ -f "$BIN_DIR/dex_patchers.sh" ]; then
+            source "$BIN_DIR/dex_patchers.sh"
+        else
+            log_warning "dex_patchers.sh not found — DEX patches will be skipped"
         fi
-        
+
+        # D3. SETTINGS AI SUPPORT (system_ext partition)
+        if [ "$part" == "system_ext" ]; then
+            patch_settings_ai "$DUMP_DIR"
+            cd "$GITHUB_WORKSPACE"
+        fi
+
         # D4. PROVISION GMS SUPPORT (system_ext partition)
         if [ "$part" == "system_ext" ]; then
-            if [ -f "$BIN_DIR/patch_provision_gms.sh" ]; then
-                source "$BIN_DIR/patch_provision_gms.sh"
-                patch_provision_gms "$DUMP_DIR"
-                cd "$GITHUB_WORKSPACE"  # CRITICAL: Return to workspace
-            else
-                log_warning "patch_provision_gms.sh not found, skipping"
-            fi
+            patch_provision_gms "$DUMP_DIR"
+            cd "$GITHUB_WORKSPACE"
         fi
-        
+
         # D5. MIUI SERVICE CN→GLOBAL (system_ext partition)
         if [ "$part" == "system_ext" ]; then
-            if [ -f "$BIN_DIR/patch_miui_service.sh" ]; then
-                source "$BIN_DIR/patch_miui_service.sh"
-                patch_miui_service "$DUMP_DIR"
-                cd "$GITHUB_WORKSPACE"  # CRITICAL: Return to workspace
-            else
-                log_warning "patch_miui_service.sh not found, skipping"
-            fi
+            patch_miui_service "$DUMP_DIR"
+            cd "$GITHUB_WORKSPACE"
         fi
-        
+
         # D6. SYSTEMUI VOLTE ICON (system_ext partition)
         if [ "$part" == "system_ext" ]; then
-            if [ -f "$BIN_DIR/patch_systemui_volte.sh" ]; then
-                source "$BIN_DIR/patch_systemui_volte_apktool.sh"
-                patch_systemui_volte "$DUMP_DIR"
-                cd "$GITHUB_WORKSPACE"  # CRITICAL: Return to workspace
-            else
-                log_warning "patch_systemui_volte.sh not found, skipping"
-            fi
+            patch_systemui_volte "$DUMP_DIR"
+            cd "$GITHUB_WORKSPACE"
         fi
 
 
