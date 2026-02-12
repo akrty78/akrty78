@@ -269,56 +269,27 @@ else
 fi
 
 cd "$GITHUB_WORKSPACE"
-log_info "Setting up baksmali/smali tools..."
+# baksmali is kept as a debug/inspection tool (used by apktool internally anyway)
+log_info "Setting up baksmali tool..."
 
-# Clean slate
-rm -f "$BIN_DIR/baksmali.jar" "$BIN_DIR/smali.jar" 2>/dev/null
+rm -f "$BIN_DIR/baksmali.jar" 2>/dev/null
 
-# Google Drive links
-BAKSMALI_GDRIVE="1RS_lmqeVoMO4-mnCQ-BOV5A9qoa_8VHu"  # Your baksmali.jar
-SMALI_GDRIVE="YOUR_SMALI_JAR_ID"  # Need smali.jar ID too
+BAKSMALI_GDRIVE="1RS_lmqeVoMO4-mnCQ-BOV5A9qoa_8VHu"  # baksmali.jar on Google Drive
 
 log_info "Downloading baksmali.jar from Google Drive..."
 if gdown "$BAKSMALI_GDRIVE" -O "$BIN_DIR/baksmali.jar" --fuzzy -q 2>&1 | grep -E "(Download|saved)" || true; then
     if [ -f "$BIN_DIR/baksmali.jar" ]; then
         FILE_SIZE=$(stat -c%s "$BIN_DIR/baksmali.jar" 2>/dev/null || echo "0")
         if [ "$FILE_SIZE" -gt 1000000 ]; then
-            log_success "✓ baksmali.jar: ${FILE_SIZE} bytes"
+            log_success "✓ baksmali.jar ready: ${FILE_SIZE} bytes"
         else
-            log_error "baksmali.jar download failed (${FILE_SIZE} bytes)"
+            log_warning "baksmali.jar may be invalid (${FILE_SIZE} bytes) — continuing anyway"
         fi
     fi
 else
-    log_error "Failed to download baksmali.jar from Google Drive"
+    log_warning "baksmali.jar download failed — continuing (not required for binary patching)"
 fi
-
-log_info "Downloading smali.jar from Google Drive..."
-if gdown "$SMALI_GDRIVE" -O "$BIN_DIR/smali.jar" --fuzzy -q 2>&1 | grep -E "(Download|saved)" || true; then
-    if [ -f "$BIN_DIR/smali.jar" ]; then
-        FILE_SIZE=$(stat -c%s "$BIN_DIR/smali.jar" 2>/dev/null || echo "0")
-        if [ "$FILE_SIZE" -gt 1000000 ]; then
-            log_success "✓ smali.jar: ${FILE_SIZE} bytes"
-        else
-            log_error "smali.jar download failed (${FILE_SIZE} bytes)"
-        fi
-    fi
-else
-    log_error "Failed to download smali.jar from Google Drive"
-fi
-
-# Final check
-if [ -f "$BIN_DIR/baksmali.jar" ] && [ -f "$BIN_DIR/smali.jar" ]; then
-    BAKSMALI_SIZE=$(stat -c%s "$BIN_DIR/baksmali.jar" 2>/dev/null || echo "0")
-    SMALI_SIZE=$(stat -c%s "$BIN_DIR/smali.jar" 2>/dev/null || echo "0")
-    
-    if [ "$BAKSMALI_SIZE" -gt 1000000 ] && [ "$SMALI_SIZE" -gt 1000000 ]; then
-        log_success "✓ baksmali/smali tools ready (from Google Drive)"
-    else
-        log_warning "DEX tools may not be valid - DEX patching may fail"
-    fi
-else
-    log_warning "baksmali/smali not available - DEX patching will be SKIPPED"
-fi
+# Note: smali.jar is NOT needed — all DEX patches use mt_dex_patch.py binary surgery
 
 # =========================================================
 #  3.5. LOAD DEX PATCHER LIBRARY
@@ -669,7 +640,8 @@ for part in $LOGICALS; do
         # A. DEBLOATER
         log_info "🗑️  Running debloater..."
         echo "$BLOAT_LIST" | tr ' ' '\n' | grep -v "^\s*$" > "$TEMP_DIR/bloat_target_list.txt"
-        REMOVED_COUNT=0
+        # Touch log first so wc -l never fails on missing file
+        touch "$TEMP_DIR/removed_bloat.log"
         find "$DUMP_DIR" -type f -name "*.apk" | while read apk_file; do
             pkg_name=$(aapt dump badging "$apk_file" 2>/dev/null | grep "package: name=" | cut -d"'" -f2)
             if [ ! -z "$pkg_name" ]; then
@@ -680,7 +652,7 @@ for part in $LOGICALS; do
                 fi
             fi
         done
-        REMOVED_COUNT=$(wc -l < "$TEMP_DIR/removed_bloat.log" 2>/dev/null || echo 0)
+        REMOVED_COUNT=$(wc -l < "$TEMP_DIR/removed_bloat.log")
         log_success "Debloat complete: $REMOVED_COUNT apps removed"
 
         # B. GAPPS INJECTION
