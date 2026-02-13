@@ -176,36 +176,30 @@ else
     log_info "payload-dumper-go already installed"
 fi
 
-# ── baksmali + smali ─────────────────────────────────────
+# ── baksmali + smali (from your Google Drive — no fallback needed) ──
 BAKSMALI_GDRIVE="1RS_lmqeVoMO4-mnCQ-BOV5A9qoa_8VHu"
 SMALI_GDRIVE="1KTMCWGOcLs-yeuLwHSoc53J0kpXTZht_"
 
-_fetch_jar() {
-    local name="$1" gdrive="$2" maven="$3" github="$4"
+_fetch_jar_gdrive() {
+    local name="$1" gdrive_id="$2"
     local dest="$BIN_DIR/$name"
     local sz; sz=$(stat -c%s "$dest" 2>/dev/null || echo 0)
-    [ "$sz" -gt 500000 ] && { log_success "✓ $name cached"; return 0; }
+    if [ "$sz" -gt 500000 ]; then
+        log_success "✓ $name already cached (${sz}B)"; return 0
+    fi
     rm -f "$dest"
-    command -v gdown &>/dev/null && \
-        gdown "$gdrive" -O "$dest" --fuzzy -q 2>/dev/null || true
+    log_info "Downloading $name from Google Drive..."
+    gdown "$gdrive_id" -O "$dest" --fuzzy -q
     sz=$(stat -c%s "$dest" 2>/dev/null || echo 0)
-    [ "$sz" -lt 500000 ] && curl -fsSL --retry 3 --connect-timeout 30 -o "$dest" "$maven" 2>/dev/null || true
-    sz=$(stat -c%s "$dest" 2>/dev/null || echo 0)
-    [ "$sz" -lt 500000 ] && curl -fsSL --retry 2 --connect-timeout 30 -o "$dest" "$github" 2>/dev/null || true
-    sz=$(stat -c%s "$dest" 2>/dev/null || echo 0)
-    if [ "$sz" -gt 500000 ]; then log_success "✓ $name ready (${sz}B)"; return 0
-    else log_error "✗ $name unavailable (${sz}B)"; return 1; fi
+    if [ "$sz" -gt 500000 ]; then
+        log_success "✓ $name ready (${sz}B)"; return 0
+    else
+        log_error "✗ $name download failed (${sz}B)"; return 1
+    fi
 }
 
-_fetch_jar "baksmali.jar" \
-    "$BAKSMALI_GDRIVE" \
-    "https://repo1.maven.org/maven2/com/android/tools/smali/smali-baksmali/3.0.3/smali-baksmali-3.0.3.jar" \
-    "https://github.com/google/smali/releases/download/v2.5.2/baksmali-2.5.2.jar"
-
-_fetch_jar "smali.jar" \
-    "$SMALI_GDRIVE" \
-    "https://repo1.maven.org/maven2/com/android/tools/smali/smali-cli/3.0.3/smali-cli-3.0.3.jar" \
-    "https://github.com/google/smali/releases/download/v2.5.2/smali-2.5.2.jar"
+_fetch_jar_gdrive "baksmali.jar" "$BAKSMALI_GDRIVE"
+_fetch_jar_gdrive "smali.jar"    "$SMALI_GDRIVE"
 
 # ── Write nexmod_apk.py (THE APK ENGINE — fixes -124 permanently) ──
 log_info "Writing nexmod_apk.py (APK alignment + DEX patch engine)..."
@@ -683,19 +677,16 @@ PYEOF
 chmod +x "$BIN_DIR/nexmod_apk.py"
 log_success "✓ nexmod_apk.py written to $BIN_DIR"
 
-# ── Verify baksmali+smali work (needed by nexmod_apk.py) ─────────
+# ── Verify baksmali+smali are ready (needed by nexmod_apk.py) ────
 APK_ENGINE_OK=0
 log_info "Verifying APK engine tools..."
-_bs_ok=false; _s_ok=false
-[ -f "$BIN_DIR/baksmali.jar" ] && \
-    sz=$(stat -c%s "$BIN_DIR/baksmali.jar") && [ "$sz" -gt 500000 ] && _bs_ok=true
-[ -f "$BIN_DIR/smali.jar" ] && \
-    sz=$(stat -c%s "$BIN_DIR/smali.jar") && [ "$sz" -gt 500000 ] && _s_ok=true
-if $(_bs_ok && _s_ok); then
-    log_success "✓ baksmali.jar and smali.jar ready"
+_bs_sz=$(stat -c%s "$BIN_DIR/baksmali.jar" 2>/dev/null || echo 0)
+_sm_sz=$(stat -c%s "$BIN_DIR/smali.jar"    2>/dev/null || echo 0)
+if [ "$_bs_sz" -gt 500000 ] && [ "$_sm_sz" -gt 500000 ]; then
+    log_success "✓ baksmali.jar (${_bs_sz}B) and smali.jar (${_sm_sz}B) ready"
     APK_ENGINE_OK=1
 else
-    log_error "baksmali/smali not ready — DEX patches will be skipped"
+    log_error "baksmali/smali not ready (bs:${_bs_sz}B sm:${_sm_sz}B) — DEX patches skipped"
 fi
 
 # ── Wrapper: DEX patch + alignment fix ───────────────────────────
