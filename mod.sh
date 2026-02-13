@@ -546,10 +546,15 @@ def _fix_checksums(dex: bytearray):
 # ════════════════════════════════════════════════════════════════════
 
 def binary_patch_method(dex: bytearray, class_desc: str, method_name: str,
-                        stub_regs: int, stub_insns: bytes) -> bool:
+                        stub_regs: int, stub_insns: bytes,
+                        trim: bool = False) -> bool:
     """
     In-place patch: find method by exact class + name, replace code_item with stub.
-    NOP-pads the remaining instruction bytes to keep DEX layout intact.
+
+    trim=False (default): NOP-pads remainder → keeps insns_size, layout unchanged.
+    trim=True: shrinks insns_size in the header to stub length.
+      → Clean baksmali output (no nop flood, no spurious annotations).
+      → Use for validateTheme and any method where baksmali output matters.
     """
     data = bytes(dex)
     hdr  = _parse_header(data)
@@ -601,23 +606,43 @@ def binary_patch_method(dex: bytearray, class_desc: str, method_name: str,
     if code_off is None:
         warn(f"  Method {method_name} not found"); return False
 
+    orig_regs  = struct.unpack_from('<H', data, code_off + 0)[0]
+    orig_ins   = struct.unpack_from('<H', data, code_off + 2)[0]
     insns_size = struct.unpack_from('<I', data, code_off + 12)[0]
     insns_off  = code_off + 16
     stub_units = len(stub_insns) // 2
+
     ok(f"  code_item @ 0x{code_off:X}: insns={insns_size} cu ({insns_size*2}B)")
 
     if stub_units > insns_size:
         err(f"  Stub {stub_units} cu > original {insns_size} cu — cannot patch in-place")
         return False
 
-    struct.pack_into('<H', dex, code_off + 0, stub_regs)   # registers_size
-    struct.pack_into('<H', dex, code_off + 4, 0)            # outs_size = 0
-    struct.pack_into('<H', dex, code_off + 6, 0)            # tries_size = 0
-    struct.pack_into('<I', dex, code_off + 8, 0)            # debug_info_off = 0
-    for i, b in enumerate(stub_insns): dex[insns_off + i] = b
-    for i in range(len(stub_insns), insns_size * 2): dex[insns_off + i] = 0x00
+    # registers_size must be >= ins_size (parameter slots are always at top of frame)
+    new_regs = max(stub_regs, orig_ins)
+
+    # ── Patch code_item header ────────────────────────────────────────
+    struct.pack_into('<H', dex, code_off + 0, new_regs)   # registers_size
+    struct.pack_into('<H', dex, code_off + 4, 0)           # outs_size = 0
+    struct.pack_into('<H', dex, code_off + 6, 0)           # tries_size = 0
+    struct.pack_into('<I', dex, code_off + 8, 0)           # debug_info_off = 0
+    if trim:
+        # Shrink insns_size → stub length. No NOP padding written.
+        # Safe: ART locates code_items by offset (class_data_item), not by sequential scan.
+        struct.pack_into('<I', dex, code_off + 12, stub_units)
+
+    # ── Write stub + optional NOP padding ────────────────────────────
+    for i, b in enumerate(stub_insns):
+        dex[insns_off + i] = b
+    if not trim:
+        for i in range(len(stub_insns), insns_size * 2):
+            dex[insns_off + i] = 0x00   # NOP pad
+
     _fix_checksums(dex)
-    ok(f"  ✓ {method_name} → stub ({stub_units} cu + {insns_size-stub_units} nop)"); return True
+    nops = 0 if trim else (insns_size - stub_units)
+    mode = "trimmed" if trim else f"{nops} nop pad"
+    ok(f"  ✓ {method_name} → stub ({stub_units} cu, {mode}, regs {orig_regs}→{new_regs})")
+    return True
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -628,18 +653,22 @@ def binary_patch_method(dex: bytearray, class_desc: str, method_name: str,
 def binary_patch_sget_to_true(dex: bytearray,
                                field_class: str, field_name: str,
                                only_class:  str = None,
-                               only_method: str = None) -> int:
+                               only_method: str = None,
+                               use_const4:  bool = False) -> int:
     """
     Within every code_item instruction array (never raw DEX tables), find:
       sget-boolean vAA, <field_class>-><field_name>:Z   opcode 0x63, 4 bytes
-      (also handles sget 0x60 / sget-byte 0x64 / sget-char 0x65 / sget-short 0x66)
-    Replace with:
-      const/16 vAA, 0x1                                 opcode 0x15, 4 bytes
+    Replace with const/4 or const/16 (both 4 bytes total in the stream):
 
-    NOTE: sget-boolean = 0x63 (NOT 0x60 which is plain sget/int).
-    All sget variants share format 21c so the replacement is identical.
+      use_const4=False (default):
+        const/16 vAA, 0x1   →  15 AA 01 00   (format 21s, 4 bytes)
 
-    Optionally restrict to only_class (substring of type_str) and only_method.
+      use_const4=True (when user specifies const/4 explicitly):
+        const/4  vAA, 0x1   →  12 (0x10|AA) 00 00   (format 11n, 2 bytes + NOP NOP)
+        Only valid for register AA ≤ 15 (always true for low boolean regs).
+
+    Covers all sget variants (0x60/0x63/0x64/0x65/0x66 = format 21c, 4 bytes).
+    Optionally restrict to only_class (substring) and only_method.
     Returns count of replacements.
     """
     data = bytes(dex)
@@ -652,7 +681,7 @@ def binary_patch_sget_to_true(dex: bytearray,
     for fi in fids:
         info(f"  Found field: {field_class}->{field_name} @ field_id[{fi}] = 0x{fi:04X}")
 
-    # All sget variants: 0x60(sget) 0x61(wide) 0x62(object) 0x63(boolean) 0x64(byte) 0x65(char) 0x66(short)
+    # All sget variants (format 21c, 4 bytes): boolean=0x63, plain=0x60, byte=0x64, char=0x65, short=0x66
     SGET_OPCODES = frozenset([0x60, 0x63, 0x64, 0x65, 0x66])
 
     raw   = bytearray(dex)
@@ -668,20 +697,30 @@ def binary_patch_sget_to_true(dex: bytearray,
                 reg      = raw[insns_off + i + 1]
                 field_lo = struct.unpack_from('<H', raw, insns_off + i + 2)[0]
                 if field_lo in fids:
-                    raw[insns_off + i]     = 0x15   # const/16 opcode
-                    raw[insns_off + i + 1] = reg    # same destination register
-                    raw[insns_off + i + 2] = 0x01   # literal = 1 (low byte)
-                    raw[insns_off + i + 3] = 0x00   # literal (high byte)
+                    if use_const4 and reg <= 15:
+                        # const/4 vAA, 0x1  (11n: opcode=0x12, byte1=(value<<4)|reg)
+                        raw[insns_off + i]     = 0x12
+                        raw[insns_off + i + 1] = (0x1 << 4) | reg
+                        raw[insns_off + i + 2] = 0x00   # NOP
+                        raw[insns_off + i + 3] = 0x00   # NOP
+                    else:
+                        # const/16 vAA, 0x1  (21s)
+                        raw[insns_off + i]     = 0x15
+                        raw[insns_off + i + 1] = reg
+                        raw[insns_off + i + 2] = 0x01
+                        raw[insns_off + i + 3] = 0x00
                     count += 1
                 i += 4
             else:
                 i += 2
 
+    mode = "const/4" if use_const4 else "const/16"
     if count:
         _fix_checksums(raw); dex[:] = raw
-        ok(f"  ✓ {field_name}: {count} sget → const/16 1")
+        ok(f"  ✓ {field_name}: {count} sget → {mode} 1")
     else:
-        warn(f"  {field_name}: no sget instruction found in code sections")
+        warn(f"  {field_name}: no matching sget found"
+             + (f" in {only_class}::{only_method}" if only_class else ""))
     return count
 
 
@@ -739,6 +778,76 @@ def binary_swap_field_ref(dex: bytearray,
     else:
         warn(f"  {method_name}: field ref {old_field_name} not found")
         return False
+
+
+# ════════════════════════════════════════════════════════════════════
+#  BINARY PATCH: swap string literal reference
+#  Used for: MIUIFrequentPhrase Gboard redirect (no apktool, no timeout)
+#    const-string/const-string-jumbo that reference old_str → new_str
+# ════════════════════════════════════════════════════════════════════
+
+def _find_string_idx(data: bytes, hdr: dict, target: str) -> Optional[int]:
+    """Binary search the sorted DEX string pool. Returns index or None."""
+    lo, hi = 0, hdr['string_ids_size'] - 1
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        s   = _get_str(data, hdr, mid)
+        if s == target: return mid
+        if s < target:  lo = mid + 1
+        else:           hi = mid - 1
+    return None
+
+def binary_swap_string(dex: bytearray, old_str: str, new_str: str,
+                       only_class: str = None) -> int:
+    """
+    Replace const-string / const-string-jumbo instructions that reference
+    old_str with ones that reference new_str.
+    new_str must already exist in the DEX string pool (not injected).
+    Only scans verified code_item instruction arrays.
+    Returns count of replacements.
+    """
+    data = bytes(dex)
+    hdr  = _parse_header(data)
+    if not hdr: return 0
+
+    old_idx = _find_string_idx(data, hdr, old_str)
+    if old_idx is None:
+        warn(f"  String '{old_str}' not in DEX pool — skip"); return 0
+    new_idx = _find_string_idx(data, hdr, new_str)
+    if new_idx is None:
+        warn(f"  String '{new_str}' not in DEX pool — cannot swap"); return 0
+
+    info(f"  String swap: idx[{old_idx}] '{old_str}' → idx[{new_idx}] '{new_str}'")
+    raw   = bytearray(dex)
+    count = 0
+
+    for insns_off, insns_len, type_str, mname in _iter_code_items(data, hdr):
+        if only_class and only_class not in type_str: continue
+        i = 0
+        while i < insns_len - 3:
+            op = raw[insns_off + i]
+            if op == 0x1A and i + 3 < insns_len:    # const-string (21c, 4 bytes)
+                sidx = struct.unpack_from('<H', raw, insns_off + i + 2)[0]
+                if sidx == old_idx:
+                    struct.pack_into('<H', raw, insns_off + i + 2, new_idx & 0xFFFF)
+                    count += 1
+                i += 4
+            elif op == 0x1B and i + 5 < insns_len:  # const-string/jumbo (31c, 6 bytes)
+                sidx = struct.unpack_from('<I', raw, insns_off + i + 2)[0]
+                if sidx == old_idx:
+                    struct.pack_into('<I', raw, insns_off + i + 2, new_idx)
+                    count += 1
+                i += 6
+            else:
+                i += 2
+
+    if count:
+        _fix_checksums(raw); dex[:] = raw
+        ok(f"  ✓ '{old_str}' → '{new_str}': {count} ref(s) swapped")
+    else:
+        warn(f"  No const-string refs to '{old_str}' found"
+             + (f" in {only_class}" if only_class else ""))
+    return count
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -824,72 +933,29 @@ def _settings_ai_patch(dex_name: str, dex: bytearray) -> bool:
 # ── SoundRecorder APK  ──────────────────────────────────────────
 def _recorder_ai_patch(dex_name: str, dex: bytearray) -> bool:
     """
-    Patch AI-gating methods in SoundRecorder APK → return true.
-    Tries multiple method names since exact name varies between ROM builds.
-    Also patches IS_INTERNATIONAL_BUILD if present.
+    Exact: AiDeviceUtil::isAiSupportedDevice → return true.
+    Also patches IS_INTERNATIONAL_BUILD if present as a fallback gate.
     """
-    raw_bytes = bytes(dex)
-    patched   = False
+    patched = False
+    raw = bytes(dex)
 
-    # ── Method name candidates (varies per ROM build) ─────────────────
-    AI_METHODS = [
-        "isAiRecordEnable",
-        "isAiRecordEnabled",
-        "isAiRecordSupported",
-        "isAiRecordingEnabled",
-        "isAiEnabled",
-        "isAiSupported",
-    ]
-
-    for method_name in AI_METHODS:
-        if method_name.encode() not in raw_bytes:
-            continue
-        # Try known class paths
+    # Primary target — user confirmed exact class + method
+    if b'AiDeviceUtil' in raw:
         for cls in (
-            "com/miui/soundrecorder/utils/AiRecordUtils",
-            "com/miui/soundrecorder/utils/FeatureUtils",
-            "com/miui/soundrecorder/utils/MiuiFeatureUtils",
-            "com/miui/soundrecorder/AiRecordUtils",
-            "com/miui/soundrecorder/FeatureUtils",
-            "com/android/soundrecorder/utils/FeatureUtils",
+            "com/miui/soundrecorder/utils/AiDeviceUtil",
+            "com/miui/soundrecorder/AiDeviceUtil",
         ):
-            if binary_patch_method(dex, cls, method_name, 1, _STUB_TRUE):
+            if binary_patch_method(dex, cls, "isAiSupportedDevice",
+                                   stub_regs=1, stub_insns=_STUB_TRUE):
                 patched = True
-                raw_bytes = bytes(dex)   # refresh after mutation
+                raw = bytes(dex)
                 break
-        if patched: break
 
-    # Fallback: class-scan if known paths missed
-    if not patched:
-        data = bytes(dex)
-        hdr  = _parse_header(data)
-        if hdr:
-            for method_name in AI_METHODS:
-                if method_name.encode() not in data:
-                    continue
-                for ci in range(hdr['class_defs_size']):
-                    base = hdr['class_defs_off'] + ci * 32
-                    if struct.unpack_from('<I', data, base + 24)[0] == 0:
-                        continue
-                    cls_idx = struct.unpack_from('<I', data, base)[0]
-                    try:
-                        sidx     = struct.unpack_from('<I', data, hdr['type_ids_off'] + cls_idx * 4)[0]
-                        type_str = _get_str(data, hdr, sidx)
-                        if type_str.startswith('L') and type_str.endswith(';'):
-                            if binary_patch_method(dex, type_str[1:-1], method_name, 1, _STUB_TRUE):
-                                patched = True
-                                break
-                    except Exception:
-                        continue
-                if patched: break
-
-    # Also patch IS_INTERNATIONAL_BUILD if present (region gating)
-    if b'IS_INTERNATIONAL_BUILD' in bytes(dex):
+    # IS_INTERNATIONAL_BUILD gate (region lock inside recorder)
+    if b'IS_INTERNATIONAL_BUILD' in raw:
         if binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD') > 0:
             patched = True
 
-    if not patched:
-        warn("  No patchable AI methods found in this recorder build — skip")
     return patched
 
 # ── services.jar  ────────────────────────────────────────────────
@@ -914,30 +980,35 @@ def _systemui_all_patch(dex_name: str, dex: bytearray) -> bool:
     patched = False
     raw = bytes(dex)
 
-    # 1. VoLTE: Lmiui/os/Build;->IS_INTERNATIONAL_BUILD
-    if b'IS_INTERNATIONAL_BUILD' in raw:
+    # 1. VoLTE icons: Lmiui/os/Build;->IS_INTERNATIONAL_BUILD
+    #    Scans ALL classes in this DEX — covers MiuiMobileIconBinder$bind$1$1$10 too
+    if b'IS_INTERNATIONAL_BUILD' in raw and b'miui/os/Build' in raw:
         if binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD') > 0:
             patched = True
+            raw = bytes(dex)
 
     # 2. QuickShare: Lcom/miui/utils/configs/MiuiConfigs;->IS_INTERNATIONAL_BUILD
-    #    only in CurrentTilesInteractorImpl::createTileSync
-    if b'CurrentTilesInteractorImpl' in raw and b'IS_INTERNATIONAL_BUILD' in raw:
+    #    EXACT: CurrentTilesInteractorImpl::createTileSync only, const/4 pX, 0x1
+    if b'CurrentTilesInteractorImpl' in raw and b'MiuiConfigs' in raw:
         if binary_patch_sget_to_true(
                 dex,
                 'Lcom/miui/utils/configs/MiuiConfigs;', 'IS_INTERNATIONAL_BUILD',
-                only_class='CurrentTilesInteractorImpl', only_method='createTileSync') > 0:
+                only_class='CurrentTilesInteractorImpl',
+                only_method='createTileSync',
+                use_const4=True) > 0:
             patched = True
+            raw = bytes(dex)
 
-    # 3. WA notification: isEmptySummary field swap
-    #    Lcom/miui/utils/configs/MiuiConfigs;->IS_INTERNATIONAL_BUILD:Z
-    #    → Lmiui/os/Build;->IS_ALPHA_BUILD:Z
-    if b'NotificationUtil' in raw:
-        if binary_swap_field_ref(
+    # 3. WA notification: NotificationUtil::isEmptySummary
+    #    sget-boolean v3, MiuiConfigs->IS_INTERNATIONAL_BUILD → const/4 v3, 0x1
+    #    Keep same register, do not restructure method.
+    if b'NotificationUtil' in raw and b'MiuiConfigs' in raw:
+        if binary_patch_sget_to_true(
                 dex,
-                "com/android/systemui/statusbar/notification/NotificationUtil",
-                "isEmptySummary",
                 'Lcom/miui/utils/configs/MiuiConfigs;', 'IS_INTERNATIONAL_BUILD',
-                'Lmiui/os/Build;', 'IS_ALPHA_BUILD'):
+                only_class='NotificationUtil',
+                only_method='isEmptySummary',
+                use_const4=True) > 0:
             patched = True
 
     return patched
@@ -946,11 +1017,16 @@ def _systemui_all_patch(dex_name: str, dex: bytearray) -> bool:
 def _miui_framework_patch(dex_name: str, dex: bytearray) -> bool:
     patched = False
     # (1) ThemeReceiver::validateTheme → return-void
+    #     trim=True: insns_size shrinks to 1 cu. baksmali sees exactly:
+    #       .registers 5
+    #       return-void
+    #     No nop, no annotations added.
     if b'ThemeReceiver' in bytes(dex):
         if binary_patch_method(dex,
-                "miui/drm/ThemeReceiver", "validateTheme", 5, _STUB_VOID):
+                "miui/drm/ThemeReceiver", "validateTheme",
+                stub_regs=5, stub_insns=_STUB_VOID, trim=True):
             patched = True
-    # (2) IS_GLOBAL_BUILD → 1 (Customizeutil + any class in this jar)
+    # (2) IS_GLOBAL_BUILD: no class filter — only jar in scope is miui-framework itself
     if b'IS_GLOBAL_BUILD' in bytes(dex):
         if binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD') > 0:
             patched = True
@@ -960,12 +1036,50 @@ def _miui_framework_patch(dex_name: str, dex: bytearray) -> bool:
 def _settings_region_patch(dex_name: str, dex: bytearray) -> bool:
     if b'IS_GLOBAL_BUILD' not in bytes(dex): return False
     n = 0
-    # Patch specifically in the three locale classes
-    for cls in ('LocaleController', 'LocaleSettingsTree', 'OtherPersonalSettings'):
-        n += binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
-                                        only_class=cls)
-    # Also patch any remaining IS_GLOBAL_BUILD in this DEX
-    n += binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD')
+    # EXACT three classes only — no mass scan anywhere else
+    n += binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
+                                    only_class='LocaleController')
+    n += binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
+                                    only_class='LocaleSettingsTree')
+    # OtherPersonalSettings has 2 IS_GLOBAL_BUILD lines — both get patched by this call
+    n += binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
+                                    only_class='OtherPersonalSettings')
+    return n > 0
+
+
+# ── InCallUI.apk  ────────────────────────────────────────────────
+def _incallui_patch(dex_name: str, dex: bytearray) -> bool:
+    """
+    RecorderUtils::isAiRecordEnable → return true.
+    Package: com.android.incallui
+    """
+    if b'RecorderUtils' not in bytes(dex): return False
+    return binary_patch_method(dex,
+        "com/android/incallui/RecorderUtils",
+        "isAiRecordEnable",
+        stub_regs=1, stub_insns=_STUB_TRUE)
+
+# ── MIUIFrequentPhrase.apk — Gboard redirect  ────────────────────
+_BAIDU_IME  = "com.baidu.input_mi"
+_GBOARD_IME = "com.google.android.inputmethod.latin"
+
+def _miuifreqphrase_patch(dex_name: str, dex: bytearray) -> bool:
+    """
+    Binary const-string swap inside two classes:
+      InputMethodBottomManager  (com/miui/inputmethod/)
+      InputProvider             (com/miui/provider/)
+    Only the string literal reference is changed — no method restructuring,
+    no register changes, no class renames. Zero apktool, zero timeout risk.
+    """
+    if _BAIDU_IME.encode() not in bytes(dex): return False
+    n = 0
+    n += binary_swap_string(dex, _BAIDU_IME, _GBOARD_IME,
+                            only_class='InputMethodBottomManager')
+    n += binary_swap_string(dex, _BAIDU_IME, _GBOARD_IME,
+                            only_class='InputProvider')
+    if n == 0:
+        # Fallback: swap all refs in DEX (covers different packaging)
+        n += binary_swap_string(dex, _BAIDU_IME, _GBOARD_IME)
     return n > 0
 
 
@@ -976,13 +1090,15 @@ def _settings_region_patch(dex_name: str, dex: bytearray) -> bool:
 PROFILES = {
     "framework-sig":     _fw_sig_patch,
     "settings-ai":       _settings_ai_patch,
-    "voice-recorder-ai": _recorder_ai_patch,
+    "settings-region":   _settings_region_patch,   # exact 3 classes only
+    "voice-recorder-ai": _recorder_ai_patch,        # AiDeviceUtil::isAiSupportedDevice
     "services-jar":      _services_jar_patch,
     "provision-gms":     _intl_build_patch,
     "miui-service":      _intl_build_patch,
-    "systemui-volte":    _systemui_all_patch,   # covers VoLTE+QuickShare+WA
-    "miui-framework":    _miui_framework_patch,
-    "settings-region":   _settings_region_patch,
+    "systemui-volte":    _systemui_all_patch,       # VoLTE + QuickShare(const/4) + WA-notif
+    "miui-framework":    _miui_framework_patch,     # validateTheme(trim) + IS_GLOBAL_BUILD
+    "incallui-ai":       _incallui_patch,           # RecorderUtils::isAiRecordEnable
+    "miuifreqphrase":    _miuifreqphrase_patch,     # Baidu→Gboard binary string swap
 }
 
 def main():
@@ -1685,6 +1801,11 @@ PYTHON_EOF
             _run_dex_patch "VOICE RECORDER AI" "voice-recorder-ai" "$_RECORDER_APK"
             cd "$GITHUB_WORKSPACE"
 
+            # D3b. InCallUI — AI recording gate: RecorderUtils::isAiRecordEnable → true
+            _run_dex_patch "INCALLUI AI" "incallui-ai" \
+                "$(find "$DUMP_DIR" -path "*/priv-app/InCallUI/InCallUI.apk" -type f | head -n1)"
+            cd "$GITHUB_WORKSPACE"
+
         fi
 
         # ── system_ext partition ──────────────────────────────────
@@ -1786,43 +1907,85 @@ CUSTKEYS
 
         # E. MIUI-FRAMEWORK (handled via dex_patcher.py miui-framework profile above)
         #    ThemeReceiver bypass + IS_GLOBAL_BUILD already done in D8 above.
-        #    Baidu→Gboard for miui-framework handled by apktool below for MIUIFrequentPhrase.
 
-        # F. MIUI FREQUENT PHRASE (COLORS + GBOARD)
+        # F. MIUI FREQUENT PHRASE — Gboard redirect
         MFP_APK=$(find "$DUMP_DIR" -name "MIUIFrequentPhrase.apk" -type f -print -quit)
-        if [ ! -z "$MFP_APK" ]; then
+        if [ -n "$MFP_APK" ]; then
             log_info "🎨 Modding MIUIFrequentPhrase..."
-            rm -rf "$TEMP_DIR/mfp.apk" "$TEMP_DIR/mfp_src"
-            cp "$MFP_APK" "$TEMP_DIR/mfp.apk"
-            cd "$TEMP_DIR"
-            if timeout 8m apktool d -f "mfp.apk" -o "mfp_src" >/dev/null 2>&1; then
-                # Redirect to Gboard
-                # Redirect IME: InputMethodBottomManager + InputProvider → Gboard
-                find "mfp_src" -name "InputMethodBottomManager.smali" -exec \
-                    sed -i 's/com\.baidu\.input_mi/com.google.android.inputmethod.latin/g' {} +
-                find "mfp_src" -name "InputProvider.smali" -exec \
-                    sed -i 's/com\.baidu\.input_mi/com.google.android.inputmethod.latin/g' {} +
-                log_success "✓ Redirected IME to Gboard (InputMethodBottomManager + InputProvider)"
-                
-                # Update colors
-                if [ -f "mfp_src/res/values/colors.xml" ]; then
-                    sed -i 's|<color name="input_bottom_background_color">.*</color>|<color name="input_bottom_background_color">@android:color/system_neutral1_50</color>|g' "mfp_src/res/values/colors.xml"
-                    log_success "✓ Updated light theme colors"
-                fi
-                if [ -f "mfp_src/res/values-night/colors.xml" ]; then
-                    sed -i 's|<color name="input_bottom_background_color">.*</color>|<color name="input_bottom_background_color">@android:color/system_neutral1_900</color>|g' "mfp_src/res/values-night/colors.xml"
-                    log_success "✓ Updated dark theme colors"
-                fi
-                
-                apktool b -c "mfp_src" -o "mfp_patched.apk" >/dev/null 2>&1
-                if [ -f "mfp_patched.apk" ]; then
-                    mv "mfp_patched.apk" "$MFP_APK"
-                    log_success "✓ MIUIFrequentPhrase patched successfully"
-                fi
+
+            # ── Pass 1: binary const-string swap (zero timeout risk) ──────────
+            # Works only if "com.google.android.inputmethod.latin" already exists
+            # in the DEX string pool. Graceful skip if it doesn't.
+            _run_dex_patch "MIUIFREQPHRASE GBOARD" "miuifreqphrase" "$MFP_APK"
+
+            # ── Pass 2: verify — if Baidu string still present, use apktool -r ─
+            if python3 -c "
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1]) as z:
+    for n in z.namelist():
+        if n.startswith('classes') and n.endswith('.dex'):
+            if b'com.baidu.input_mi' in z.read(n):
+                sys.exit(1)
+sys.exit(0)
+" "$MFP_APK" 2>/dev/null; then
+                log_success "✓ MIUIFrequentPhrase Gboard redirect confirmed (binary swap)"
             else
-                log_warning "MIUIFrequentPhrase decompile timeout - skipping"
+                log_warning "Binary swap incomplete — trying apktool -r fallback (no-res, fast)"
+                MFP_WORK="$TEMP_DIR/mfp_work"
+                rm -rf "$MFP_WORK"
+                MFP_OK=0
+                if timeout 10m apktool d -r -f "$MFP_APK" -o "$MFP_WORK" >/dev/null 2>&1; then
+                    # Only patch the two target smali files — no method restructure
+                    find "$MFP_WORK/smali" \
+                        \( -name "InputMethodBottomManager.smali" -o -name "InputProvider.smali" \) \
+                        -exec sed -i 's|com\.baidu\.input_mi|com.google.android.inputmethod.latin|g' {} +
+                    log_success "✓ String replaced in smali target classes"
+                    if timeout 8m apktool b -c "$MFP_WORK" -o "${MFP_APK}.tmp" >/dev/null 2>&1; then
+                        mv "${MFP_APK}.tmp" "$MFP_APK"
+                        log_success "✓ MIUIFrequentPhrase patched via apktool fallback"
+                        MFP_OK=1
+                    else
+                        rm -f "${MFP_APK}.tmp"
+                        log_warning "apktool build failed — MIUIFrequentPhrase unchanged"
+                    fi
+                else
+                    log_warning "apktool -r timed out (10m) — MIUIFrequentPhrase unchanged"
+                fi
+                rm -rf "$MFP_WORK"
+                [ "$MFP_OK" -eq 0 ] && log_warning "⚠ MIUIFrequentPhrase Gboard redirect skipped"
             fi
+
             cd "$GITHUB_WORKSPACE"
+
+            # Colors XML update (resource-only, safe to do via zipfile sed)
+            python3 - "$MFP_APK" <<'COLORS_PY' 2>&1 | while IFS= read -r l; do [ -n "$l" ] && echo "[INFO] $l"; done
+import sys, zipfile, shutil, tempfile, pathlib, re
+
+apk = pathlib.Path(sys.argv[1])
+tmp = apk.with_name("_colors_" + apk.name)
+patched = 0
+with zipfile.ZipFile(apk, 'r') as zin, zipfile.ZipFile(tmp, 'w', zipfile.ZIP_DEFLATED) as zout:
+    for item in zin.infolist():
+        data = zin.read(item.filename)
+        if item.filename in ('res/values/colors.xml', 'res/values-night/colors.xml'):
+            txt = data.decode('utf-8', errors='replace')
+            replacement = ('@android:color/system_neutral1_50' if 'night' not in item.filename
+                           else '@android:color/system_neutral1_900')
+            new_txt = re.sub(
+                r'(<color name="input_bottom_background_color">)[^<]*(</color>)',
+                rf'\g<1>{replacement}\g<2>', txt)
+            if new_txt != txt:
+                data = new_txt.encode('utf-8')
+                patched += 1
+                print(f"[SUCCESS] ✓ Colors patched: {item.filename}")
+        zout.writestr(item, data)
+if patched:
+    shutil.move(str(tmp), str(apk))
+    print(f"[SUCCESS] ✓ MIUIFrequentPhrase colors updated ({patched} file(s))")
+else:
+    tmp.unlink(missing_ok=True)
+    print("[INFO] colors.xml not found in APK — colors step skipped")
+COLORS_PY
         fi
 
         # G. NEXPACKAGE
