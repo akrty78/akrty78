@@ -294,9 +294,13 @@ def binary_patch_sget_to_true(dex: bytearray,
                                only_method: str = None) -> int:
     """
     Within every code_item instruction array (never raw DEX tables), find:
-      sget-boolean vAA, <field_class>-><field_name>:Z   opcode 0x60, 4 bytes
+      sget-boolean vAA, <field_class>-><field_name>:Z   opcode 0x63, 4 bytes
+      (also handles sget 0x60 / sget-byte 0x64 / sget-char 0x65 / sget-short 0x66)
     Replace with:
       const/16 vAA, 0x1                                 opcode 0x15, 4 bytes
+
+    NOTE: sget-boolean = 0x63 (NOT 0x60 which is plain sget/int).
+    All sget variants share format 21c so the replacement is identical.
 
     Optionally restrict to only_class (substring of type_str) and only_method.
     Returns count of replacements.
@@ -311,6 +315,9 @@ def binary_patch_sget_to_true(dex: bytearray,
     for fi in fids:
         info(f"  Found field: {field_class}->{field_name} @ field_id[{fi}] = 0x{fi:04X}")
 
+    # All sget variants: 0x60(sget) 0x61(wide) 0x62(object) 0x63(boolean) 0x64(byte) 0x65(char) 0x66(short)
+    SGET_OPCODES = frozenset([0x60, 0x63, 0x64, 0x65, 0x66])
+
     raw   = bytearray(dex)
     count = 0
 
@@ -319,7 +326,8 @@ def binary_patch_sget_to_true(dex: bytearray,
         if only_method and mname != only_method:        continue
         i = 0
         while i < insns_len - 3:
-            if raw[insns_off + i] == 0x60:
+            op = raw[insns_off + i]
+            if op in SGET_OPCODES:
                 reg      = raw[insns_off + i + 1]
                 field_lo = struct.unpack_from('<H', raw, insns_off + i + 2)[0]
                 if field_lo in fids:
@@ -334,9 +342,9 @@ def binary_patch_sget_to_true(dex: bytearray,
 
     if count:
         _fix_checksums(raw); dex[:] = raw
-        ok(f"  ✓ {field_name}: {count} sget-boolean → const/16 1")
+        ok(f"  ✓ {field_name}: {count} sget → const/16 1")
     else:
-        warn(f"  {field_name}: no sget-boolean found in code sections")
+        warn(f"  {field_name}: no sget instruction found in code sections")
     return count
 
 
@@ -366,6 +374,9 @@ def binary_swap_field_ref(dex: bytearray,
     if new_fi > 0xFFFF:
         err(f"  New field index 0x{new_fi:X} > 0xFFFF, cannot encode in 21c"); return False
 
+    # All sget variants (0x60–0x66) share format 21c — swap field index in any of them
+    SGET_OPCODES = frozenset([0x60, 0x63, 0x64, 0x65, 0x66])
+
     raw = bytearray(dex)
     count = 0
     target_type = f'L{class_desc};'
@@ -375,7 +386,7 @@ def binary_swap_field_ref(dex: bytearray,
         if mname != method_name:       continue
         i = 0
         while i < insns_len - 3:
-            if raw[insns_off + i] == 0x60:
+            if raw[insns_off + i] in SGET_OPCODES:
                 field_lo = struct.unpack_from('<H', raw, insns_off + i + 2)[0]
                 if field_lo in old_fids:
                     struct.pack_into('<H', raw, insns_off + i + 2, new_fi)
@@ -476,39 +487,73 @@ def _settings_ai_patch(dex_name: str, dex: bytearray) -> bool:
 # ── SoundRecorder APK  ──────────────────────────────────────────
 def _recorder_ai_patch(dex_name: str, dex: bytearray) -> bool:
     """
-    Patch isAiRecordEnable() → return true.
-    Searches across every class in the DEX since exact class path varies.
+    Patch AI-gating methods in SoundRecorder APK → return true.
+    Tries multiple method names since exact name varies between ROM builds.
+    Also patches IS_INTERNATIONAL_BUILD if present.
     """
-    if b'isAiRecordEnable' not in bytes(dex): return False
-    # Try known class paths first
-    for cls in (
-        "com/miui/soundrecorder/utils/AiRecordUtils",
-        "com/miui/soundrecorder/utils/FeatureUtils",
-        "com/miui/soundrecorder/AiRecordUtils",
-        "com/miui/soundrecorder/FeatureUtils",
-        "com/android/soundrecorder/utils/FeatureUtils",
-    ):
-        if binary_patch_method(dex, cls, "isAiRecordEnable", 1, _STUB_TRUE):
-            return True
-    # Fallback: scan every class
-    data = bytes(dex)
-    hdr  = _parse_header(data)
-    if not hdr: return False
-    for i in range(hdr['class_defs_size']):
-        base = hdr['class_defs_off'] + i * 32
-        class_data_off = struct.unpack_from('<I', data, base + 24)[0]
-        if class_data_off == 0: continue
-        cls_idx = struct.unpack_from('<I', data, base)[0]
-        try:
-            sidx     = struct.unpack_from('<I', data, hdr['type_ids_off'] + cls_idx * 4)[0]
-            type_str = _get_str(data, hdr, sidx)
-            if type_str.startswith('L') and type_str.endswith(';'):
-                class_desc = type_str[1:-1]
-                if binary_patch_method(dex, class_desc, "isAiRecordEnable", 1, _STUB_TRUE):
-                    return True
-        except Exception:
+    raw_bytes = bytes(dex)
+    patched   = False
+
+    # ── Method name candidates (varies per ROM build) ─────────────────
+    AI_METHODS = [
+        "isAiRecordEnable",
+        "isAiRecordEnabled",
+        "isAiRecordSupported",
+        "isAiRecordingEnabled",
+        "isAiEnabled",
+        "isAiSupported",
+    ]
+
+    for method_name in AI_METHODS:
+        if method_name.encode() not in raw_bytes:
             continue
-    return False
+        # Try known class paths
+        for cls in (
+            "com/miui/soundrecorder/utils/AiRecordUtils",
+            "com/miui/soundrecorder/utils/FeatureUtils",
+            "com/miui/soundrecorder/utils/MiuiFeatureUtils",
+            "com/miui/soundrecorder/AiRecordUtils",
+            "com/miui/soundrecorder/FeatureUtils",
+            "com/android/soundrecorder/utils/FeatureUtils",
+        ):
+            if binary_patch_method(dex, cls, method_name, 1, _STUB_TRUE):
+                patched = True
+                raw_bytes = bytes(dex)   # refresh after mutation
+                break
+        if patched: break
+
+    # Fallback: class-scan if known paths missed
+    if not patched:
+        data = bytes(dex)
+        hdr  = _parse_header(data)
+        if hdr:
+            for method_name in AI_METHODS:
+                if method_name.encode() not in data:
+                    continue
+                for ci in range(hdr['class_defs_size']):
+                    base = hdr['class_defs_off'] + ci * 32
+                    if struct.unpack_from('<I', data, base + 24)[0] == 0:
+                        continue
+                    cls_idx = struct.unpack_from('<I', data, base)[0]
+                    try:
+                        sidx     = struct.unpack_from('<I', data, hdr['type_ids_off'] + cls_idx * 4)[0]
+                        type_str = _get_str(data, hdr, sidx)
+                        if type_str.startswith('L') and type_str.endswith(';'):
+                            if binary_patch_method(dex, type_str[1:-1], method_name, 1, _STUB_TRUE):
+                                patched = True
+                                break
+                    except Exception:
+                        continue
+                if patched: break
+
+    # Also patch IS_INTERNATIONAL_BUILD if present (region gating)
+    if b'IS_INTERNATIONAL_BUILD' in bytes(dex):
+        if binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD') > 0:
+            patched = True
+
+    if not patched:
+        warn("  No patchable AI methods found in this recorder build — skip")
+    return patched
 
 # ── services.jar  ────────────────────────────────────────────────
 def _services_jar_patch(dex_name: str, dex: bytearray) -> bool:
