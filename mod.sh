@@ -282,7 +282,7 @@ cd "$GITHUB_WORKSPACE"
 log_info "Setting up DEX patching tools..."
 
 BAKSMALI_GDRIVE="1RS_lmqeVoMO4-mnCQ-BOV5A9qoa_8VHu"
-SMALI_GDRIVE="YOUR_SMALI_GDRIVE_ID"  # ← paste GDrive ID for smali-2.5.2.jar here
+SMALI_GDRIVE="1KTMCWGOcLs-yeuLwHSoc53J0kpXTZht_"  # ← paste GDrive ID for smali-2.5.2.jar here
 
 _fetch_jar() {
     # _fetch_jar <filename> <gdrive_id> <maven_url> <github_url>
