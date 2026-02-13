@@ -269,78 +269,505 @@ else
 fi
 
 cd "$GITHUB_WORKSPACE"
-# ─────────────────────────────────────────────────────────────────
-#  baksmali + smali — BOTH required for all DEX patching
+# ═════════════════════════════════════════════════════════════════
+#  DEX PATCHING SETUP
+#  Tools: baksmali (decompile) + smali (recompile)
+#  Engine: dex_patcher.py  (written inline below)
 #
-#  baksmali: APK/JAR → smali text files
-#  smali:    smali text files → DEX bytecode
-#
-#  Upload smali.jar to Google Drive and set SMALI_GDRIVE below.
-#  Download from: https://github.com/google/smali/releases/tag/v2.5.2
-# ─────────────────────────────────────────────────────────────────
-log_info "Setting up baksmali + smali tools..."
+#  Download sources tried in order:
+#    1. Google Drive  (set BAKSMALI_GDRIVE / SMALI_GDRIVE below)
+#    2. Maven Central (reliable in GH Actions, no rate-limit)
+#    3. GitHub releases (last resort)
+# ═════════════════════════════════════════════════════════════════
+log_info "Setting up DEX patching tools..."
 
 BAKSMALI_GDRIVE="1RS_lmqeVoMO4-mnCQ-BOV5A9qoa_8VHu"
-SMALI_GDRIVE="YOUR_SMALI_GDRIVE_ID"   # ← Upload smali-2.5.2.jar to GDrive, paste ID here
+SMALI_GDRIVE="YOUR_SMALI_GDRIVE_ID"  # ← paste GDrive ID for smali-2.5.2.jar here
 
-_download_jar() {
-    local name="$1" gdrive_id="$2" fallback_url="$3"
+_fetch_jar() {
+    # _fetch_jar <filename> <gdrive_id> <maven_url> <github_url>
+    local name="$1" gdrive="$2" maven="$3" github="$4"
     local dest="$BIN_DIR/$name"
-
-    # Skip if already valid
     local sz; sz=$(stat -c%s "$dest" 2>/dev/null || echo 0)
-    [ "$sz" -gt 500000 ] && { log_success "✓ $name already present (${sz}B)"; return 0; }
-
+    [ "$sz" -gt 500000 ] && { log_success "✓ $name cached (${sz}B)"; return 0; }
     rm -f "$dest"
 
-    # Try Google Drive first (fastest in CI, no rate limit)
-    if [ "$gdrive_id" != "YOUR_SMALI_GDRIVE_ID" ] && command -v gdown &>/dev/null; then
-        log_info "Downloading $name from Google Drive..."
-        gdown "$gdrive_id" -O "$dest" --fuzzy -q 2>/dev/null || true
+    # 1. Google Drive
+    if [ "$gdrive" != "YOUR_SMALI_GDRIVE_ID" ] && command -v gdown &>/dev/null; then
+        log_info "  $name ← Google Drive..."
+        gdown "$gdrive" -O "$dest" --fuzzy -q 2>/dev/null || true
     fi
 
-    # Fallback: GitHub releases (public, no auth needed)
+    # 2. Maven Central (works in GH Actions, no rate-limit)
     sz=$(stat -c%s "$dest" 2>/dev/null || echo 0)
     if [ "$sz" -lt 500000 ]; then
-        log_info "Downloading $name from GitHub releases..."
-        curl -fsSL --retry 3 -o "$dest" "$fallback_url" 2>/dev/null || true
+        log_info "  $name ← Maven Central..."
+        curl -fsSL --retry 3 --connect-timeout 30 -o "$dest" "$maven" 2>/dev/null || true
+    fi
+
+    # 3. GitHub releases
+    sz=$(stat -c%s "$dest" 2>/dev/null || echo 0)
+    if [ "$sz" -lt 500000 ]; then
+        log_info "  $name ← GitHub releases..."
+        curl -fsSL --retry 2 --connect-timeout 30 -o "$dest" "$github" 2>/dev/null || true
     fi
 
     sz=$(stat -c%s "$dest" 2>/dev/null || echo 0)
     if [ "$sz" -gt 500000 ]; then
-        log_success "✓ $name ready (${sz}B)"
-        return 0
+        log_success "✓ $name ready (${sz}B)"; return 0
     else
-        log_error "✗ $name download failed (${sz}B) — DEX patching will be skipped"
-        return 1
+        log_error "✗ $name unavailable after all sources (${sz}B)"; return 1
     fi
 }
 
-_download_jar "baksmali.jar" "$BAKSMALI_GDRIVE" \
+_fetch_jar "baksmali.jar" \
+    "$BAKSMALI_GDRIVE" \
+    "https://repo1.maven.org/maven2/com/android/tools/smali/smali-baksmali/3.0.3/smali-baksmali-3.0.3.jar" \
     "https://github.com/google/smali/releases/download/v2.5.2/baksmali-2.5.2.jar"
 
-_download_jar "smali.jar" "$SMALI_GDRIVE" \
+_fetch_jar "smali.jar" \
+    "$SMALI_GDRIVE" \
+    "https://repo1.maven.org/maven2/com/android/tools/smali/smali-cli/3.0.3/smali-cli-3.0.3.jar" \
     "https://github.com/google/smali/releases/download/v2.5.2/smali-2.5.2.jar"
 
-# Quick smoke-test: both jars must be loadable by Java
-SMALI_TOOLS_OK=0
-if java -jar "$BIN_DIR/baksmali.jar" --version &>/dev/null && \
-   java -jar "$BIN_DIR/smali.jar"    --version &>/dev/null; then
-    log_success "✓ baksmali + smali verified and ready"
-    SMALI_TOOLS_OK=1
-else
-    log_error "baksmali/smali verification failed — DEX patching will be skipped"
-fi
+# ─────────────────────────────────────────────────────────────────
+#  Write dex_patcher.py inline (same pattern as vbmeta_patcher.py)
+#  This is the single Python engine for ALL DEX patching operations.
+# ─────────────────────────────────────────────────────────────────
+cat > "$BIN_DIR/dex_patcher.py" <<'PYTHON_EOF'
+#!/usr/bin/env python3
+"""
+dex_patcher.py  ─  HyperOS ROM DEX patching engine
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Pipeline (identical to MT Manager DEX editor internals):
+  1.  unzip <dex>  from APK/JAR        (no manifest read)
+  2.  java -jar baksmali.jar d <dex>   (DEX → smali text)
+  3.  Python edits .smali text files   (targeted, surgical)
+  4.  java -jar smali.jar   a smali/   (smali text → DEX)
+  5.  zip -0 -u <archive> <dex>        (STORE, manifest untouched)
 
-# =========================================================
-#  3.5. LOAD DEX PATCHER LIBRARY
-# =========================================================
-log_info "Loading DEX patcher library..."
-if [ -f "$BIN_DIR/smali_tools.sh" ]; then
-    source "$BIN_DIR/smali_tools.sh"
-    log_success "✓ smali_tools.sh loaded"
+Commands:
+  verify          – check baksmali + smali are working
+  framework-sig   – disable all signature verification in framework.jar
+  settings-ai     – enable AI features in Settings.apk
+  systemui-volte  – enable VoLTE icons in MiuiSystemUI.apk
+  provision-gms   – enable GMS in Provision.apk
+  miui-service    – CN→Global patch for miui-services.jar
+"""
+
+import sys, os, re, subprocess, tempfile, shutil, zipfile
+from pathlib import Path
+
+# ── Locate JARs ──────────────────────────────────────────────────
+_BIN = Path(os.environ.get("BIN_DIR", Path(__file__).parent))
+BAKSMALI = _BIN / "baksmali.jar"
+SMALI    = _BIN / "smali.jar"
+API      = "35"
+
+# ── Logging (matches manager log_ format) ────────────────────────
+def _p(tag, msg): print(f"[{tag}] {msg}", flush=True)
+def info(m):    _p("INFO",    m)
+def ok(m):      _p("SUCCESS", m)
+def warn(m):    _p("WARNING", m)
+def err(m):     _p("ERROR",   m)
+
+# ─────────────────────────────────────────────────────────────────
+#  TOOL VERIFY
+# ─────────────────────────────────────────────────────────────────
+def cmd_verify():
+    all_ok = True
+    for jar in (BAKSMALI, SMALI):
+        if not jar.exists():
+            err(f"{jar.name} not found at {jar}"); all_ok = False; continue
+        sz = jar.stat().st_size
+        if sz < 500_000:
+            err(f"{jar.name} too small ({sz}B)"); all_ok = False; continue
+        # Smoke-test: run with no args — any rc is fine as long as it executes
+        r = subprocess.run(["java", "-jar", str(jar)],
+                           capture_output=True, text=True, timeout=15)
+        # smali/baksmali print usage and exit non-zero with no args — that's fine
+        if "Exception" in r.stderr and "ClassNotFoundException" in r.stderr:
+            err(f"{jar.name} broken: {r.stderr[:120]}"); all_ok = False; continue
+        ok(f"{jar.name} OK  ({sz:,}B)")
+    sys.exit(0 if all_ok else 1)
+
+# ─────────────────────────────────────────────────────────────────
+#  CORE PIPELINE
+# ─────────────────────────────────────────────────────────────────
+def list_dexes(archive: Path) -> list:
+    with zipfile.ZipFile(archive) as z:
+        names = [n for n in z.namelist() if re.match(r'^classes\d*\.dex$', n)]
+    return sorted(names, key=lambda x: (0 if x == "classes.dex"
+                                        else int(re.search(r'\d+', x).group())))
+
+def dex_has(archive: Path, dex: str, *needles) -> bool:
+    """Binary string-scan of the DEX — faster than extracting."""
+    with zipfile.ZipFile(archive) as z:
+        raw = z.read(dex)
+    return any(n.encode() in raw for n in needles)
+
+def patch_dex(archive: Path, dex_name: str, patch_fn) -> bool:
+    """
+    Full pipeline: extract → baksmali → patch_fn(smali_dir) → smali → zip -0 -u.
+    Returns True if patch_fn made changes AND recompile succeeded.
+    """
+    work = Path(tempfile.mkdtemp(prefix="dp_"))
+    try:
+        dex = work / dex_name
+        with zipfile.ZipFile(archive) as z:
+            dex.write_bytes(z.read(dex_name))
+        info(f"  {dex_name}: {dex.stat().st_size//1024}K extracted")
+
+        # baksmali decompile
+        out = work / "smali"
+        out.mkdir()
+        r = subprocess.run(
+            ["java", "-jar", str(BAKSMALI), "d", "-a", API, str(dex), "-o", str(out)],
+            capture_output=True, text=True, timeout=300)
+        if r.returncode != 0:
+            err(f"  baksmali error: {r.stderr[:300]}"); return False
+        n = sum(1 for _ in out.rglob("*.smali"))
+        info(f"  baksmali: {n} smali files")
+
+        # Apply patch function
+        if not patch_fn(out):
+            warn(f"  {dex_name}: patch_fn found nothing to patch"); return False
+
+        # smali recompile
+        new_dex = work / f"out_{dex_name}"
+        r = subprocess.run(
+            ["java", "-jar", str(SMALI), "a", "-a", API, str(out), "-o", str(new_dex)],
+            capture_output=True, text=True, timeout=300)
+        if r.returncode != 0:
+            err(f"  smali error: {r.stderr[:300]}"); return False
+        info(f"  smali: {new_dex.stat().st_size//1024}K recompiled")
+
+        # zip -0 -u  ← STORE (no compression), manifest untouched
+        shutil.copy2(new_dex, work / dex_name)
+        r = subprocess.run(["zip", "-0", "-u", str(archive), dex_name],
+                           cwd=str(work), capture_output=True, text=True)
+        if r.returncode not in (0, 12):
+            err(f"  zip error (rc={r.returncode}): {r.stderr}"); return False
+        ok(f"  ✓ {dex_name} patched")
+        return True
+    except subprocess.TimeoutExpired:
+        err(f"  Timeout processing {dex_name}"); return False
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+def run_on_archive(archive: Path, needles: list, patch_fn, label: str) -> int:
+    """Scan all DEXes, run patch_dex on those containing any needle."""
+    archive = archive.resolve()
+    if not archive.exists():
+        err(f"Not found: {archive}"); return 0
+    sz = archive.stat().st_size
+    info(f"Archive: {archive.name}  ({sz//1024}K)")
+    bak = Path(str(archive) + ".bak")
+    if not bak.exists():
+        shutil.copy2(archive, bak); ok("✓ Backup created")
+    count = 0
+    for dex in list_dexes(archive):
+        if dex_has(archive, dex, *needles):
+            info(f"→ {dex} contains target classes")
+            if patch_dex(archive, dex, patch_fn):
+                count += 1
+        else:
+            info(f"  {dex} – no relevant classes, skip")
+    if count:
+        ok(f"✅ {label}: {count} DEX(es) patched  ({archive.stat().st_size//1024}K)")
+    else:
+        err(f"✗ {label}: nothing patched – restoring backup")
+        shutil.copy2(bak, archive)
+    return count
+
+# ─────────────────────────────────────────────────────────────────
+#  SMALI TEXT HELPERS  (mirror of patcher_a16.sh helpers exactly)
+# ─────────────────────────────────────────────────────────────────
+
+def force_return(d: Path, key: str, val: str) -> int:
+    """All non-void methods matching key → const/4 v0, 0x{val}; return v0"""
+    stub_const = f"const/4 v0, 0x{val}"
+    total = 0
+    for f in d.rglob("*.smali"):
+        lines = f.read_text(errors="replace").splitlines()
+        i, chg = 0, False
+        while i < len(lines):
+            s = lines[i].lstrip()
+            if s.startswith(".method") and key in s and ")V" not in s:
+                j = i + 1
+                while j < len(lines) and not lines[j].lstrip().startswith(".end method"):
+                    j += 1
+                body = lines[i:j+1]
+                already = (len(body) >= 4 and body[2].strip() == stub_const
+                           and body[3].strip().startswith("return"))
+                if not already:
+                    lines[i:j+1] = [lines[i], "    .registers 8",
+                                    f"    {stub_const}", "    return v0", ".end method"]
+                    chg = True; total += 1
+                i += 5
+            else:
+                i += 1
+        if chg:
+            f.write_text("\n".join(lines) + "\n")
+    if total: ok(f"    force_return({key!r}→{val}): {total}")
+    else:     warn(f"    force_return({key!r}): not found")
+    return total
+
+def force_return_void(d: Path, key: str) -> int:
+    """All void methods matching key → return-void immediately"""
+    total = 0
+    for f in d.rglob("*.smali"):
+        lines = f.read_text(errors="replace").splitlines()
+        i, chg = 0, False
+        while i < len(lines):
+            s = lines[i].lstrip()
+            if s.startswith(".method") and key in s and ")V" in s:
+                j = i + 1
+                while j < len(lines) and not lines[j].lstrip().startswith(".end method"):
+                    j += 1
+                lines[i:j+1] = [lines[i], "    .registers 1", "    return-void", ".end method"]
+                chg = True; total += 1; i += 4
+            else:
+                i += 1
+        if chg:
+            f.write_text("\n".join(lines) + "\n")
+    if total: ok(f"    force_return_void({key!r}): {total}")
+    else:     warn(f"    force_return_void({key!r}): not found")
+    return total
+
+def replace_move_result(d: Path, invoke: str, replacement: str) -> int:
+    """Replace move-result* after any invoke matching invoke pattern"""
+    total = 0
+    for f in d.rglob("*.smali"):
+        lines = f.read_text(errors="replace").splitlines()
+        i, chg = 0, False
+        while i < len(lines):
+            if invoke in lines[i]:
+                for j in range(i+1, min(i+6, len(lines))):
+                    if lines[j].strip().startswith("move-result"):
+                        ind = re.match(r"\s*", lines[j]).group(0)
+                        new = f"{ind}{replacement}"
+                        if lines[j] != new:
+                            lines[j] = new; chg = True; total += 1
+                        break
+            i += 1
+        if chg:
+            f.write_text("\n".join(lines) + "\n")
+    if total: ok(f"    replace_move_result: {total} site(s)")
+    else:     warn(f"    replace_move_result({invoke!r}): not found")
+    return total
+
+def insert_before(d: Path, pattern: str, new_line: str) -> int:
+    """Insert new_line (with indent) before every line containing pattern"""
+    total = 0
+    for f in d.rglob("*.smali"):
+        lines = f.read_text(errors="replace").splitlines()
+        i, chg = 0, False
+        while i < len(lines):
+            if pattern in lines[i]:
+                ind = re.match(r"\s*", lines[i]).group(0)
+                cand = f"{ind}{new_line}"
+                if i == 0 or lines[i-1].strip() != new_line.strip():
+                    lines.insert(i, cand); chg = True; total += 1; i += 2
+                else:
+                    i += 1
+            else:
+                i += 1
+        if chg:
+            f.write_text("\n".join(lines) + "\n")
+    if total: ok(f"    insert_before({pattern!r}): {total}")
+    else:     warn(f"    insert_before({pattern!r}): not found")
+    return total
+
+def strip_if_eqz_after(d: Path, pattern: str) -> int:
+    """Remove if-eqz guard following any line matching pattern"""
+    total = 0
+    for f in d.rglob("*.smali"):
+        lines = f.read_text(errors="replace").splitlines()
+        chg = False
+        for idx in range(len(lines)):
+            if pattern in lines[idx]:
+                for j in range(idx+1, min(idx+12, len(lines))):
+                    if re.match(r'\s*if-eqz\s', lines[j]):
+                        del lines[j]; chg = True; total += 1; break
+        if chg:
+            f.write_text("\n".join(lines) + "\n")
+    if total: ok(f"    strip_if_eqz_after({pattern!r}): {total}")
+    else:     warn(f"    strip_if_eqz_after({pattern!r}): not found")
+    return total
+
+def sed_all(d: Path, find_re: str, replace: str) -> int:
+    """Regex substitution across all smali files"""
+    pat = re.compile(find_re)
+    total = 0
+    for f in d.rglob("*.smali"):
+        t = f.read_text(errors="replace")
+        new, n = pat.subn(replace, t)
+        if n:
+            f.write_text(new); total += n
+    if total: ok(f"    sed_all({find_re!r}): {total}")
+    else:     warn(f"    sed_all({find_re!r}): not found")
+    return total
+
+# ─────────────────────────────────────────────────────────────────
+#  PATCH PROFILES
+# ─────────────────────────────────────────────────────────────────
+
+def _sig_patch(d: Path) -> bool:
+    """
+    framework.jar signature bypass.
+    10 patches — mirrors patcher_a16.sh apply_framework_signature_patches exactly.
+    """
+    n = 0
+    # 1. PackageParser: force cert-check register before verification call
+    n += insert_before(d,
+        "ApkSignatureVerifier;->unsafeGetCertsWithoutVerification",
+        "const/4 v1, 0x1")
+    # 2. PackageParser$PackageParserException: zero out error code
+    n += insert_before(d,
+        "iput p1, p0, Landroid/content/pm/PackageParser$PackageParserException;->error:I",
+        "const/4 p1, 0x0")
+    # 3. SigningDetails / PackageParser$SigningDetails capability checks → 1
+    n += force_return(d, "checkCapability",        "1")
+    n += force_return(d, "checkCapabilityRecover", "1")
+    n += force_return(d, "hasAncestorOrSelf",      "1")
+    # 4. V2 digest equality → always true
+    n += replace_move_result(d,
+        "invoke-static {v8, v4}, Ljava/security/MessageDigest;->isEqual([B[B)Z",
+        "const/4 v0, 0x1")
+    # 5. V3 digest equality → always true
+    n += replace_move_result(d,
+        "invoke-static {v9, v3}, Ljava/security/MessageDigest;->isEqual([B[B)Z",
+        "const/4 v0, 0x1")
+    # 6a. getMinimumSignatureSchemeVersionForTargetSdk → 0
+    n += force_return(d, "getMinimumSignatureSchemeVersionForTargetSdk", "0")
+    # 6b. Force scheme=0 before every V1 verify call
+    n += insert_before(d,
+        "ApkSignatureVerifier;->verifyV1Signature",
+        "const p3, 0x0")
+    # 7. ApkSigningBlockUtils digest equality → always true
+    n += replace_move_result(d,
+        "invoke-static {v5, v6}, Ljava/security/MessageDigest;->isEqual([B[B)Z",
+        "const/4 v7, 0x1")
+    # 8. StrictJarVerifier.verifyMessageDigest → always true
+    n += force_return(d, "verifyMessageDigest", "1")
+    # 9. StrictJarFile: remove null-entry guard after findEntry
+    n += strip_if_eqz_after(d,
+        "Landroid/util/jar/StrictJarFile;->findEntry(Ljava/lang/String;)Ljava/util/zip/ZipEntry;")
+    # 10. ParsingPackageUtils: swallow sharedUserId validation error
+    n += insert_before(d,
+        "manifest> specifies bad sharedUserId name",
+        "const/4 v4, 0x0")
+    info(f"    Patches applied: {n}")
+    return n > 0
+
+def _intl_build_patch(d: Path) -> bool:
+    """
+    IS_INTERNATIONAL_BUILD → 1 patcher.
+    Used by: Settings AI, SystemUI VoLTE, Provision GMS, miui-service.
+    Covers sget-boolean and getRegion() call patterns.
+    """
+    n = 0
+    # sget-boolean vX, Lmiui/os/Build;->IS_INTERNATIONAL_BUILD:Z  →  const/4 vX, 0x1
+    n += sed_all(d,
+        r'(\s*)sget-boolean (v\d+), Lmiui/os/Build;->IS_INTERNATIONAL_BUILD:Z',
+        r'\1const/4 \2, 0x1')
+    # invoke getRegion() → replace move-result with const/4
+    n += replace_move_result(d,
+        "Lmiui/os/Build;->getRegion()Ljava/lang/String;",
+        "const/4 v0, 0x1")
+    return n > 0
+
+def _ai_patch(d: Path) -> bool:
+    """
+    Settings.apk: InternalDeviceUtils.isAi*() → always true.
+    Handles all variant names across HyperOS 3 sub-versions.
+    """
+    total = 0
+    for f in d.rglob("*.smali"):
+        if "InternalDeviceUtils" not in f.name:
+            continue
+        lines = f.read_text(errors="replace").splitlines()
+        i, chg = 0, False
+        while i < len(lines):
+            s = lines[i].lstrip()
+            is_ai_method = (s.startswith(".method") and ")V" not in s and
+                            any(k in s for k in ("isAi", "AiSupport", "aiSupport",
+                                                  "SupportAi", "supportAi")))
+            if is_ai_method:
+                j = i + 1
+                while j < len(lines) and not lines[j].lstrip().startswith(".end method"):
+                    j += 1
+                method_name = s.split()[-1] if s.split() else "?"
+                lines[i:j+1] = [lines[i], "    .registers 2",
+                                 "    const/4 v0, 0x1", "    return v0", ".end method"]
+                chg = True; total += 1
+                ok(f"    Patched AI method: {method_name}")
+                i += 5
+            else:
+                i += 1
+        if chg:
+            f.write_text("\n".join(lines) + "\n")
+    if total == 0:
+        warn("    InternalDeviceUtils not in this DEX")
+    return total > 0
+
+# ─────────────────────────────────────────────────────────────────
+#  NEEDLE LISTS  (which string to scan for per target)
+# ─────────────────────────────────────────────────────────────────
+NEEDLES = {
+    "framework-sig":  ["ApkSignatureVerifier", "SigningDetails", "StrictJarVerifier",
+                       "StrictJarFile", "PackageParser", "ApkSigningBlock",
+                       "ParsingPackageUtils"],
+    "settings-ai":    ["InternalDeviceUtils"],
+    "systemui-volte": ["IS_INTERNATIONAL_BUILD", "miui/os/Build"],
+    "provision-gms":  ["IS_INTERNATIONAL_BUILD"],
+    "miui-service":   ["IS_INTERNATIONAL_BUILD", "miui/os/Build"],
+}
+PATCHERS = {
+    "framework-sig":  _sig_patch,
+    "settings-ai":    _ai_patch,
+    "systemui-volte": _intl_build_patch,
+    "provision-gms":  _intl_build_patch,
+    "miui-service":   _intl_build_patch,
+}
+
+# ─────────────────────────────────────────────────────────────────
+#  ENTRY POINT
+# ─────────────────────────────────────────────────────────────────
+def main():
+    CMDS = list(NEEDLES.keys()) + ["verify"]
+    if len(sys.argv) < 2 or sys.argv[1] not in CMDS:
+        print(f"Usage: dex_patcher.py <{'|'.join(CMDS)}> [archive]", file=sys.stderr)
+        sys.exit(1)
+    cmd = sys.argv[1]
+    if cmd == "verify":
+        cmd_verify()
+    else:
+        if len(sys.argv) < 3:
+            err(f"Usage: dex_patcher.py {cmd} <archive.apk|.jar>"); sys.exit(1)
+        count = run_on_archive(Path(sys.argv[2]), NEEDLES[cmd], PATCHERS[cmd], cmd)
+        sys.exit(0 if count > 0 else 1)
+
+if __name__ == "__main__":
+    main()
+PYTHON_EOF
+chmod +x "$BIN_DIR/dex_patcher.py"
+log_success "✓ dex_patcher.py written"
+
+# ── Verify everything works together ────────────────────────────
+SMALI_TOOLS_OK=0
+if python3 "$BIN_DIR/dex_patcher.py" verify 2>&1 | while IFS= read -r l; do
+    case "$l" in
+        "[SUCCESS]"*) log_success "${l#[SUCCESS] }" ;;
+        "[ERROR]"*)   log_error   "${l#[ERROR] }"   ;;
+        *)            [ -n "$l" ] && log_info "$l"   ;;
+    esac
+done; then
+    SMALI_TOOLS_OK=1
+    log_success "✓ DEX patcher fully operational"
 else
-    log_warning "smali_tools.sh not found — patching will be limited"
+    log_error "DEX patcher verification failed — signature/APK patches will be skipped"
 fi
 
 # GApps
@@ -949,67 +1376,79 @@ PYTHON_EOF
         fi
 
 
-        # =====================================================
-        #  MODULAR PATCHING FEATURES (ALL 6)
-        # =====================================================
+        # ═════════════════════════════════════════════════════════
+        #  DEX PATCHING  (via dex_patcher.py)
+        #  All calls: python3 $BIN_DIR/dex_patcher.py <cmd> <file>
+        #  Output forwarded through the manager logger.
+        # ═════════════════════════════════════════════════════════
 
-        # ── Load patchers once per partition (smali_tools already loaded globally)
-        if [ "${SMALI_TOOLS_OK:-0}" -eq 1 ]; then
-            if [ -f "$BIN_DIR/patch_signature_verifier.sh" ] && \
-               ! declare -f patch_signature_verification &>/dev/null; then
-                source "$BIN_DIR/patch_signature_verifier.sh"
+        _run_dex_patch() {
+            # _run_dex_patch <label> <command> <archive_path>
+            local label="$1" cmd="$2" archive="$3"
+            if [ "${SMALI_TOOLS_OK:-0}" -ne 1 ]; then
+                log_warning "DEX patcher not ready — skipping $label"
+                return 0
             fi
-            if [ -f "$BIN_DIR/dex_patchers.sh" ] && \
-               ! declare -f patch_settings_ai &>/dev/null; then
-                source "$BIN_DIR/dex_patchers.sh"
+            if [ -z "$archive" ] || [ ! -f "$archive" ]; then
+                log_warning "$label: archive not found (${archive:-<empty>})"
+                return 0
             fi
-        else
-            log_warning "smali tools not ready — all DEX patches will be skipped for $part"
-        fi
+            log_info "$label → $(basename "$archive")"
+            python3 "$BIN_DIR/dex_patcher.py" "$cmd" "$archive" 2>&1 | \
+            while IFS= read -r line; do
+                case "$line" in
+                    "[SUCCESS]"*) log_success "${line#[SUCCESS] }" ;;
+                    "[WARNING]"*) log_warning "${line#[WARNING] }" ;;
+                    "[ERROR]"*)   log_error   "${line#[ERROR] }"   ;;
+                    "[INFO]"*)    log_info    "${line#[INFO] }"    ;;
+                    *)            [ -n "$line" ] && log_info "$line" ;;
+                esac
+            done
+            local rc=${PIPESTATUS[0]}
+            [ $rc -ne 0 ] && log_error "$label failed (exit $rc)"
+            return $rc
+        }
 
-        # D1. SIGNATURE VERIFICATION DISABLER (system partition)
-        if [ "$part" == "system" ] && [ "${SMALI_TOOLS_OK:-0}" -eq 1 ]; then
-            if declare -f patch_signature_verification &>/dev/null; then
-                patch_signature_verification "$DUMP_DIR"
-                cd "$GITHUB_WORKSPACE"
-            else
-                log_warning "patch_signature_verifier.sh not found, skipping"
-            fi
-        fi
-        
-        # D2. VOICE RECORDER AI (system partition)
+        # ── system partition ──────────────────────────────────────
         if [ "$part" == "system" ]; then
+
+            # D1. Signature verification bypass (framework.jar)
+            _run_dex_patch "SIGNATURE BYPASS" "framework-sig" \
+                "$(find "$DUMP_DIR" -path "*/framework/framework.jar" -type f | head -n1)"
+            cd "$GITHUB_WORKSPACE"
+
+            # D2. AI Voice Recorder patch (separate apktool-based patcher, unchanged)
             if [ -f "$BIN_DIR/patch_voice_recorder.sh" ]; then
                 source "$BIN_DIR/patch_voice_recorder.sh"
                 patch_voice_recorder "$DUMP_DIR"
                 cd "$GITHUB_WORKSPACE"
-            else
-                log_warning "patch_voice_recorder.sh not found, skipping"
             fi
+
         fi
 
-        # D3. SETTINGS AI SUPPORT (system_ext partition)
-        if [ "$part" == "system_ext" ] && [ "${SMALI_TOOLS_OK:-0}" -eq 1 ]; then
-            declare -f patch_settings_ai &>/dev/null && patch_settings_ai "$DUMP_DIR"
-            cd "$GITHUB_WORKSPACE"
-        fi
+        # ── system_ext partition ──────────────────────────────────
+        if [ "$part" == "system_ext" ]; then
 
-        # D4. PROVISION GMS SUPPORT (system_ext partition)
-        if [ "$part" == "system_ext" ] && [ "${SMALI_TOOLS_OK:-0}" -eq 1 ]; then
-            declare -f patch_provision_gms &>/dev/null && patch_provision_gms "$DUMP_DIR"
+            # D3. Settings AI support
+            _run_dex_patch "SETTINGS AI" "settings-ai" \
+                "$(find "$DUMP_DIR" -name "Settings.apk" -type f | head -n1)"
             cd "$GITHUB_WORKSPACE"
-        fi
 
-        # D5. MIUI SERVICE CN→GLOBAL (system_ext partition)
-        if [ "$part" == "system_ext" ] && [ "${SMALI_TOOLS_OK:-0}" -eq 1 ]; then
-            declare -f patch_miui_service &>/dev/null && patch_miui_service "$DUMP_DIR"
+            # D4. Provision GMS support
+            _run_dex_patch "PROVISION GMS" "provision-gms" \
+                "$(find "$DUMP_DIR" -name "Provision.apk" -type f | head -n1)"
             cd "$GITHUB_WORKSPACE"
-        fi
 
-        # D6. SYSTEMUI VOLTE ICON (system_ext partition)
-        if [ "$part" == "system_ext" ] && [ "${SMALI_TOOLS_OK:-0}" -eq 1 ]; then
-            declare -f patch_systemui_volte &>/dev/null && patch_systemui_volte "$DUMP_DIR"
+            # D5. MIUI service CN→Global
+            _run_dex_patch "MIUI SERVICE CN→GLOBAL" "miui-service" \
+                "$(find "$DUMP_DIR" -name "miui-services.jar" -type f | head -n1)"
             cd "$GITHUB_WORKSPACE"
+
+            # D6. SystemUI VoLTE icons
+            _run_dex_patch "SYSTEMUI VOLTE" "systemui-volte" \
+                "$(find "$DUMP_DIR" \( -name "MiuiSystemUI.apk" -o -name "SystemUI.apk" \) -type f | head -n1)"
+            cd "$GITHUB_WORKSPACE"
+
         fi
 
 
