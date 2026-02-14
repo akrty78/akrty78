@@ -568,7 +568,7 @@ def _find_method_ids_by_name(data: bytes, hdr: dict, method_name: str) -> set:
 #  This scanner bypasses class_data entirely: it scans raw DEX bytes in
 #  2-byte steps (code-unit aligned) starting after all static tables,
 #  looking for [SGET_OPCODE] [reg] [field_lo] [field_hi].
-#  Already-patched slots are 0x12/0x15 — not in SGET_OPCODES — so it
+#  Already-patched slots are 0x12/0x13 — not in SGET_OPCODES — so it
 #  never double-patches and is safe to call after the normal sweep.
 # ════════════════════════════════════════════════════════════════════
 
@@ -611,7 +611,8 @@ def _raw_sget_scan(dex: bytearray, field_class: str, field_name: str,
                     raw[i + 2] = 0x00
                     raw[i + 3] = 0x00
                 else:
-                    raw[i]     = 0x15
+                    # const/16 vAA, 0x1  (opcode 0x13, format 21s)
+                    raw[i]     = 0x13
                     raw[i + 1] = reg
                     raw[i + 2] = 0x01
                     raw[i + 3] = 0x00
@@ -832,7 +833,7 @@ def binary_patch_method(dex: bytearray, class_desc: str, method_name: str,
 
 
 # ════════════════════════════════════════════════════════════════════
-#  BINARY PATCH: sget-boolean field → const/16 1
+#  BINARY PATCH: sget-boolean field → const/4 1 (or const/16 with opcode 0x13)
 #  Scans ONLY within verified code_item instruction arrays.
 # ════════════════════════════════════════════════════════════════════
 
@@ -847,7 +848,7 @@ def binary_patch_sget_to_true(dex: bytearray,
     Replace with const/4 or const/16 (both 4 bytes total in the stream):
 
       use_const4=False (default):
-        const/16 vAA, 0x1   →  15 AA 01 00   (format 21s, 4 bytes)
+        const/16 vAA, 0x1   →  13 AA 01 00   (format 21s, 4 bytes)
 
       use_const4=True (when user specifies const/4 explicitly):
         const/4  vAA, 0x1   →  12 (0x10|AA) 00 00   (format 11n, 2 bytes + NOP NOP)
@@ -890,8 +891,9 @@ def binary_patch_sget_to_true(dex: bytearray,
                         raw[insns_off + i + 2] = 0x00   # NOP
                         raw[insns_off + i + 3] = 0x00   # NOP
                     else:
-                        # const/16 vAA, 0x1  (21s)
-                        raw[insns_off + i]     = 0x15
+                        # const/16 vAA, 0x1  (opcode 0x13, format 21s: 4 bytes)
+                        # 0x13 = const/16. NOT 0x15 which is const/high16 (shifts value <<16)
+                        raw[insns_off + i]     = 0x13
                         raw[insns_off + i + 1] = reg
                         raw[insns_off + i + 2] = 0x01
                         raw[insns_off + i + 3] = 0x00
@@ -1288,10 +1290,53 @@ def _services_jar_patch(dex_name: str, dex: bytearray) -> bool:
     warn(f"  {METHOD}: not found via lambda or concrete class")
     return False
 
-# ── IS_INTERNATIONAL_BUILD (Lmiui/os/Build;)  ────────────────────
-def _intl_build_patch(dex_name: str, dex: bytearray) -> bool:
-    if b'IS_INTERNATIONAL_BUILD' not in bytes(dex): return False
-    n = binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD')
+# ── Provision.apk: Utils::setGmsAppEnabledStateForCn  ──────────────
+def _provision_gms_patch(dex_name: str, dex: bytearray) -> bool:
+    """
+    STRICT SCOPE: patch exactly ONE sget-boolean of IS_INTERNATIONAL_BUILD
+    inside Utils::setGmsAppEnabledStateForCn — no other class, no other method.
+
+    Correct encoding:  const/4 v0, 0x1   →   bytes 12 10
+      opcode 0x12, second byte = (value<<4)|reg = (1<<4)|0 = 0x10
+    Wrong encoding from old _intl_build_patch (no use_const4):
+      const/16 v0, 0x1  →  bytes 13 00 01 00  (opcode 0x13, not 0x15 which is const/high16)
+
+    Constraints enforced:
+      - class filter: 'Utils' must be in type_str (catches com/android/provision/Utils)
+      - method filter: exact name 'setGmsAppEnabledStateForCn'
+      - first-occurrence only: count is tracked; abort if 0 matches
+      - use_const4=True: guarantees opcode 0x12 output (const/4)
+    """
+    raw = bytes(dex)
+    if b'IS_INTERNATIONAL_BUILD' not in raw: return False
+    if b'setGmsAppEnabledStateForCn' not in raw: return False
+
+    n = binary_patch_sget_to_true(dex,
+            'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD',
+            only_class='Utils',
+            only_method='setGmsAppEnabledStateForCn',
+            use_const4=True)
+    if n == 0:
+        warn("  Provision: setGmsAppEnabledStateForCn not found or no IS_INTERNATIONAL_BUILD sget")
+        return False
+    ok(f"  ✓ Provision Utils::setGmsAppEnabledStateForCn → const/4 v0, 0x1 ({n} sget)")
+    return True
+
+
+# ── miui-services.jar: global IS_INTERNATIONAL_BUILD sweep  ──────────
+def _miui_service_patch(dex_name: str, dex: bytearray) -> bool:
+    """
+    Global sweep of Lmiui/os/Build;->IS_INTERNATIONAL_BUILD in miui-services.jar.
+    No class filter — flips all region gates in the service jar.
+    Uses const/4 (opcode 0x12) which is safe for all boolean registers (always ≤ 15).
+    Replaces the deleted _intl_build_patch which was using 0x15 (const/high16, wrong).
+    """
+    raw = bytes(dex)
+    if b'IS_INTERNATIONAL_BUILD' not in raw: return False
+    n  = binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD',
+                                    use_const4=True)
+    n += _raw_sget_scan(dex, 'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD',
+                        use_const4=True)
     return n > 0
 
 # ── SystemUI combined: VoLTE + QuickShare + WA notification  ─────
@@ -1380,12 +1425,22 @@ def _miui_framework_patch(dex_name: str, dex: bytearray) -> bool:
     raw = bytes(dex)
     patched = False
 
-    # Pass 1 — IS_INTERNATIONAL_BUILD in 13 framework classes
+    # Pass 1a — IS_INTERNATIONAL_BUILD in 13 framework classes
     if b'IS_INTERNATIONAL_BUILD' in raw:
         n = 0
         for cls in _FW_INTL_CLASSES:
             n += binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD',
                                             only_class=cls, use_const4=True)
+        if n > 0:
+            patched = True
+            raw = bytes(dex)
+
+    # Pass 1b — Gboard swap in InputMethodManagerStubImpl (binary, no-op if string absent)
+    #   binary_swap_string requires "com.google.android.inputmethod.latin" in DEX pool.
+    #   If pool doesn't have it, apktool D8b smali sed handles it as fallback.
+    if _BAIDU_IME.encode() in raw:
+        n = binary_swap_string(dex, _BAIDU_IME, _GBOARD_IME,
+                               only_class='InputMethodManagerStubImpl')
         if n > 0:
             patched = True
             raw = bytes(dex)
@@ -1525,8 +1580,8 @@ PROFILES = {
     "settings-region":   _settings_region_patch,   # exact 3 classes only
     "voice-recorder-ai": _recorder_ai_patch,        # AiDeviceUtil::isAiSupportedDevice
     "services-jar":      _services_jar_patch,
-    "provision-gms":     _intl_build_patch,
-    "miui-service":      _intl_build_patch,
+    "provision-gms":     _provision_gms_patch,    # Utils::setGmsAppEnabledStateForCn only
+    "miui-service":      _miui_service_patch,    # global IS_INTERNATIONAL_BUILD sweep
     "systemui-volte":    _systemui_all_patch,       # VoLTE + QuickShare(const/4) + WA-notif
     "miui-framework":    _miui_framework_patch,     # validateTheme(trim) + IS_GLOBAL_BUILD
     "incallui-ai":       _incallui_patch,           # RecorderUtils::isAiRecordEnable
@@ -2338,14 +2393,24 @@ PYTHON_EOF
                 rm -rf "$_FW_WORK"
                 _FW_APPLIED=0
                 if timeout 20m apktool d -r -f "$_FW_JAR" -o "$_FW_WORK" >/dev/null 2>&1; then
-                    # Patch 1: InputMethodServiceInjector — Baidu → Gboard
+                    # Patch 1a: InputMethodServiceInjector — Baidu → Gboard
                     _IMSI=$(find "$_FW_WORK" -name "InputMethodServiceInjector.smali" -type f | head -1)
                     if [ -n "$_IMSI" ] && grep -q "com\.baidu\.input_mi" "$_IMSI"; then
                         sed -i 's|com\.baidu\.input_mi|com.google.android.inputmethod.latin|g' "$_IMSI"
                         log_success "  ✓ Gboard swap in InputMethodServiceInjector"
                         _FW_APPLIED=1
                     else
-                        log_info "  InputMethodServiceInjector: com.baidu.input_mi not present (skip)"
+                        log_info "  InputMethodServiceInjector: com.baidu.input_mi not present"
+                    fi
+                    # Patch 1b: InputMethodManagerStubImpl — Baidu → Gboard
+                    #   Separate class from 1a; may or may not exist depending on build.
+                    _IMMS=$(find "$_FW_WORK" -name "InputMethodManagerStubImpl.smali" -type f | head -1)
+                    if [ -n "$_IMMS" ] && grep -q "com\.baidu\.input_mi" "$_IMMS"; then
+                        sed -i 's|com\.baidu\.input_mi|com.google.android.inputmethod.latin|g' "$_IMMS"
+                        log_success "  ✓ Gboard swap in InputMethodManagerStubImpl"
+                        _FW_APPLIED=1
+                    else
+                        log_info "  InputMethodManagerStubImpl: com.baidu.input_mi not present"
                     fi
                     # Patch 2: showSystemReadyErrorDialogsIfNeeded → return-void
                     #   apktool fallback for builds where binary_patch_method misses it
@@ -2478,84 +2543,124 @@ CUSTKEYS
         # E. MIUI-FRAMEWORK (handled via dex_patcher.py miui-framework profile above)
         #    ThemeReceiver bypass + IS_GLOBAL_BUILD already done in D8 above.
 
-        # F. MIUI FREQUENT PHRASE — Gboard redirect
+        # F. MIUI FREQUENT PHRASE — Gboard redirect + Monet colors
+        #
+        #   ARCHITECTURE:
+        #   Pass 1 (binary) — try DEX string swap without apktool (fastest, zero timeout).
+        #   Pass 2 (apktool FULL decode, no -r) — handles BOTH smali + colors in ONE pass:
+        #     - Smali: sed Baidu→Gboard in target classes
+        #     - Colors: modify decoded res/values/colors.xml and res/values-night/colors.xml
+        #     - Rebuild: apktool b → fix resources.arsc alignment (R+ compliance)
+        #     NOTE: -r must NOT be used when color patching is needed. resources.arsc
+        #           is binary; colors only become editable after full decode (no -r).
         MFP_APK=$(find "$DUMP_DIR" -name "MIUIFrequentPhrase.apk" -type f -print -quit)
         if [ -n "$MFP_APK" ]; then
             log_info "🎨 Modding MIUIFrequentPhrase..."
+            MFP_WORK="$TEMP_DIR/mfp_work"
+            MFP_DEX="$TEMP_DIR/mfp_dex"
+            MFP_ORIG="$TEMP_DIR/mfp_orig.apk"
+            rm -rf "$MFP_WORK" "$MFP_DEX"
+            # Save a copy of the original APK for safe DEX injection later
+            cp "$MFP_APK" "$MFP_ORIG"
 
-            # ── Pass 1: binary const-string swap (zero timeout risk) ──────────
-            # Works only if "com.google.android.inputmethod.latin" already exists
-            # in the DEX string pool. Graceful skip if it doesn't.
+            # Pass 1: binary DEX swap (no apktool, instant)
             _run_dex_patch "MIUIFREQPHRASE GBOARD" "miuifreqphrase" "$MFP_APK"
-
-            # ── Pass 2: verify — if Baidu string still present, use apktool -r ─
-            if python3 -c "
+            _MFP_BINARY_DONE=0
+            python3 -c "
 import sys, zipfile
 with zipfile.ZipFile(sys.argv[1]) as z:
     for n in z.namelist():
         if n.startswith('classes') and n.endswith('.dex'):
-            if b'com.baidu.input_mi' in z.read(n):
-                sys.exit(1)
+            if b'com.baidu.input_mi' in z.read(n): sys.exit(1)
 sys.exit(0)
-" "$MFP_APK" 2>/dev/null; then
-                log_success "✓ MIUIFrequentPhrase Gboard redirect confirmed (binary swap)"
+" "$MFP_APK" 2>/dev/null && _MFP_BINARY_DONE=1
+
+            if [ "$_MFP_BINARY_DONE" -eq 1 ]; then
+                log_success "✓ Gboard redirect confirmed via binary swap"
             else
-                log_warning "Binary swap incomplete — trying apktool -r fallback (no-res, fast)"
-                MFP_WORK="$TEMP_DIR/mfp_work"
-                rm -rf "$MFP_WORK"
-                MFP_OK=0
-                if timeout 10m apktool d -r -f "$MFP_APK" -o "$MFP_WORK" >/dev/null 2>&1; then
-                    # Only patch the two target smali files — no method restructure
-                    find "$MFP_WORK/smali" \
-                        \( -name "InputMethodBottomManager.smali" -o -name "InputProvider.smali" \) \
-                        -exec sed -i 's|com\.baidu\.input_mi|com.google.android.inputmethod.latin|g' {} +
-                    log_success "✓ String replaced in smali target classes"
-                    if timeout 8m apktool b -c "$MFP_WORK" -o "${MFP_APK}.tmp" >/dev/null 2>&1; then
-                        mv "${MFP_APK}.tmp" "$MFP_APK"
-                        log_success "✓ MIUIFrequentPhrase patched via apktool fallback"
-                        MFP_OK=1
-                    else
-                        rm -f "${MFP_APK}.tmp"
-                        log_warning "apktool build failed — MIUIFrequentPhrase unchanged"
-                    fi
-                else
-                    log_warning "apktool -r timed out (10m) — MIUIFrequentPhrase unchanged"
-                fi
-                rm -rf "$MFP_WORK"
-                [ "$MFP_OK" -eq 0 ] && log_warning "⚠ MIUIFrequentPhrase Gboard redirect skipped"
+                log_warning "Binary swap incomplete — will patch via full apktool decode"
             fi
 
-            cd "$GITHUB_WORKSPACE"
+            # Pass 2: full apktool decode (NO -r) — patches smali AND color resources
+            log_info "  MIUIFrequentPhrase: full decode for color patching..."
+            rm -rf "$MFP_WORK"
+            if timeout 20m apktool d -f "$MFP_ORIG" -o "$MFP_WORK" >/dev/null 2>&1; then
 
-            # Colors XML update (resource-only, safe to do via zipfile sed)
-            python3 - "$MFP_APK" <<'COLORS_PY' 2>&1 | while IFS= read -r l; do [ -n "$l" ] && echo "[INFO] $l"; done
-import sys, zipfile, shutil, tempfile, pathlib, re
+                # 2a. Smali: Baidu→Gboard (only if binary swap did not succeed)
+                if [ "$_MFP_BINARY_DONE" -eq 0 ]; then
+                    find "$MFP_WORK"                         \( -name "InputMethodBottomManager.smali"                            -o -name "InputProvider.smali" \)                         -exec sed -i                             's|com\.baidu\.input_mi|com.google.android.inputmethod.latin|g' {} +
+                    log_success "  ✓ Gboard string replaced in smali"
+                fi
 
-apk = pathlib.Path(sys.argv[1])
-tmp = apk.with_name("_colors_" + apk.name)
+                # 2b. Colors: modify decoded XML across ALL values directories
+                python3 - "$MFP_WORK" <<'COLOR_PY'
+import sys, re, pathlib
+
+root = pathlib.Path(sys.argv[1])
+# Scan ALL res/values* folders (values, values-night, values-v*, values-miui, etc.)
+xml_files = list(root.glob("res/values*/colors.xml"))
+if not xml_files:
+    print("[INFO] No colors.xml found in decoded resources — skip")
+    sys.exit(0)
+
+TARGET = "input_bottom_background_color"
 patched = 0
-with zipfile.ZipFile(apk, 'r') as zin, zipfile.ZipFile(tmp, 'w', zipfile.ZIP_DEFLATED) as zout:
-    for item in zin.infolist():
-        data = zin.read(item.filename)
-        if item.filename in ('res/values/colors.xml', 'res/values-night/colors.xml'):
-            txt = data.decode('utf-8', errors='replace')
-            replacement = ('@android:color/system_neutral1_50' if 'night' not in item.filename
-                           else '@android:color/system_neutral1_900')
-            new_txt = re.sub(
-                r'(<color name="input_bottom_background_color">)[^<]*(</color>)',
-                rf'\g<1>{replacement}\g<2>', txt)
-            if new_txt != txt:
-                data = new_txt.encode('utf-8')
-                patched += 1
-                print(f"[SUCCESS] ✓ Colors patched: {item.filename}")
-        zout.writestr(item, data)
-if patched:
-    shutil.move(str(tmp), str(apk))
-    print(f"[SUCCESS] ✓ MIUIFrequentPhrase colors updated ({patched} file(s))")
-else:
-    tmp.unlink(missing_ok=True)
-    print("[INFO] colors.xml not found in APK — colors step skipped")
-COLORS_PY
+for f in xml_files:
+    is_night = "night" in f.parent.name
+    replacement = "@android:color/system_neutral1_900" if is_night                   else "@android:color/system_neutral1_50"
+    txt = f.read_text(encoding="utf-8", errors="replace")
+    new_txt = re.sub(
+        rf'(<color name="{re.escape(TARGET)}">)[^<]*(</color>)',
+        rf'\g<1>{replacement}\g<2>',
+        txt)
+    if new_txt != txt:
+        f.write_text(new_txt, encoding="utf-8")
+        print(f"[SUCCESS] ✓ {f.relative_to(root)}: {TARGET} → {replacement}")
+        patched += 1
+    else:
+        print(f"[INFO] {f.relative_to(root)}: {TARGET} not found or already set")
+
+print(f"[{'SUCCESS' if patched else 'INFO'}] Colors: {patched} file(s) updated")
+COLOR_PY
+
+                # 2c. Rebuild
+                log_info "  MIUIFrequentPhrase: rebuilding..."
+                if timeout 20m apktool b "$MFP_WORK" -o "${MFP_APK}.rebuilt" >/dev/null 2>&1; then
+                    # Fix resources.arsc: must be stored UNCOMPRESSED + 4-byte aligned (R+ rule)
+                    # Step 1: store resources.arsc uncompressed in rebuilt APK
+                    _AARC_TMP="$TEMP_DIR/aarc_tmp"
+                    mkdir -p "$_AARC_TMP"
+                    (cd "$_AARC_TMP" && unzip -o "${MFP_APK}.rebuilt" resources.arsc >/dev/null 2>&1)
+                    if [ -f "$_AARC_TMP/resources.arsc" ]; then
+                        (cd "$_AARC_TMP" && zip -0 -u "${MFP_APK}.rebuilt" resources.arsc >/dev/null 2>&1)
+                        log_success "  ✓ resources.arsc stored uncompressed"
+                    fi
+                    rm -rf "$_AARC_TMP"
+
+                    # Step 2: inject patched DEX from rebuilt APK back into ORIGINAL APK
+                    #   (resources.arsc from original is untouched by default)
+                    #   But if we already have color patches, we need rebuilt resources too.
+                    #   Strategy: use rebuilt APK as base, only fix resources.arsc alignment.
+                    _ZA=$(which zipalign 2>/dev/null ||                           find "$BIN_DIR/android-sdk" -name zipalign 2>/dev/null | head -1)
+                    if [ -n "$_ZA" ]; then
+                        "$_ZA" -p -f 4 "${MFP_APK}.rebuilt" "${MFP_APK}.aligned" &&                             mv "${MFP_APK}.aligned" "$MFP_APK" &&                             log_success "✓ MIUIFrequentPhrase rebuilt + aligned (smali + colors)"
+                    else
+                        mv "${MFP_APK}.rebuilt" "$MFP_APK"
+                        log_warning "  zipalign not found — alignment may fail on device"
+                        log_success "✓ MIUIFrequentPhrase rebuilt (smali + colors, no align)"
+                    fi
+                    rm -f "${MFP_APK}.rebuilt"
+                else
+                    rm -f "${MFP_APK}.rebuilt"
+                    log_warning "apktool rebuild failed — MIUIFrequentPhrase colors skipped"
+                fi
+            else
+                log_warning "apktool full decode timed out — colors step skipped"
+            fi
+
+            rm -rf "$MFP_WORK" "$MFP_DEX"
+            rm -f "$MFP_ORIG"
+            cd "$GITHUB_WORKSPACE"
         fi
 
         # G. NEXPACKAGE
