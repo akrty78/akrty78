@@ -769,10 +769,23 @@ def run_patches(archive: Path, patch_fn, label: str) -> int:
 
 # ── framework.jar  ───────────────────────────────────────────────
 def _fw_sig_patch(dex_name: str, dex: bytearray) -> bool:
+    """
+    Patch getMinimumSignatureSchemeVersionForTargetSdk → return 1 (const/4 v0, 0x1).
+
+    MUST use trim=True:
+      trim=False (default) leaves the original insns_size in the code_item header
+      and NOP-pads the remainder, producing:
+          const/4 v0, 0x1 ; return v0 ; nop ; nop ; ...
+      trim=True shrinks insns_size to exactly 2 code-units (4 bytes), giving the
+      clean output the verifier and baksmali both expect:
+          const/4 v0, 0x1
+          return v0
+    """
     if b'ApkSignatureVerifier' not in bytes(dex): return False
     return binary_patch_method(dex,
         "android/util/apk/ApkSignatureVerifier",
-        "getMinimumSignatureSchemeVersionForTargetSdk", 1, _STUB_TRUE)
+        "getMinimumSignatureSchemeVersionForTargetSdk", 1, _STUB_TRUE,
+        trim=True)
 
 # ── Settings.apk  ────────────────────────────────────────────────
 def _settings_ai_patch(dex_name: str, dex: bytearray) -> bool:
@@ -843,115 +856,106 @@ def _recorder_ai_patch(dex_name: str, dex: bytearray) -> bool:
 # ── services.jar  ────────────────────────────────────────────────
 def _services_jar_patch(dex_name: str, dex: bytearray) -> bool:
     """
-    Suppress showSystemReadyErrorDialogsIfNeeded in services.jar.
+    Suppress showSystemReadyErrorDialogsIfNeeded by patching the CALL SITE.
 
-    Case A — Lambda invoke scan:
-      Scan ALL ExternalSyntheticLambda* classes. For each run()V, check if
-      it calls showSystemReadyErrorDialogsIfNeeded via any invoke-* opcode.
-      Patch ONLY that lambda's run() → return-void.
+    WHY CALL-SITE NOT METHOD STUB:
+      Stubbing ANY concrete implementation (Case B previously) patches classes
+      like PanningScalingHandler that legitimately implement the interface method
+      for their own purposes — breaking unrelated functionality.
+      The correct approach is to find the invoke-virtual instruction that dispatches
+      through ActivityTaskManagerInternal and NOP it, leaving all implementations
+      untouched.
 
-    Case B — Concrete method scan (ALL classes, not just ActivityTaskManagerInternal):
-      ActivityTaskManagerInternal is abstract — code_off == 0 for all its
-      methods, so binary_patch_method always returns "not found" there.
-      The concrete override lives in a subclass with a completely different name
-      (e.g. ActivityTaskManagerService, or an anonymous impl).
-      Walk ALL class_defs directly: for each method named
-      showSystemReadyErrorDialogsIfNeeded with code_off != 0, stub it.
+    TARGET INSTRUCTION:
+      invoke-virtual {vX}, Lcom/android/server/wm/ActivityTaskManagerInternal;
+          ->showSystemReadyErrorDialogsIfNeeded()V
+      opcode: 0x6E (invoke-virtual, format 35c, 3 code-units = 6 bytes)
+      or:     0x74 (invoke-virtual/range, format 3rc, 3 code-units = 6 bytes)
+
+    PATCH:
+      Replace the 6 bytes of the invoke instruction with 0x00 0x00 0x00 0x00 0x00 0x00
+      (3 × NOP code units). Method is void so no move-result follows.
+
+    IDENTIFICATION:
+      The method_id for ActivityTaskManagerInternal::showSystemReadyErrorDialogsIfNeeded
+      is identified by matching BOTH the class type string AND the method name in the
+      method_ids table — not just the name, which would also match implementations in
+      PanningScalingHandler, ActivityTaskManagerService, etc.
+
+    SAFETY:
+      - Only 0x6E / 0x74 opcodes are touched (invoke-virtual / invoke-virtual/range).
+      - Only exact method_id matches are patched.
+      - All code_item boundaries are respected — scan uses _iter_code_items.
+      - If no call site found: returns False (graceful skip), does not abort build.
     """
     raw = bytes(dex)
-    if b'showSystemReadyErrorDialogsIfNeeded' not in raw:
-        return False
+    METHOD   = 'showSystemReadyErrorDialogsIfNeeded'
+    TARGET_C = 'Lcom/android/server/wm/ActivityTaskManagerInternal;'
+
+    if b'showSystemReadyErrorDialogsIfNeeded' not in raw: return False
+    if b'ActivityTaskManagerInternal' not in raw:        return False
 
     hdr = _parse_header(raw)
     if not hdr: return False
 
-    METHOD = 'showSystemReadyErrorDialogsIfNeeded'
-    target_mids = _find_method_ids_by_name(raw, hdr, METHOD)
-    INVOKE_OPS  = frozenset([0x6E, 0x6F, 0x70, 0x71, 0x72, 0x74, 0x75, 0x76, 0x77, 0x78])
+    # Step 1: find the specific method_id for ActivityTaskManagerInternal::METHOD
+    #   Must match BOTH class type AND method name.
+    #   Walking all method_ids: method_id_item = { class_idx:H, proto_idx:H, name_idx:I }
+    target_mid = None
+    for mi in range(hdr['method_ids_size']):
+        base = hdr['method_ids_off'] + mi * 8
+        try:
+            cls_idx   = struct.unpack_from('<H', raw, base + 0)[0]
+            name_sidx = struct.unpack_from('<I', raw, base + 4)[0]
+            # Resolve class type
+            type_sidx = struct.unpack_from('<I', raw, hdr['type_ids_off'] + cls_idx * 4)[0]
+            cls_str   = _get_str(raw, hdr, type_sidx)
+            if cls_str != TARGET_C: continue
+            # Resolve method name
+            mname = _get_str(raw, hdr, name_sidx)
+            if mname != METHOD: continue
+            target_mid = mi
+            info(f"  Found method_id[{mi}]: {TARGET_C}->{METHOD}()")
+            break
+        except Exception:
+            continue
 
-    # Case A: find the lambda that calls showSystemReadyErrorDialogsIfNeeded
-    if target_mids and b'ExternalSyntheticLambda' in raw:
-        for insns_off, insns_len, type_str, mname in _iter_code_items(raw, hdr):
-            if 'ExternalSyntheticLambda' not in type_str: continue
-            if mname != 'run': continue
-            i = 0
-            while i < insns_len - 3:
-                op = raw[insns_off + i]
-                if op in INVOKE_OPS and i + 3 < insns_len:
-                    ref_idx = struct.unpack_from('<H', raw, insns_off + i + 2)[0]
-                    if ref_idx in target_mids:
-                        cls_path = type_str[1:-1]
-                        info(f"  Case A: {type_str}::run calls {METHOD}")
-                        return binary_patch_method(dex, cls_path, 'run', 1, _STUB_VOID)
-                i += 2
+    if target_mid is None:
+        warn(f"  method_id for {TARGET_C}->{METHOD}() not found in this DEX")
+        return False
 
-    # Case B: walk ALL class_defs manually — find any non-abstract implementation
-    #   We cannot use binary_patch_method here because it calls _uleb128() on
-    #   class_data which may return code_off=0 for abstract methods and bail.
-    #   Instead we replicate the walk but accept ONLY entries with code_off != 0.
-    patched = False
+    # Step 2: scan all code_items for invoke-virtual / invoke-virtual/range
+    #   with this exact method_id and NOP them (6 bytes → 6 × 0x00).
+    INVOKE_VIRTUAL       = 0x6E   # format 35c,  3 code-units (6 bytes)
+    INVOKE_VIRTUAL_RANGE = 0x74   # format 3rc,  3 code-units (6 bytes)
     raw_w = bytearray(dex)
+    count = 0
 
-    for ci in range(hdr['class_defs_size']):
-        base           = hdr['class_defs_off'] + ci * 32
-        class_data_off = struct.unpack_from('<I', raw, base + 24)[0]
-        if class_data_off == 0: continue
-        cls_idx = struct.unpack_from('<I', raw, base)[0]
-        try:
-            sidx     = struct.unpack_from('<I', raw, hdr['type_ids_off'] + cls_idx * 4)[0]
-            type_str = _get_str(raw, hdr, sidx)
-        except Exception: continue
-
-        pos = class_data_off
-        try:
-            sf, pos = _uleb128(raw, pos); inf, pos = _uleb128(raw, pos)
-            dm, pos = _uleb128(raw, pos); vm,  pos = _uleb128(raw, pos)
-        except Exception: continue
-
-        for _ in range(sf + inf):
-            try: _, pos = _uleb128(raw, pos); _, pos = _uleb128(raw, pos)
-            except Exception: break
-
-        midx = 0
-        for _ in range(dm + vm):
-            try:
-                d, pos    = _uleb128(raw, pos); midx += d
-                _,  pos   = _uleb128(raw, pos)           # access_flags
-                code_off, pos = _uleb128(raw, pos)
-            except Exception: break
-            if code_off == 0: continue                    # abstract — skip
-            try:
-                mid_base  = hdr['method_ids_off'] + midx * 8
-                name_sidx = struct.unpack_from('<I', raw, mid_base + 4)[0]
-                if _get_str(raw, hdr, name_sidx) != METHOD: continue
-                # Found non-abstract implementation — patch in place
-                orig_regs  = struct.unpack_from('<H', raw, code_off + 0)[0]
-                insns_size = struct.unpack_from('<I', raw, code_off + 12)[0]
-                if insns_size < 1:
-                    warn(f"  Case B: {type_str}::{METHOD} insns_size=0, skip")
+    for insns_off, insns_len, type_str, mname in _iter_code_items(raw, hdr):
+        i = 0
+        while i <= insns_len * 2 - 6:   # need 6 bytes ahead
+            op = raw[insns_off + i]
+            if op in (INVOKE_VIRTUAL, INVOKE_VIRTUAL_RANGE):
+                mid_ref = struct.unpack_from('<H', raw, insns_off + i + 2)[0]
+                if mid_ref == target_mid:
+                    # NOP out the 6-byte invoke instruction
+                    for b in range(6):
+                        raw_w[insns_off + i + b] = 0x00
+                    op_name = ('invoke-virtual' if op == 0x6E else 'invoke-virtual/range')
+                    ok(f"  NOP'd {op_name} call in {type_str}::{mname} @ +{i}")
+                    count += 1
+                    i += 6
                     continue
-                orig_ins = struct.unpack_from('<H', raw, code_off + 2)[0]
-                new_regs = max(1, orig_ins)
-                struct.pack_into('<H', raw_w, code_off + 0, new_regs)
-                struct.pack_into('<H', raw_w, code_off + 4, 0)
-                struct.pack_into('<H', raw_w, code_off + 6, 0)
-                struct.pack_into('<I', raw_w, code_off + 8, 0)
-                struct.pack_into('<I', raw_w, code_off + 12, 1)  # insns_size=1cu
-                raw_w[code_off + 16] = 0x0E               # return-void
-                raw_w[code_off + 17] = 0x00
-                ok(f"  Case B: {type_str}::{METHOD} → return-void")
-                patched = True
-                raw = bytes(raw_w)
-            except Exception:
-                continue
+            i += 2
 
-    if patched:
-        _fix_checksums(raw_w)
-        dex[:] = raw_w
-        return True
+    if count == 0:
+        warn(f"  No invoke-virtual call site for {METHOD} found — DEX unchanged")
+        return False
 
-    warn(f"  {METHOD}: not found via lambda or concrete class")
-    return False
+    _fix_checksums(raw_w)
+    dex[:] = raw_w
+    ok(f"  ✓ {METHOD}: {count} call site(s) NOP'd")
+    return True
 
 # ── Provision.apk: Utils::setGmsAppEnabledStateForCn  ──────────────
 def _provision_gms_patch(dex_name: str, dex: bytearray) -> bool:
