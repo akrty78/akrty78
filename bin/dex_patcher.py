@@ -231,7 +231,7 @@ def _find_method_ids_by_name(data: bytes, hdr: dict, method_name: str) -> set:
 #  This scanner bypasses class_data entirely: it scans raw DEX bytes in
 #  2-byte steps (code-unit aligned) starting after all static tables,
 #  looking for [SGET_OPCODE] [reg] [field_lo] [field_hi].
-#  Already-patched slots are 0x12/0x15 — not in SGET_OPCODES — so it
+#  Already-patched slots are 0x12/0x13 — not in SGET_OPCODES — so it
 #  never double-patches and is safe to call after the normal sweep.
 # ════════════════════════════════════════════════════════════════════
 
@@ -274,7 +274,8 @@ def _raw_sget_scan(dex: bytearray, field_class: str, field_name: str,
                     raw[i + 2] = 0x00
                     raw[i + 3] = 0x00
                 else:
-                    raw[i]     = 0x15
+                    # const/16 vAA, 0x1  (opcode 0x13, format 21s)
+                    raw[i]     = 0x13
                     raw[i + 1] = reg
                     raw[i + 2] = 0x01
                     raw[i + 3] = 0x00
@@ -495,7 +496,7 @@ def binary_patch_method(dex: bytearray, class_desc: str, method_name: str,
 
 
 # ════════════════════════════════════════════════════════════════════
-#  BINARY PATCH: sget-boolean field → const/16 1
+#  BINARY PATCH: sget-boolean field → const/4 1 (or const/16 with opcode 0x13)
 #  Scans ONLY within verified code_item instruction arrays.
 # ════════════════════════════════════════════════════════════════════
 
@@ -510,7 +511,7 @@ def binary_patch_sget_to_true(dex: bytearray,
     Replace with const/4 or const/16 (both 4 bytes total in the stream):
 
       use_const4=False (default):
-        const/16 vAA, 0x1   →  15 AA 01 00   (format 21s, 4 bytes)
+        const/16 vAA, 0x1   →  13 AA 01 00   (format 21s, 4 bytes)
 
       use_const4=True (when user specifies const/4 explicitly):
         const/4  vAA, 0x1   →  12 (0x10|AA) 00 00   (format 11n, 2 bytes + NOP NOP)
@@ -553,8 +554,9 @@ def binary_patch_sget_to_true(dex: bytearray,
                         raw[insns_off + i + 2] = 0x00   # NOP
                         raw[insns_off + i + 3] = 0x00   # NOP
                     else:
-                        # const/16 vAA, 0x1  (21s)
-                        raw[insns_off + i]     = 0x15
+                        # const/16 vAA, 0x1  (opcode 0x13, format 21s: 4 bytes)
+                        # 0x13 = const/16. NOT 0x15 which is const/high16 (shifts value <<16)
+                        raw[insns_off + i]     = 0x13
                         raw[insns_off + i + 1] = reg
                         raw[insns_off + i + 2] = 0x01
                         raw[insns_off + i + 3] = 0x00
@@ -951,10 +953,53 @@ def _services_jar_patch(dex_name: str, dex: bytearray) -> bool:
     warn(f"  {METHOD}: not found via lambda or concrete class")
     return False
 
-# ── IS_INTERNATIONAL_BUILD (Lmiui/os/Build;)  ────────────────────
-def _intl_build_patch(dex_name: str, dex: bytearray) -> bool:
-    if b'IS_INTERNATIONAL_BUILD' not in bytes(dex): return False
-    n = binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD')
+# ── Provision.apk: Utils::setGmsAppEnabledStateForCn  ──────────────
+def _provision_gms_patch(dex_name: str, dex: bytearray) -> bool:
+    """
+    STRICT SCOPE: patch exactly ONE sget-boolean of IS_INTERNATIONAL_BUILD
+    inside Utils::setGmsAppEnabledStateForCn — no other class, no other method.
+
+    Correct encoding:  const/4 v0, 0x1   →   bytes 12 10
+      opcode 0x12, second byte = (value<<4)|reg = (1<<4)|0 = 0x10
+    Wrong encoding from old _intl_build_patch (no use_const4):
+      const/16 v0, 0x1  →  bytes 13 00 01 00  (opcode 0x13, not 0x15 which is const/high16)
+
+    Constraints enforced:
+      - class filter: 'Utils' must be in type_str (catches com/android/provision/Utils)
+      - method filter: exact name 'setGmsAppEnabledStateForCn'
+      - first-occurrence only: count is tracked; abort if 0 matches
+      - use_const4=True: guarantees opcode 0x12 output (const/4)
+    """
+    raw = bytes(dex)
+    if b'IS_INTERNATIONAL_BUILD' not in raw: return False
+    if b'setGmsAppEnabledStateForCn' not in raw: return False
+
+    n = binary_patch_sget_to_true(dex,
+            'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD',
+            only_class='Utils',
+            only_method='setGmsAppEnabledStateForCn',
+            use_const4=True)
+    if n == 0:
+        warn("  Provision: setGmsAppEnabledStateForCn not found or no IS_INTERNATIONAL_BUILD sget")
+        return False
+    ok(f"  ✓ Provision Utils::setGmsAppEnabledStateForCn → const/4 v0, 0x1 ({n} sget)")
+    return True
+
+
+# ── miui-services.jar: global IS_INTERNATIONAL_BUILD sweep  ──────────
+def _miui_service_patch(dex_name: str, dex: bytearray) -> bool:
+    """
+    Global sweep of Lmiui/os/Build;->IS_INTERNATIONAL_BUILD in miui-services.jar.
+    No class filter — flips all region gates in the service jar.
+    Uses const/4 (opcode 0x12) which is safe for all boolean registers (always ≤ 15).
+    Replaces the deleted _intl_build_patch which was using 0x15 (const/high16, wrong).
+    """
+    raw = bytes(dex)
+    if b'IS_INTERNATIONAL_BUILD' not in raw: return False
+    n  = binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD',
+                                    use_const4=True)
+    n += _raw_sget_scan(dex, 'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD',
+                        use_const4=True)
     return n > 0
 
 # ── SystemUI combined: VoLTE + QuickShare + WA notification  ─────
@@ -1043,12 +1088,22 @@ def _miui_framework_patch(dex_name: str, dex: bytearray) -> bool:
     raw = bytes(dex)
     patched = False
 
-    # Pass 1 — IS_INTERNATIONAL_BUILD in 13 framework classes
+    # Pass 1a — IS_INTERNATIONAL_BUILD in 13 framework classes
     if b'IS_INTERNATIONAL_BUILD' in raw:
         n = 0
         for cls in _FW_INTL_CLASSES:
             n += binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD',
                                             only_class=cls, use_const4=True)
+        if n > 0:
+            patched = True
+            raw = bytes(dex)
+
+    # Pass 1b — Gboard swap in InputMethodManagerStubImpl (binary, no-op if string absent)
+    #   binary_swap_string requires "com.google.android.inputmethod.latin" in DEX pool.
+    #   If pool doesn't have it, apktool D8b smali sed handles it as fallback.
+    if _BAIDU_IME.encode() in raw:
+        n = binary_swap_string(dex, _BAIDU_IME, _GBOARD_IME,
+                               only_class='InputMethodManagerStubImpl')
         if n > 0:
             patched = True
             raw = bytes(dex)
@@ -1188,8 +1243,8 @@ PROFILES = {
     "settings-region":   _settings_region_patch,   # exact 3 classes only
     "voice-recorder-ai": _recorder_ai_patch,        # AiDeviceUtil::isAiSupportedDevice
     "services-jar":      _services_jar_patch,
-    "provision-gms":     _intl_build_patch,
-    "miui-service":      _intl_build_patch,
+    "provision-gms":     _provision_gms_patch,    # Utils::setGmsAppEnabledStateForCn only
+    "miui-service":      _miui_service_patch,    # global IS_INTERNATIONAL_BUILD sweep
     "systemui-volte":    _systemui_all_patch,       # VoLTE + QuickShare(const/4) + WA-notif
     "miui-framework":    _miui_framework_patch,     # validateTheme(trim) + IS_GLOBAL_BUILD
     "incallui-ai":       _incallui_patch,           # RecorderUtils::isAiRecordEnable
