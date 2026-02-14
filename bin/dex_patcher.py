@@ -841,69 +841,114 @@ def _recorder_ai_patch(dex_name: str, dex: bytearray) -> bool:
 # ── services.jar  ────────────────────────────────────────────────
 def _services_jar_patch(dex_name: str, dex: bytearray) -> bool:
     """
-    Dynamic two-case patch for showSystemReadyErrorDialogsIfNeeded suppression.
+    Suppress showSystemReadyErrorDialogsIfNeeded in services.jar.
 
-    Case A — Lambda search (stable across builds):
-      Scan ALL ActivityManagerService$$ExternalSyntheticLambda* classes.
-      For each, walk its run()V code_item and look for invoke-* instructions
-      whose method_id refers to showSystemReadyErrorDialogsIfNeeded.
-      Patch only THAT lambda's run() → return-void.
-      (Avoids hardcoding Lambda31 which changes every build.)
+    Case A — Lambda invoke scan:
+      Scan ALL ExternalSyntheticLambda* classes. For each run()V, check if
+      it calls showSystemReadyErrorDialogsIfNeeded via any invoke-* opcode.
+      Patch ONLY that lambda's run() → return-void.
 
-    Case B — Direct method fallback:
-      If no lambda match, scan all classes for showSystemReadyErrorDialogsIfNeeded
-      as a direct method and stub it. Covers builds where R8 inlines the lambda.
+    Case B — Concrete method scan (ALL classes, not just ActivityTaskManagerInternal):
+      ActivityTaskManagerInternal is abstract — code_off == 0 for all its
+      methods, so binary_patch_method always returns "not found" there.
+      The concrete override lives in a subclass with a completely different name
+      (e.g. ActivityTaskManagerService, or an anonymous impl).
+      Walk ALL class_defs directly: for each method named
+      showSystemReadyErrorDialogsIfNeeded with code_off != 0, stub it.
     """
     raw = bytes(dex)
-    if (b'ActivityManagerService' not in raw and
-            b'ActivityTaskManagerInternal' not in raw):
+    if b'showSystemReadyErrorDialogsIfNeeded' not in raw:
         return False
 
     hdr = _parse_header(raw)
     if not hdr: return False
 
-    # Find all method_ids named showSystemReadyErrorDialogsIfNeeded
-    target_mids = _find_method_ids_by_name(raw, hdr, 'showSystemReadyErrorDialogsIfNeeded')
-    if not target_mids and b'showSystemReadyErrorDialogsIfNeeded' not in raw:
-        return False
+    METHOD = 'showSystemReadyErrorDialogsIfNeeded'
+    target_mids = _find_method_ids_by_name(raw, hdr, METHOD)
+    INVOKE_OPS  = frozenset([0x6E, 0x6F, 0x70, 0x71, 0x72, 0x74, 0x75, 0x76, 0x77, 0x78])
 
-    # All invoke opcodes (format 35c/3rc) — method ref is at bytes +2,+3
-    INVOKE_OPS = frozenset([0x6E, 0x6F, 0x70, 0x71, 0x72, 0x74, 0x75, 0x76, 0x77, 0x78])
-
-    # Case A: scan lambda classes for one that calls the target method
+    # Case A: find the lambda that calls showSystemReadyErrorDialogsIfNeeded
     if target_mids and b'ExternalSyntheticLambda' in raw:
         for insns_off, insns_len, type_str, mname in _iter_code_items(raw, hdr):
-            if 'ActivityManagerService$$ExternalSyntheticLambda' not in type_str: continue
+            if 'ExternalSyntheticLambda' not in type_str: continue
             if mname != 'run': continue
             i = 0
-            while i < insns_len - 5:
+            while i < insns_len - 3:
                 op = raw[insns_off + i]
-                if op in INVOKE_OPS:
+                if op in INVOKE_OPS and i + 3 < insns_len:
                     ref_idx = struct.unpack_from('<H', raw, insns_off + i + 2)[0]
                     if ref_idx in target_mids:
                         cls_path = type_str[1:-1]
-                        info(f"  Case A: lambda {type_str} calls showSystemReadyErrorDialogsIfNeeded")
+                        info(f"  Case A: {type_str}::run calls {METHOD}")
                         return binary_patch_method(dex, cls_path, 'run', 1, _STUB_VOID)
                 i += 2
 
-    # Case B: stub showSystemReadyErrorDialogsIfNeeded directly in any matching class
-    for i in range(hdr['class_defs_size']):
-        base = hdr['class_defs_off'] + i * 32
-        if struct.unpack_from('<I', raw, base + 24)[0] == 0: continue
+    # Case B: walk ALL class_defs manually — find any non-abstract implementation
+    #   We cannot use binary_patch_method here because it calls _uleb128() on
+    #   class_data which may return code_off=0 for abstract methods and bail.
+    #   Instead we replicate the walk but accept ONLY entries with code_off != 0.
+    patched = False
+    raw_w = bytearray(dex)
+
+    for ci in range(hdr['class_defs_size']):
+        base           = hdr['class_defs_off'] + ci * 32
+        class_data_off = struct.unpack_from('<I', raw, base + 24)[0]
+        if class_data_off == 0: continue
         cls_idx = struct.unpack_from('<I', raw, base)[0]
         try:
             sidx     = struct.unpack_from('<I', raw, hdr['type_ids_off'] + cls_idx * 4)[0]
             type_str = _get_str(raw, hdr, sidx)
-            if 'ActivityTaskManagerInternal' not in type_str: continue
-            cls_path = type_str[1:-1]
-            if binary_patch_method(dex, cls_path,
-                    'showSystemReadyErrorDialogsIfNeeded', 1, _STUB_VOID):
-                info(f"  Case B: stubbed showSystemReadyErrorDialogsIfNeeded in {type_str}")
-                return True
-        except Exception:
-            continue
+        except Exception: continue
 
-    warn("  showSystemReadyErrorDialogsIfNeeded: not found via lambda or direct method")
+        pos = class_data_off
+        try:
+            sf, pos = _uleb128(raw, pos); inf, pos = _uleb128(raw, pos)
+            dm, pos = _uleb128(raw, pos); vm,  pos = _uleb128(raw, pos)
+        except Exception: continue
+
+        for _ in range(sf + inf):
+            try: _, pos = _uleb128(raw, pos); _, pos = _uleb128(raw, pos)
+            except Exception: break
+
+        midx = 0
+        for _ in range(dm + vm):
+            try:
+                d, pos    = _uleb128(raw, pos); midx += d
+                _,  pos   = _uleb128(raw, pos)           # access_flags
+                code_off, pos = _uleb128(raw, pos)
+            except Exception: break
+            if code_off == 0: continue                    # abstract — skip
+            try:
+                mid_base  = hdr['method_ids_off'] + midx * 8
+                name_sidx = struct.unpack_from('<I', raw, mid_base + 4)[0]
+                if _get_str(raw, hdr, name_sidx) != METHOD: continue
+                # Found non-abstract implementation — patch in place
+                orig_regs  = struct.unpack_from('<H', raw, code_off + 0)[0]
+                insns_size = struct.unpack_from('<I', raw, code_off + 12)[0]
+                if insns_size < 1:
+                    warn(f"  Case B: {type_str}::{METHOD} insns_size=0, skip")
+                    continue
+                orig_ins = struct.unpack_from('<H', raw, code_off + 2)[0]
+                new_regs = max(1, orig_ins)
+                struct.pack_into('<H', raw_w, code_off + 0, new_regs)
+                struct.pack_into('<H', raw_w, code_off + 4, 0)
+                struct.pack_into('<H', raw_w, code_off + 6, 0)
+                struct.pack_into('<I', raw_w, code_off + 8, 0)
+                struct.pack_into('<I', raw_w, code_off + 12, 1)  # insns_size=1cu
+                raw_w[code_off + 16] = 0x0E               # return-void
+                raw_w[code_off + 17] = 0x00
+                ok(f"  Case B: {type_str}::{METHOD} → return-void")
+                patched = True
+                raw = bytes(raw_w)
+            except Exception:
+                continue
+
+    if patched:
+        _fix_checksums(raw_w)
+        dex[:] = raw_w
+        return True
+
+    warn(f"  {METHOD}: not found via lambda or concrete class")
     return False
 
 # ── IS_INTERNATIONAL_BUILD (Lmiui/os/Build;)  ────────────────────
