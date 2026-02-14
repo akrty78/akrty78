@@ -1097,42 +1097,33 @@ def _intl_build_patch(dex_name: str, dex: bytearray) -> bool:
 # ── SystemUI combined: VoLTE + QuickShare + WA notification  ─────
 def _systemui_all_patch(dex_name: str, dex: bytearray) -> bool:
     """
-    Patch 1 — VoLTE: Lmiui/os/Build;->IS_INTERNATIONAL_BUILD → const/4 vX, 0x1
-      ONLY inside these 4 exact classes (all contain 'v' registers for this field):
-        MiuiOperatorCustomizedPolicy
-        MiuiCarrierTextController
-        MiuiCellularIconVM$special$$inlined$combine$1$3
-        MiuiMobileIconBinder$bind$1$1$10
-      class filter uses substring match so $-inner-class variants are captured.
+    Patch 1 — VoLTE: GLOBAL sweep of Lmiui/os/Build;->IS_INTERNATIONAL_BUILD.
+      No class filter. Targets like MiuiOperatorCustomizedPolicy,
+      MiuiCarrierTextController, MiuiCellularIconVM, MiuiMobileIconBinder
+      and their inner/anonymous classes read this flag via synthetic accessors —
+      the actual sget bytecode lives in those generated accessors, not the named
+      class body. A global sweep catches all of them regardless of which class
+      the compiler emitted the sget into. Uses const/4 vX, 0x1 (fallback const/16
+      if register > 15).
 
     Patch 2 — QuickShare: Lcom/miui/utils/configs/MiuiConfigs;->IS_INTERNATIONAL_BUILD
-      → const/4 pX, 0x1  ONLY inside class CurrentTilesInteractorImpl (all methods).
-      No method filter — the sget may be in a lambda or helper inside the class.
+      → const/4 pX, 0x1. Class CurrentTilesInteractorImpl, all methods.
 
-    Patch 3 — WA notification: same MiuiConfigs field → const/4 v3, 0x1
-      ONLY inside NotificationUtil::isEmptySummary.
+    Patch 3 — WA notification: same MiuiConfigs field → const/4 vX, 0x1.
+      Scoped to NotificationUtil::isEmptySummary.
     """
     patched = False
     raw = bytes(dex)
 
-    # Patch 1 — VoLTE: 4 exact classes, const/4
+    # Patch 1 — VoLTE: global sweep, Lmiui/os/Build, const/4
     if b'IS_INTERNATIONAL_BUILD' in raw and b'miui/os/Build' in raw:
-        VOLTE_CLASSES = (
-            'MiuiOperatorCustomizedPolicy',
-            'MiuiCarrierTextController',
-            'MiuiCellularIconVM',          # substring catches $special$$inlined$combine$1$3
-            'MiuiMobileIconBinder',        # substring catches $bind$1$1$10
-        )
-        for cls in VOLTE_CLASSES:
-            if cls.encode() in raw:
-                n = binary_patch_sget_to_true(dex,
-                        'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD',
-                        only_class=cls, use_const4=True)
-                if n > 0:
-                    patched = True
-                    raw = bytes(dex)
+        if binary_patch_sget_to_true(dex,
+                'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD',
+                use_const4=True) > 0:
+            patched = True
+            raw = bytes(dex)
 
-    # Patch 2 — QuickShare: CurrentTilesInteractorImpl (all methods), const/4
+    # Patch 2 — QuickShare: CurrentTilesInteractorImpl only, all methods, const/4
     if b'CurrentTilesInteractorImpl' in raw and b'MiuiConfigs' in raw:
         if binary_patch_sget_to_true(dex,
                 'Lcom/miui/utils/configs/MiuiConfigs;', 'IS_INTERNATIONAL_BUILD',
@@ -1176,29 +1167,18 @@ def _miui_framework_patch(dex_name: str, dex: bytearray) -> bool:
 # ── Settings.apk region unlock  ─────────────────────────────────
 def _settings_region_patch(dex_name: str, dex: bytearray) -> bool:
     """
-    Patch IS_GLOBAL_BUILD → const/4 pX, 0x1 in exactly 3 classes.
+    GLOBAL sweep: replace every sget of Lmiui/os/Build;->IS_GLOBAL_BUILD with
+    const/4 vX, 0x1 (register preserved). No class filter.
 
-    LocaleController    → method getAvailabilityStatus only
-    LocaleSettingsTree  → all methods in class (aggressive)
-    OtherPersonalSettings → all methods in class (2 sget lines, both patched)
-
-    Uses const/4 (opcode 0x12) per user spec. Register preserved as-is.
+    LocaleController, LocaleSettingsTree and OtherPersonalSettings are the
+    intended targets — but like the VoLTE classes in SystemUI, they read this
+    flag via synthetic accessors whose sget bytecode lives in generated
+    surrounding classes. Global sweep catches all of them. Uses const/4 with
+    automatic fallback to const/16 for registers > 15.
     """
     if b'IS_GLOBAL_BUILD' not in bytes(dex): return False
-    n = 0
-    # (1) LocaleController — scoped to getAvailabilityStatus
-    n += binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
-                                    only_class='LocaleController',
-                                    only_method='getAvailabilityStatus',
-                                    use_const4=True)
-    # (2) LocaleSettingsTree — all methods, aggressive
-    n += binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
-                                    only_class='LocaleSettingsTree',
-                                    use_const4=True)
-    # (3) OtherPersonalSettings — all methods, both IS_GLOBAL_BUILD lines
-    n += binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
-                                    only_class='OtherPersonalSettings',
-                                    use_const4=True)
+    n = binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
+                                   use_const4=True)
     return n > 0
 
 
