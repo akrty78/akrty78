@@ -440,6 +440,12 @@ def _uleb128(data: bytes, off: int):
         shift += 7
     return result, off
 
+def _skip_uleb128(data: bytes, off: int) -> int:
+    """Advance past one ULEB128 value without decoding it. Never throws."""
+    while off < len(data) and (data[off] & 0x80):
+        off += 1
+    return off + 1  # skip the final byte (high bit clear)
+
 def _get_str(data: bytes, hdr: dict, idx: int) -> str:
     off = struct.unpack_from('<I', data, hdr['string_ids_off'] + idx * 4)[0]
     _, co = _uleb128(data, off)
@@ -486,11 +492,11 @@ def _iter_code_items(data: bytes, hdr: dict):
             dm,  pos = _uleb128(data, pos); vm,  pos = _uleb128(data, pos)
         except Exception: continue
 
-        # skip fields
+        # skip fields — use _skip_uleb128 (never throws, just advances offset)
+        # Each encoded_field is exactly 2 ULEB128 values: field_idx_diff + access_flags
         for _ in range(sf + inf):
-            try:
-                _, pos = _uleb128(data, pos); _, pos = _uleb128(data, pos)
-            except Exception: break
+            pos = _skip_uleb128(data, pos)  # field_idx_diff
+            pos = _skip_uleb128(data, pos)  # access_flags
 
         midx = 0
         for _ in range(dm + vm):
@@ -1224,42 +1230,56 @@ def _systemui_all_patch(dex_name: str, dex: bytearray) -> bool:
 
 # ── miui-framework.jar  ─────────────────────────────────────────
 def _miui_framework_patch(dex_name: str, dex: bytearray) -> bool:
-    patched = False
-    # (1) ThemeReceiver::validateTheme → return-void (trim=True: insns_size=1 cu)
-    #     After patching body, also zero the method's annotations_off in the
-    #     annotations_directory_item so baksmali does NOT emit the Signature block.
-    #     Result: exactly ".registers 5 / return-void" with no annotations.
-    if b'ThemeReceiver' in bytes(dex):
-        if binary_patch_method(dex,
-                "miui/drm/ThemeReceiver", "validateTheme",
-                stub_regs=5, stub_insns=_STUB_VOID, trim=True):
-            patched = True
-            # Remove Signature annotation from DEX annotation tables
-            _clear_method_annotations(dex, "miui/drm/ThemeReceiver", "validateTheme")
-    # (2) IS_GLOBAL_BUILD: global sweep — entire jar is in scope
-    if b'IS_GLOBAL_BUILD' in bytes(dex):
-        if binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
-                                      use_const4=True) > 0:
-            patched = True
+    """
+    ONLY patch: ThemeReceiver::validateTheme → return-void.
+
+    IS_GLOBAL_BUILD is intentionally NOT patched here.
+    Flipping IS_GLOBAL_BUILD in the framework jar causes Settings.apk to crash
+    at startup because Settings calls framework APIs during init — those APIs
+    then return IS_GLOBAL_BUILD=true and branch into code paths that require
+    global-ROM services not present in CN firmware.
+
+    Region unlock (IS_GLOBAL_BUILD) belongs only in Settings.apk's locale
+    classes (LocaleController, LocaleSettingsTree, OtherPersonalSettings).
+    """
+    if b'ThemeReceiver' not in bytes(dex): return False
+    patched = binary_patch_method(dex,
+            "miui/drm/ThemeReceiver", "validateTheme",
+            stub_regs=5, stub_insns=_STUB_VOID, trim=True)
+    if patched:
+        _clear_method_annotations(dex, "miui/drm/ThemeReceiver", "validateTheme")
     return patched
 
 # ── Settings.apk region unlock  ─────────────────────────────────
 def _settings_region_patch(dex_name: str, dex: bytearray) -> bool:
     """
-    Two-pass sweep for Lmiui/os/Build;->IS_GLOBAL_BUILD → const/4 vX, 0x1.
+    Patch IS_GLOBAL_BUILD → const/4 pX, 0x1 scoped to exactly 3 classes.
+    NO global sweep. NO raw scan. Patching only:
 
-    Pass 1 (_iter_code_items): catches most classes.
-    Pass 2 (_raw_sget_scan):   catches any class whose code_items were missed
-      by Pass 1 due to ULEB128 mis-stepping in class_data parsing
-      (e.g., OtherPersonalSettings with many instance fields or inner classes).
+      LocaleController      — all methods (no method filter; the sget may be
+                               in a method other than getAvailabilityStatus)
+      LocaleSettingsTree    — all methods
+      OtherPersonalSettings — all methods (has 2 IS_GLOBAL_BUILD lines in onCreate)
 
-    Both passes use const/4 with automatic fallback to const/16 for reg > 15.
+    Global sweep was used previously and patched 57 sgets in Settings.apk,
+    flipping region flags in unrelated classes and crashing the app.
+    Class-filtered approach patches only the 3 intended classes.
+
+    The improved _iter_code_items (using _skip_uleb128 instead of break in
+    the field-skip loop) ensures OtherPersonalSettings::onCreate is not
+    silently skipped due to ULEB128 mis-stepping on its instance fields.
     """
     if b'IS_GLOBAL_BUILD' not in bytes(dex): return False
-    n  = binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
+    n = 0
+    n += binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
+                                    only_class='LocaleController',
                                     use_const4=True)
-    n += _raw_sget_scan(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
-                         use_const4=True)
+    n += binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
+                                    only_class='LocaleSettingsTree',
+                                    use_const4=True)
+    n += binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
+                                    only_class='OtherPersonalSettings',
+                                    use_const4=True)
     return n > 0
 
 
