@@ -933,51 +933,61 @@ def _settings_ai_patch(dex_name: str, dex: bytearray) -> bool:
 # ── SoundRecorder APK  ──────────────────────────────────────────
 def _recorder_ai_patch(dex_name: str, dex: bytearray) -> bool:
     """
-    STRICT SCOPE: AiDeviceUtil::isAiSupportedDevice → return true (const/4 v0,0x1; return v0).
-    - Try known package paths first.
-    - If AiDeviceUtil string present but path unknown, scan all class defs.
-    - NO IS_INTERNATIONAL_BUILD fallback — do not touch unrelated instructions.
-    - If class/method not found, report clearly and return False.
+    Two-pass:
+    1. AiDeviceUtil::isAiSupportedDevice → return true.
+       Tries known paths; if class present but path differs, scans all class defs.
+    2. IS_INTERNATIONAL_BUILD (Lmiui/os/Build;) → const/16 1 across entire DEX.
+       Handles region gating that exists alongside the AI method gate.
+    Returns True if either pass patched anything.
     """
-    if b'AiDeviceUtil' not in bytes(dex):
-        return False
+    patched = False
+    raw = bytes(dex)
 
-    # Known package paths — try exact match first
-    for cls in (
-        "com/miui/soundrecorder/utils/AiDeviceUtil",
-        "com/miui/soundrecorder/AiDeviceUtil",
-        "com/miui/recorder/utils/AiDeviceUtil",
-        "com/miui/recorder/AiDeviceUtil",
-    ):
-        if binary_patch_method(dex, cls, "isAiSupportedDevice",
-                               stub_regs=1, stub_insns=_STUB_TRUE):
-            return True
+    # Pass 1 — AiDeviceUtil::isAiSupportedDevice
+    if b'AiDeviceUtil' in raw:
+        for cls in (
+            "com/miui/soundrecorder/utils/AiDeviceUtil",
+            "com/miui/soundrecorder/AiDeviceUtil",
+            "com/miui/recorder/utils/AiDeviceUtil",
+            "com/miui/recorder/AiDeviceUtil",
+        ):
+            if binary_patch_method(dex, cls, "isAiSupportedDevice",
+                                   stub_regs=1, stub_insns=_STUB_TRUE):
+                patched = True
+                raw = bytes(dex)
+                break
 
-    # Class present but package path unknown — scan all class defs
-    info("  AiDeviceUtil: known paths missed, scanning all class defs...")
-    data = bytes(dex)
-    hdr  = _parse_header(data)
-    if not hdr:
-        warn("  Cannot parse DEX header"); return False
+        if not patched:
+            # Package path unknown — scan every class def for AiDeviceUtil
+            info("  AiDeviceUtil: scanning all class defs...")
+            data = bytes(dex)
+            hdr  = _parse_header(data)
+            if hdr:
+                for i in range(hdr['class_defs_size']):
+                    base = hdr['class_defs_off'] + i * 32
+                    if struct.unpack_from('<I', data, base + 24)[0] == 0:
+                        continue
+                    cls_idx = struct.unpack_from('<I', data, base)[0]
+                    try:
+                        sidx     = struct.unpack_from('<I', data, hdr['type_ids_off'] + cls_idx * 4)[0]
+                        type_str = _get_str(data, hdr, sidx)
+                        if ('AiDeviceUtil' in type_str
+                                and type_str.startswith('L')
+                                and type_str.endswith(';')):
+                            if binary_patch_method(dex, type_str[1:-1], "isAiSupportedDevice",
+                                                   stub_regs=1, stub_insns=_STUB_TRUE):
+                                patched = True
+                                raw = bytes(dex)
+                                break
+                    except Exception:
+                        continue
 
-    for i in range(hdr['class_defs_size']):
-        base = hdr['class_defs_off'] + i * 32
-        if struct.unpack_from('<I', data, base + 24)[0] == 0:
-            continue
-        cls_idx = struct.unpack_from('<I', data, base)[0]
-        try:
-            sidx     = struct.unpack_from('<I', data, hdr['type_ids_off'] + cls_idx * 4)[0]
-            type_str = _get_str(data, hdr, sidx)
-            if 'AiDeviceUtil' in type_str and type_str.startswith('L') and type_str.endswith(';'):
-                cls_path = type_str[1:-1]
-                if binary_patch_method(dex, cls_path, "isAiSupportedDevice",
-                                       stub_regs=1, stub_insns=_STUB_TRUE):
-                    return True
-        except Exception:
-            continue
+    # Pass 2 — IS_INTERNATIONAL_BUILD region gate
+    if b'IS_INTERNATIONAL_BUILD' in raw:
+        if binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD') > 0:
+            patched = True
 
-    warn("  AiDeviceUtil::isAiSupportedDevice not found in any DEX class")
-    return False
+    return patched
 
 # ── services.jar  ────────────────────────────────────────────────
 def _services_jar_patch(dex_name: str, dex: bytearray) -> bool:
@@ -996,35 +1006,32 @@ def _intl_build_patch(dex_name: str, dex: bytearray) -> bool:
     n = binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD')
     return n > 0
 
-# ── SystemUI combined: VoLTE (MiuiMobileIconBinder family) + QuickShare + WA ──
+# ── SystemUI combined: VoLTE + QuickShare + WA notification  ─────
 def _systemui_all_patch(dex_name: str, dex: bytearray) -> bool:
     """
-    STRICT SCOPE — three independent targets, each class+method pinned:
+    Three patches applied to MiuiSystemUI.apk:
 
-    1. VoLTE icons: Lmiui/os/Build;->IS_INTERNATIONAL_BUILD
-       ONLY inside MiuiMobileIconBinder and its inner classes
-       (substring 'MiuiMobileIconBinder' catches $bind$1$1$1 … $bind$1$1$10 etc.)
+    1. VoLTE icons — ALL sget of Lmiui/os/Build;->IS_INTERNATIONAL_BUILD in this DEX.
+       No class filter: covers every MiuiMobileIconBinder inner class and any
+       other class in the same DEX that gates VoLTE on region.
 
-    2. QuickShare: Lcom/miui/utils/configs/MiuiConfigs;->IS_INTERNATIONAL_BUILD
-       ONLY inside CurrentTilesInteractorImpl::createTileSync
-       Replace with const/4 pX, 0x1 (keep register)
+    2. QuickShare — Lcom/miui/utils/configs/MiuiConfigs;->IS_INTERNATIONAL_BUILD
+       scoped to CurrentTilesInteractorImpl::createTileSync, replaced with const/4.
 
-    3. WA notification: Lcom/miui/utils/configs/MiuiConfigs;->IS_INTERNATIONAL_BUILD
-       ONLY inside NotificationUtil::isEmptySummary
-       Replace with const/4 v3, 0x1 (keep register v3)
+    3. WA notification — same MiuiConfigs field, scoped to
+       NotificationUtil::isEmptySummary, replaced with const/4.
     """
     patched = False
     raw = bytes(dex)
 
-    # 1. VoLTE — MiuiMobileIconBinder family ONLY
-    if b'MiuiMobileIconBinder' in raw and b'IS_INTERNATIONAL_BUILD' in raw and b'miui/os/Build' in raw:
+    # 1. VoLTE — global sweep of Lmiui/os/Build;->IS_INTERNATIONAL_BUILD in this DEX
+    if b'IS_INTERNATIONAL_BUILD' in raw and b'miui/os/Build' in raw:
         if binary_patch_sget_to_true(dex,
-                'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD',
-                only_class='MiuiMobileIconBinder') > 0:
+                'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD') > 0:
             patched = True
             raw = bytes(dex)
 
-    # 2. QuickShare — CurrentTilesInteractorImpl::createTileSync ONLY, const/4
+    # 2. QuickShare — CurrentTilesInteractorImpl::createTileSync only, const/4
     if b'CurrentTilesInteractorImpl' in raw and b'MiuiConfigs' in raw:
         if binary_patch_sget_to_true(dex,
                 'Lcom/miui/utils/configs/MiuiConfigs;', 'IS_INTERNATIONAL_BUILD',
@@ -1034,7 +1041,7 @@ def _systemui_all_patch(dex_name: str, dex: bytearray) -> bool:
             patched = True
             raw = bytes(dex)
 
-    # 3. WA notification — NotificationUtil::isEmptySummary ONLY, const/4, keep v3
+    # 3. WA notification — NotificationUtil::isEmptySummary only, const/4
     if b'NotificationUtil' in raw and b'MiuiConfigs' in raw:
         if binary_patch_sget_to_true(dex,
                 'Lcom/miui/utils/configs/MiuiConfigs;', 'IS_INTERNATIONAL_BUILD',
@@ -1067,14 +1074,18 @@ def _miui_framework_patch(dex_name: str, dex: bytearray) -> bool:
 # ── Settings.apk region unlock  ─────────────────────────────────
 def _settings_region_patch(dex_name: str, dex: bytearray) -> bool:
     """
-    STRICT SCOPE: ONLY class OtherPersonalSettings, both IS_GLOBAL_BUILD lines.
-    Do NOT patch LocaleController, LocaleSettingsTree, or any other class.
+    Patch IS_GLOBAL_BUILD → true in the three locale/region classes.
+    Each call is scoped to its class; other classes in the DEX are untouched.
+    OtherPersonalSettings has 2 sget lines — both are patched by its call.
     """
     if b'IS_GLOBAL_BUILD' not in bytes(dex): return False
-    if b'OtherPersonalSettings' not in bytes(dex): return False
-    # Both IS_GLOBAL_BUILD sget instructions inside OtherPersonalSettings get patched.
-    n = binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
-                                   only_class='OtherPersonalSettings')
+    n = 0
+    n += binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
+                                    only_class='LocaleController')
+    n += binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
+                                    only_class='LocaleSettingsTree')
+    n += binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
+                                    only_class='OtherPersonalSettings')
     return n > 0
 
 
