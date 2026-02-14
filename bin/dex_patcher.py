@@ -203,6 +203,94 @@ def _fix_checksums(dex: bytearray):
     adler = zlib.adler32(bytes(dex[12:])) & 0xFFFFFFFF
     struct.pack_into('<I', dex, 8, adler)
 
+def _clear_method_annotations(dex: bytearray, class_desc: str, method_name: str) -> bool:
+    """
+    Zero the annotations_off entry for a specific method inside the DEX
+    annotations_directory_item. This stops baksmali from emitting Signature
+    (or any other) annotation blocks for that method.
+
+    class_def_item layout (32 bytes):
+      +0  class_idx
+      +4  access_flags
+      +8  superclass_idx
+      +12 interfaces_off
+      +16 source_file_idx
+      +20 annotations_off   ← annotations_directory_item
+      +24 class_data_off
+      +28 static_values_off
+    """
+    data = bytes(dex)
+    hdr  = _parse_header(data)
+    if not hdr: return False
+
+    target_type = f'L{class_desc};'
+
+    # 1. Find class_def row for target class
+    class_def_base = None
+    for i in range(hdr['class_defs_size']):
+        base    = hdr['class_defs_off'] + i * 32
+        cls_idx = struct.unpack_from('<I', data, base)[0]
+        try:
+            sidx = struct.unpack_from('<I', data, hdr['type_ids_off'] + cls_idx * 4)[0]
+            if _get_str(data, hdr, sidx) == target_type:
+                class_def_base = base
+                break
+        except Exception:
+            continue
+
+    if class_def_base is None: return False
+
+    annotations_off  = struct.unpack_from('<I', data, class_def_base + 20)[0]
+    class_data_off   = struct.unpack_from('<I', data, class_def_base + 24)[0]
+    if annotations_off == 0 or class_data_off == 0: return False
+
+    # 2. Walk class_data_item to find the absolute method_idx for method_name
+    target_midx = None
+    pos = class_data_off
+    sf, pos  = _uleb128(data, pos)
+    inf, pos = _uleb128(data, pos)
+    dm, pos  = _uleb128(data, pos)
+    vm, pos  = _uleb128(data, pos)
+    for _ in range(sf + inf):
+        _, pos = _uleb128(data, pos); _, pos = _uleb128(data, pos)
+    midx = 0
+    for _ in range(dm + vm):
+        d,   pos = _uleb128(data, pos); midx += d
+        _,   pos = _uleb128(data, pos)   # access_flags
+        _,   pos = _uleb128(data, pos)   # code_off
+        try:
+            mid_base  = hdr['method_ids_off'] + midx * 8
+            name_sidx = struct.unpack_from('<I', data, mid_base + 4)[0]
+            if _get_str(data, hdr, name_sidx) == method_name:
+                target_midx = midx
+                break
+        except Exception:
+            continue
+
+    if target_midx is None: return False
+
+    # 3. Parse annotations_directory_item to locate this method's entry
+    #    Header: class_annotations_off(4), fields_size(4),
+    #            annotated_methods_size(4), annotated_parameters_size(4)
+    pos = annotations_off
+    pos += 4                                                    # skip class_annotations_off
+    fields_sz   = struct.unpack_from('<I', data, pos)[0]; pos += 4
+    methods_sz  = struct.unpack_from('<I', data, pos)[0]; pos += 4
+    pos += 4                                                    # skip annotated_parameters_size
+    pos += fields_sz * 8                                        # skip field_annotation entries
+
+    # method_annotation entries: { uint method_idx, uint annotations_off }
+    for j in range(methods_sz):
+        entry = pos + j * 8
+        m_idx = struct.unpack_from('<I', data, entry)[0]
+        if m_idx == target_midx:
+            struct.pack_into('<I', dex, entry + 4, 0)   # zero the annotations_off
+            _fix_checksums(dex)
+            ok(f"  Cleared Signature annotation for {method_name}")
+            return True
+
+    return False
+
 
 # ════════════════════════════════════════════════════════════════════
 #  BINARY PATCH: single method → stub
@@ -672,39 +760,51 @@ def _intl_build_patch(dex_name: str, dex: bytearray) -> bool:
 # ── SystemUI combined: VoLTE + QuickShare + WA notification  ─────
 def _systemui_all_patch(dex_name: str, dex: bytearray) -> bool:
     """
-    Three patches applied to MiuiSystemUI.apk:
+    Patch 1 — VoLTE: Lmiui/os/Build;->IS_INTERNATIONAL_BUILD → const/4 vX, 0x1
+      ONLY inside these 4 exact classes (all contain 'v' registers for this field):
+        MiuiOperatorCustomizedPolicy
+        MiuiCarrierTextController
+        MiuiCellularIconVM$special$$inlined$combine$1$3
+        MiuiMobileIconBinder$bind$1$1$10
+      class filter uses substring match so $-inner-class variants are captured.
 
-    1. VoLTE icons — ALL sget of Lmiui/os/Build;->IS_INTERNATIONAL_BUILD in this DEX.
-       No class filter: covers every MiuiMobileIconBinder inner class and any
-       other class in the same DEX that gates VoLTE on region.
+    Patch 2 — QuickShare: Lcom/miui/utils/configs/MiuiConfigs;->IS_INTERNATIONAL_BUILD
+      → const/4 pX, 0x1  ONLY inside class CurrentTilesInteractorImpl (all methods).
+      No method filter — the sget may be in a lambda or helper inside the class.
 
-    2. QuickShare — Lcom/miui/utils/configs/MiuiConfigs;->IS_INTERNATIONAL_BUILD
-       scoped to CurrentTilesInteractorImpl::createTileSync, replaced with const/4.
-
-    3. WA notification — same MiuiConfigs field, scoped to
-       NotificationUtil::isEmptySummary, replaced with const/4.
+    Patch 3 — WA notification: same MiuiConfigs field → const/4 v3, 0x1
+      ONLY inside NotificationUtil::isEmptySummary.
     """
     patched = False
     raw = bytes(dex)
 
-    # 1. VoLTE — global sweep of Lmiui/os/Build;->IS_INTERNATIONAL_BUILD in this DEX
+    # Patch 1 — VoLTE: 4 exact classes, const/4
     if b'IS_INTERNATIONAL_BUILD' in raw and b'miui/os/Build' in raw:
-        if binary_patch_sget_to_true(dex,
-                'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD') > 0:
-            patched = True
-            raw = bytes(dex)
+        VOLTE_CLASSES = (
+            'MiuiOperatorCustomizedPolicy',
+            'MiuiCarrierTextController',
+            'MiuiCellularIconVM',          # substring catches $special$$inlined$combine$1$3
+            'MiuiMobileIconBinder',        # substring catches $bind$1$1$10
+        )
+        for cls in VOLTE_CLASSES:
+            if cls.encode() in raw:
+                n = binary_patch_sget_to_true(dex,
+                        'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD',
+                        only_class=cls, use_const4=True)
+                if n > 0:
+                    patched = True
+                    raw = bytes(dex)
 
-    # 2. QuickShare — CurrentTilesInteractorImpl::createTileSync only, const/4
+    # Patch 2 — QuickShare: CurrentTilesInteractorImpl (all methods), const/4
     if b'CurrentTilesInteractorImpl' in raw and b'MiuiConfigs' in raw:
         if binary_patch_sget_to_true(dex,
                 'Lcom/miui/utils/configs/MiuiConfigs;', 'IS_INTERNATIONAL_BUILD',
                 only_class='CurrentTilesInteractorImpl',
-                only_method='createTileSync',
                 use_const4=True) > 0:
             patched = True
             raw = bytes(dex)
 
-    # 3. WA notification — NotificationUtil::isEmptySummary only, const/4
+    # Patch 3 — WA notification: NotificationUtil::isEmptySummary, const/4
     if b'NotificationUtil' in raw and b'MiuiConfigs' in raw:
         if binary_patch_sget_to_true(dex,
                 'Lcom/miui/utils/configs/MiuiConfigs;', 'IS_INTERNATIONAL_BUILD',
@@ -718,37 +818,50 @@ def _systemui_all_patch(dex_name: str, dex: bytearray) -> bool:
 # ── miui-framework.jar  ─────────────────────────────────────────
 def _miui_framework_patch(dex_name: str, dex: bytearray) -> bool:
     patched = False
-    # (1) ThemeReceiver::validateTheme → return-void
-    #     trim=True: insns_size shrinks to 1 cu. baksmali sees exactly:
-    #       .registers 5
-    #       return-void
-    #     No nop, no annotations added.
+    # (1) ThemeReceiver::validateTheme → return-void (trim=True: insns_size=1 cu)
+    #     After patching body, also zero the method's annotations_off in the
+    #     annotations_directory_item so baksmali does NOT emit the Signature block.
+    #     Result: exactly ".registers 5 / return-void" with no annotations.
     if b'ThemeReceiver' in bytes(dex):
         if binary_patch_method(dex,
                 "miui/drm/ThemeReceiver", "validateTheme",
                 stub_regs=5, stub_insns=_STUB_VOID, trim=True):
             patched = True
-    # (2) IS_GLOBAL_BUILD: no class filter — only jar in scope is miui-framework itself
+            # Remove Signature annotation from DEX annotation tables
+            _clear_method_annotations(dex, "miui/drm/ThemeReceiver", "validateTheme")
+    # (2) IS_GLOBAL_BUILD: global sweep — entire jar is in scope
     if b'IS_GLOBAL_BUILD' in bytes(dex):
-        if binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD') > 0:
+        if binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
+                                      use_const4=True) > 0:
             patched = True
     return patched
 
 # ── Settings.apk region unlock  ─────────────────────────────────
 def _settings_region_patch(dex_name: str, dex: bytearray) -> bool:
     """
-    Patch IS_GLOBAL_BUILD → true in the three locale/region classes.
-    Each call is scoped to its class; other classes in the DEX are untouched.
-    OtherPersonalSettings has 2 sget lines — both are patched by its call.
+    Patch IS_GLOBAL_BUILD → const/4 pX, 0x1 in exactly 3 classes.
+
+    LocaleController    → method getAvailabilityStatus only
+    LocaleSettingsTree  → all methods in class (aggressive)
+    OtherPersonalSettings → all methods in class (2 sget lines, both patched)
+
+    Uses const/4 (opcode 0x12) per user spec. Register preserved as-is.
     """
     if b'IS_GLOBAL_BUILD' not in bytes(dex): return False
     n = 0
+    # (1) LocaleController — scoped to getAvailabilityStatus
     n += binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
-                                    only_class='LocaleController')
+                                    only_class='LocaleController',
+                                    only_method='getAvailabilityStatus',
+                                    use_const4=True)
+    # (2) LocaleSettingsTree — all methods, aggressive
     n += binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
-                                    only_class='LocaleSettingsTree')
+                                    only_class='LocaleSettingsTree',
+                                    use_const4=True)
+    # (3) OtherPersonalSettings — all methods, both IS_GLOBAL_BUILD lines
     n += binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
-                                    only_class='OtherPersonalSettings')
+                                    only_class='OtherPersonalSettings',
+                                    use_const4=True)
     return n > 0
 
 
