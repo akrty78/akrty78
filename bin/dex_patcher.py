@@ -194,6 +194,78 @@ def _find_field_ids(data: bytes, hdr: dict, field_class: str, field_name: str) -
 
 
 # ════════════════════════════════════════════════════════════════════
+#  RAW BYTE SCANNER  (second-pass fallback)
+#
+#  _iter_code_items can miss code_items when class_data ULEB128 parsing
+#  goes wrong for Kotlin inner/coroutine classes (e.g., $bind$1$1$10).
+#  Those classes have many synthetic captured fields; if even one ULEB128
+#  read is mis-stepped, pos ends up wrong and method code_offs are garbage,
+#  silently skipping the whole class.
+#
+#  This scanner bypasses class_data entirely: it scans raw DEX bytes in
+#  2-byte steps (code-unit aligned) starting after all static tables,
+#  looking for [SGET_OPCODE] [reg] [field_lo] [field_hi].
+#  Already-patched slots are 0x12/0x15 — not in SGET_OPCODES — so it
+#  never double-patches and is safe to call after the normal sweep.
+# ════════════════════════════════════════════════════════════════════
+
+def _raw_sget_scan(dex: bytearray, field_class: str, field_name: str,
+                   use_const4: bool = False) -> int:
+    """
+    Raw second-pass: scan DEX bytes 2 bytes at a time from the data section
+    start for sget-* instructions referencing field_class->field_name.
+    Returns count of additional replacements (those missed by _iter_code_items).
+    """
+    data = bytes(dex)
+    hdr  = _parse_header(data)
+    if not hdr: return 0
+
+    fids = _find_field_ids(data, hdr, field_class, field_name)
+    if not fids: return 0
+
+    SGET_OPCODES = frozenset([0x60, 0x63, 0x64, 0x65, 0x66])
+
+    # Scan start: right after class_defs table (last static table before data)
+    scan_start = hdr['class_defs_off'] + hdr['class_defs_size'] * 32
+    # Round up to 4-byte boundary (code_items are 4-byte aligned)
+    if scan_start & 3:
+        scan_start = (scan_start | 3) + 1
+
+    raw   = bytearray(dex)
+    count = 0
+    limit = len(raw) - 3
+    i     = scan_start
+
+    while i < limit:
+        op = raw[i]
+        if op in SGET_OPCODES:
+            field_lo = struct.unpack_from('<H', raw, i + 2)[0]
+            if field_lo in fids:
+                reg = raw[i + 1]
+                if use_const4 and reg <= 15:
+                    raw[i]     = 0x12
+                    raw[i + 1] = (0x1 << 4) | reg
+                    raw[i + 2] = 0x00
+                    raw[i + 3] = 0x00
+                else:
+                    raw[i]     = 0x15
+                    raw[i + 1] = reg
+                    raw[i + 2] = 0x01
+                    raw[i + 3] = 0x00
+                count += 1
+                i += 4
+                continue
+        i += 2   # step by one code unit (2 bytes), instruction-aligned
+
+    if count:
+        mode = "const/4" if use_const4 else "const/16"
+        ok(f"  ✓ [raw-scan] {field_name}: {count} missed sget → {mode} 1")
+        _fix_checksums(raw)
+        dex[:] = raw
+    return count
+
+
+# ════════════════════════════════════════════════════════════════════
 #  CHECKSUM REPAIR
 # ════════════════════════════════════════════════════════════════════
 
@@ -778,11 +850,18 @@ def _systemui_all_patch(dex_name: str, dex: bytearray) -> bool:
     patched = False
     raw = bytes(dex)
 
-    # Patch 1 — VoLTE: global sweep, Lmiui/os/Build, const/4
+    # Patch 1 — VoLTE: global sweep + raw-scan fallback, Lmiui/os/Build, const/4
+    #   Two passes guarantee MiuiMobileIconBinder$bind$1$1$10::invokeSuspend
+    #   and any other Kotlin coroutine class whose code_item _iter_code_items
+    #   mis-steps due to synthetic captured fields in class_data.
     if b'IS_INTERNATIONAL_BUILD' in raw and b'miui/os/Build' in raw:
-        if binary_patch_sget_to_true(dex,
+        n1 = binary_patch_sget_to_true(dex,
                 'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD',
-                use_const4=True) > 0:
+                use_const4=True)
+        n2 = _raw_sget_scan(dex,
+                'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD',
+                use_const4=True)
+        if n1 + n2 > 0:
             patched = True
             raw = bytes(dex)
 
@@ -830,18 +909,20 @@ def _miui_framework_patch(dex_name: str, dex: bytearray) -> bool:
 # ── Settings.apk region unlock  ─────────────────────────────────
 def _settings_region_patch(dex_name: str, dex: bytearray) -> bool:
     """
-    GLOBAL sweep: replace every sget of Lmiui/os/Build;->IS_GLOBAL_BUILD with
-    const/4 vX, 0x1 (register preserved). No class filter.
+    Two-pass sweep for Lmiui/os/Build;->IS_GLOBAL_BUILD → const/4 vX, 0x1.
 
-    LocaleController, LocaleSettingsTree and OtherPersonalSettings are the
-    intended targets — but like the VoLTE classes in SystemUI, they read this
-    flag via synthetic accessors whose sget bytecode lives in generated
-    surrounding classes. Global sweep catches all of them. Uses const/4 with
-    automatic fallback to const/16 for registers > 15.
+    Pass 1 (_iter_code_items): catches most classes.
+    Pass 2 (_raw_sget_scan):   catches any class whose code_items were missed
+      by Pass 1 due to ULEB128 mis-stepping in class_data parsing
+      (e.g., OtherPersonalSettings with many instance fields or inner classes).
+
+    Both passes use const/4 with automatic fallback to const/16 for reg > 15.
     """
     if b'IS_GLOBAL_BUILD' not in bytes(dex): return False
-    n = binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
-                                   use_const4=True)
+    n  = binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
+                                    use_const4=True)
+    n += _raw_sget_scan(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
+                         use_const4=True)
     return n > 0
 
 
