@@ -542,6 +542,20 @@ def _find_field_ids(data: bytes, hdr: dict, field_class: str, field_name: str) -
     return result
 
 
+def _find_method_ids_by_name(data: bytes, hdr: dict, method_name: str) -> set:
+    """Return set of method_id indices whose name matches method_name."""
+    result = set()
+    for mi in range(hdr['method_ids_size']):
+        base = hdr['method_ids_off'] + mi * 8
+        try:
+            name_sidx = struct.unpack_from('<I', data, base + 4)[0]
+            if _get_str(data, hdr, name_sidx) == method_name:
+                result.add(mi)
+        except Exception:
+            continue
+    return result
+
+
 # ════════════════════════════════════════════════════════════════════
 #  RAW BYTE SCANNER  (second-pass fallback)
 #
@@ -1164,13 +1178,70 @@ def _recorder_ai_patch(dex_name: str, dex: bytearray) -> bool:
 # ── services.jar  ────────────────────────────────────────────────
 def _services_jar_patch(dex_name: str, dex: bytearray) -> bool:
     """
-    ActivityManagerService$$ExternalSyntheticLambda31::run()V → return-void.
-    registers 2 → 1, body cleared.
+    Dynamic two-case patch for showSystemReadyErrorDialogsIfNeeded suppression.
+
+    Case A — Lambda search (stable across builds):
+      Scan ALL ActivityManagerService$$ExternalSyntheticLambda* classes.
+      For each, walk its run()V code_item and look for invoke-* instructions
+      whose method_id refers to showSystemReadyErrorDialogsIfNeeded.
+      Patch only THAT lambda's run() → return-void.
+      (Avoids hardcoding Lambda31 which changes every build.)
+
+    Case B — Direct method fallback:
+      If no lambda match, scan all classes for showSystemReadyErrorDialogsIfNeeded
+      as a direct method and stub it. Covers builds where R8 inlines the lambda.
     """
-    if b'ExternalSyntheticLambda31' not in bytes(dex): return False
-    return binary_patch_method(dex,
-        "com/android/server/am/ActivityManagerService$$ExternalSyntheticLambda31",
-        "run", 1, _STUB_VOID)
+    raw = bytes(dex)
+    if (b'ActivityManagerService' not in raw and
+            b'ActivityTaskManagerInternal' not in raw):
+        return False
+
+    hdr = _parse_header(raw)
+    if not hdr: return False
+
+    # Find all method_ids named showSystemReadyErrorDialogsIfNeeded
+    target_mids = _find_method_ids_by_name(raw, hdr, 'showSystemReadyErrorDialogsIfNeeded')
+    if not target_mids and b'showSystemReadyErrorDialogsIfNeeded' not in raw:
+        return False
+
+    # All invoke opcodes (format 35c/3rc) — method ref is at bytes +2,+3
+    INVOKE_OPS = frozenset([0x6E, 0x6F, 0x70, 0x71, 0x72, 0x74, 0x75, 0x76, 0x77, 0x78])
+
+    # Case A: scan lambda classes for one that calls the target method
+    if target_mids and b'ExternalSyntheticLambda' in raw:
+        for insns_off, insns_len, type_str, mname in _iter_code_items(raw, hdr):
+            if 'ActivityManagerService$$ExternalSyntheticLambda' not in type_str: continue
+            if mname != 'run': continue
+            i = 0
+            while i < insns_len - 5:
+                op = raw[insns_off + i]
+                if op in INVOKE_OPS:
+                    ref_idx = struct.unpack_from('<H', raw, insns_off + i + 2)[0]
+                    if ref_idx in target_mids:
+                        cls_path = type_str[1:-1]
+                        info(f"  Case A: lambda {type_str} calls showSystemReadyErrorDialogsIfNeeded")
+                        return binary_patch_method(dex, cls_path, 'run', 1, _STUB_VOID)
+                i += 2
+
+    # Case B: stub showSystemReadyErrorDialogsIfNeeded directly in any matching class
+    for i in range(hdr['class_defs_size']):
+        base = hdr['class_defs_off'] + i * 32
+        if struct.unpack_from('<I', raw, base + 24)[0] == 0: continue
+        cls_idx = struct.unpack_from('<I', raw, base)[0]
+        try:
+            sidx     = struct.unpack_from('<I', raw, hdr['type_ids_off'] + cls_idx * 4)[0]
+            type_str = _get_str(raw, hdr, sidx)
+            if 'ActivityTaskManagerInternal' not in type_str: continue
+            cls_path = type_str[1:-1]
+            if binary_patch_method(dex, cls_path,
+                    'showSystemReadyErrorDialogsIfNeeded', 1, _STUB_VOID):
+                info(f"  Case B: stubbed showSystemReadyErrorDialogsIfNeeded in {type_str}")
+                return True
+        except Exception:
+            continue
+
+    warn("  showSystemReadyErrorDialogsIfNeeded: not found via lambda or direct method")
+    return False
 
 # ── IS_INTERNATIONAL_BUILD (Lmiui/os/Build;)  ────────────────────
 def _intl_build_patch(dex_name: str, dex: bytearray) -> bool:
@@ -1235,19 +1306,66 @@ def _systemui_all_patch(dex_name: str, dex: bytearray) -> bool:
     return patched
 
 # ── miui-framework.jar  ─────────────────────────────────────────
+# Target classes for IS_INTERNATIONAL_BUILD in miui-framework
+_FW_INTL_CLASSES = [
+    'AppOpsManagerInjector',   'NearbyUtils',             'ShortcutFunctionManager',
+    'MiInputShortcutFeature',  'MiInputShortcutUtil',     'FeatureConfiguration',
+    'InputFeature',            'TelephonyManagerEx',       'SystemServiceRegistryImpl',
+    'PackageManagerImpl',      'PackageParserImpl',        'LocaleComparator',
+    'MiuiSignalStrengthImpl',
+]
+
 def _miui_framework_patch(dex_name: str, dex: bytearray) -> bool:
     """
-    No patches applied to miui-framework.jar.
+    miui-framework.jar — two binary passes:
 
-    Previous patches (validateTheme, IS_GLOBAL_BUILD) were removed because:
-    - validateTheme: caused unintended side effects in framework DRM stack
-    - IS_GLOBAL_BUILD: flipping this in the framework jar causes Settings.apk
-      to crash at startup — Settings init calls framework APIs that branch
-      into global-ROM code paths not present in CN firmware
+    Pass 1 — IS_INTERNATIONAL_BUILD → const/4 1
+      Scoped to 13 specific classes only. These are the framework-side gating
+      classes that block international features. A global sweep is intentionally
+      avoided — it would flip IS_GLOBAL_BUILD-adjacent paths that crash Settings.
 
-    miui-framework.jar is left completely untouched.
+    Pass 2 — showSystemReadyErrorDialogsIfNeeded → return-void
+      Scan all classes for ActivityTaskManagerInternal (or any class that defines
+      the method) and stub it. Prevents AMS from showing system-ready error dialogs
+      on CN ROMs running in global mode.
+
+    NOTE: IS_GLOBAL_BUILD is NOT patched here (Settings crash risk).
+          Gboard IME swap is done via apktool in manager (string not in DEX pool).
     """
-    return False
+    raw = bytes(dex)
+    patched = False
+
+    # Pass 1 — IS_INTERNATIONAL_BUILD in 13 framework classes
+    if b'IS_INTERNATIONAL_BUILD' in raw:
+        n = 0
+        for cls in _FW_INTL_CLASSES:
+            n += binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD',
+                                            only_class=cls, use_const4=True)
+        if n > 0:
+            patched = True
+            raw = bytes(dex)
+
+    # Pass 2 — showSystemReadyErrorDialogsIfNeeded in ActivityTaskManagerInternal
+    if b'ActivityTaskManagerInternal' in raw:
+        hdr = _parse_header(raw)
+        if hdr:
+            for i in range(hdr['class_defs_size']):
+                base = hdr['class_defs_off'] + i * 32
+                if struct.unpack_from('<I', raw, base + 24)[0] == 0: continue
+                cls_idx = struct.unpack_from('<I', raw, base)[0]
+                try:
+                    sidx     = struct.unpack_from('<I', raw, hdr['type_ids_off'] + cls_idx * 4)[0]
+                    type_str = _get_str(raw, hdr, sidx)
+                    if 'ActivityTaskManagerInternal' not in type_str: continue
+                    cls_path = type_str[1:-1]
+                    if binary_patch_method(dex, cls_path,
+                            'showSystemReadyErrorDialogsIfNeeded', 1, _STUB_VOID):
+                        patched = True
+                        raw = bytes(dex)
+                except Exception:
+                    continue
+
+    return patched
 
 # ── Settings.apk region unlock  ─────────────────────────────────
 def _settings_region_patch(dex_name: str, dex: bytearray) -> bool:
@@ -2048,7 +2166,11 @@ PYTHON_EOF
                 "$(find "$DUMP_DIR" -path "*/framework/framework.jar" -type f | head -n1)"
             cd "$GITHUB_WORKSPACE"
 
-            # D2. services.jar — suppress error dialogs (Lambda31.run → return-void)
+            # D2. services.jar — suppress error dialogs
+            #   Dynamic: scans ALL ActivityManagerService$$ExternalSyntheticLambda* classes
+            #   for the one that calls showSystemReadyErrorDialogsIfNeeded and stubs its run().
+            #   Falls back to stubbing showSystemReadyErrorDialogsIfNeeded directly in
+            #   ActivityTaskManagerInternal if no lambda match found.
             _run_dex_patch "SERVICES DIALOGS" "services-jar" \
                 "$(find "$DUMP_DIR" -path "*/framework/services.jar" -type f | head -n1)"
             cd "$GITHUB_WORKSPACE"
@@ -2087,6 +2209,44 @@ PYTHON_EOF
             _run_dex_patch "SETTINGS REGION" "settings-region" "$_SETTINGS_APK"
             cd "$GITHUB_WORKSPACE"
 
+            # D4b. OtherPersonalSettings — IS_GLOBAL_BUILD smali patch (apktool)
+            #   The binary walker (_iter_code_items) can mis-step on this class's
+            #   instance fields, silently skipping onCreate where the sgets live.
+            #   Targeted apktool smali sed is deterministic regardless of DEX sharding.
+            log_info "🔧 OtherPersonalSettings: patching IS_GLOBAL_BUILD..."
+            _OPS_WORK="$TEMP_DIR/ops_work"
+            rm -rf "$_OPS_WORK"
+            if timeout 25m apktool d -r -f "$_SETTINGS_APK" -o "$_OPS_WORK" >/dev/null 2>&1; then
+                # Find smali in any dex shard (smali, smali_classes2, etc.)
+                _OPS_FILES=$(find "$_OPS_WORK" -name "OtherPersonalSettings.smali" -type f)
+                _OPS_NEED=0
+                for _f in $_OPS_FILES; do
+                    grep -q "IS_GLOBAL_BUILD" "$_f" && _OPS_NEED=1 && break
+                done
+                if [ "$_OPS_NEED" -eq 1 ]; then
+                    # Patch: sget-boolean p1 → const/4 p1, 0x1
+                    for _f in $_OPS_FILES; do
+                        sed -i \
+                            's|sget-boolean p1, Lmiui/os/Build;->IS_GLOBAL_BUILD:Z|const/4 p1, 0x1|g' \
+                            "$_f"
+                    done
+                    log_success "  ✓ IS_GLOBAL_BUILD replaced in OtherPersonalSettings"
+                    if timeout 25m apktool b -c "$_OPS_WORK" -o "${_SETTINGS_APK}.opsTmp" >/dev/null 2>&1; then
+                        mv "${_SETTINGS_APK}.opsTmp" "$_SETTINGS_APK"
+                        log_success "✓ OtherPersonalSettings patched and rebuilt"
+                    else
+                        rm -f "${_SETTINGS_APK}.opsTmp"
+                        log_warning "apktool rebuild failed — OtherPersonalSettings patch skipped"
+                    fi
+                else
+                    log_info "  OtherPersonalSettings: IS_GLOBAL_BUILD not present (already patched or absent)"
+                fi
+            else
+                log_warning "apktool decompile failed — OtherPersonalSettings skipped"
+            fi
+            rm -rf "$_OPS_WORK"
+            cd "$GITHUB_WORKSPACE"
+
             # D5. Provision GMS support
             _run_dex_patch "PROVISION GMS" "provision-gms" \
                 "$(find "$DUMP_DIR" -name "Provision.apk" -type f | head -n1)"
@@ -2102,10 +2262,74 @@ PYTHON_EOF
                 "$(find "$DUMP_DIR" \( -name "MiuiSystemUI.apk" -o -name "SystemUI.apk" \) -type f | head -n1)"
             cd "$GITHUB_WORKSPACE"
 
-            # D8. miui-framework: ThemeReceiver bypass + IS_GLOBAL_BUILD
-            _run_dex_patch "MIUI FRAMEWORK" "miui-framework" \
-                "$(find "$DUMP_DIR" -name "miui-framework.jar" -type f | head -n1)"
+            # D8. miui-framework: IS_INTERNATIONAL_BUILD(13 classes) + showSystemReadyErrorDialogsIfNeeded
+            _FW_JAR="$(find "$DUMP_DIR" -name "miui-framework.jar" -type f | head -n1)"
+            _run_dex_patch "MIUI FRAMEWORK" "miui-framework" "$_FW_JAR"
             cd "$GITHUB_WORKSPACE"
+
+            # D8b. miui-framework: Gboard IME swap via apktool
+            #   binary_swap_string can't inject a new string — Gboard package name is
+            #   longer than Baidu's and not in the DEX string pool. apktool smali sed
+            #   is the only reliable approach.
+            if [ -n "$_FW_JAR" ]; then
+                log_info "🎹 miui-framework: Gboard IME swap..."
+                _FW_WORK="$TEMP_DIR/fw_smali"
+                rm -rf "$_FW_WORK"
+                _FW_APPLIED=0
+                if timeout 20m apktool d -r -f "$_FW_JAR" -o "$_FW_WORK" >/dev/null 2>&1; then
+                    # Patch 1: InputMethodServiceInjector — Baidu → Gboard
+                    _IMSI=$(find "$_FW_WORK" -name "InputMethodServiceInjector.smali" -type f | head -1)
+                    if [ -n "$_IMSI" ] && grep -q "com\.baidu\.input_mi" "$_IMSI"; then
+                        sed -i 's|com\.baidu\.input_mi|com.google.android.inputmethod.latin|g' "$_IMSI"
+                        log_success "  ✓ Gboard swap in InputMethodServiceInjector"
+                        _FW_APPLIED=1
+                    else
+                        log_info "  InputMethodServiceInjector: com.baidu.input_mi not present (skip)"
+                    fi
+                    # Patch 2: showSystemReadyErrorDialogsIfNeeded → return-void
+                    #   apktool fallback for builds where binary_patch_method misses it
+                    #   (abstract base class with code_off=0 in ActivityTaskManagerInternal)
+                    _SRED_FILE=$(grep -rl "showSystemReadyErrorDialogsIfNeeded" "$_FW_WORK"/smali* 2>/dev/null | head -1)
+                    if [ -n "$_SRED_FILE" ]; then
+                        python3 - "$_SRED_FILE" "showSystemReadyErrorDialogsIfNeeded" <<'SRED_PY'
+import re, sys
+path, method = sys.argv[1], sys.argv[2]
+text = open(path).read()
+pat = rf'(\.method[^
+]*{re.escape(method)}[^
+]*
+).*?(\.end method)'
+def stub(m):
+    return m.group(1) + "    .registers 1
+    return-void
+" + m.group(2)
+new = re.sub(pat, stub, text, flags=re.DOTALL)
+if new != text:
+    open(path,'w').write(new)
+    print(f"[SUCCESS] ✓ {method} stubbed in {path}")
+    sys.exit(0)
+print(f"[INFO] {method} not found in {path}")
+sys.exit(1)
+SRED_PY
+                        [ $? -eq 0 ] && _FW_APPLIED=1
+                    fi
+                    if [ "$_FW_APPLIED" -eq 1 ]; then
+                        if timeout 20m apktool b -c "$_FW_WORK" -o "${_FW_JAR}.fwTmp" >/dev/null 2>&1; then
+                            mv "${_FW_JAR}.fwTmp" "$_FW_JAR"
+                            log_success "✓ miui-framework apktool patches applied"
+                        else
+                            rm -f "${_FW_JAR}.fwTmp"
+                            log_warning "apktool build failed — miui-framework apktool patches skipped"
+                        fi
+                    else
+                        log_info "  miui-framework: no apktool patches needed"
+                    fi
+                else
+                    log_warning "apktool decompile failed — miui-framework apktool patches skipped"
+                fi
+                rm -rf "$_FW_WORK"
+                cd "$GITHUB_WORKSPACE"
+            fi
 
             # D9. nexdroid.rc — bootloader spoof init script
             log_info "💉 Writing nexdroid.rc bootloader spoof..."
@@ -2156,6 +2380,22 @@ CUSTKEYS
                 log_success "✓ cust_prop_white_keys_list updated"
             else
                 log_warning "cust_prop_white_keys_list not found — skipping"
+            fi
+
+            # D10b. init.miui.ext.rc — launcher property fix
+            #   Replace globallauncher (CN POCO launcher) with com.miui.home
+            _MIUI_EXT_RC=$(find "$DUMP_DIR" -name "init.miui.ext.rc" -type f | head -1)
+            if [ -n "$_MIUI_EXT_RC" ]; then
+                if grep -q "com.mi.android.globallauncher" "$_MIUI_EXT_RC"; then
+                    sed -i \
+                        's|com\.mi\.android\.globallauncher|com.miui.home|g' \
+                        "$_MIUI_EXT_RC"
+                    log_success "✓ init.miui.ext.rc: launcher → com.miui.home"
+                else
+                    log_info "  init.miui.ext.rc: globallauncher not present (skip)"
+                fi
+            else
+                log_warning "init.miui.ext.rc not found — launcher fix skipped"
             fi
 
             # D11. Region settings extra files (GDrive: locale XMLs → system_ext/cust)
