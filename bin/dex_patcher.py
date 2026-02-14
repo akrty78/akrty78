@@ -205,6 +205,20 @@ def _find_field_ids(data: bytes, hdr: dict, field_class: str, field_name: str) -
     return result
 
 
+def _find_method_ids_by_name(data: bytes, hdr: dict, method_name: str) -> set:
+    """Return set of method_id indices whose name matches method_name."""
+    result = set()
+    for mi in range(hdr['method_ids_size']):
+        base = hdr['method_ids_off'] + mi * 8
+        try:
+            name_sidx = struct.unpack_from('<I', data, base + 4)[0]
+            if _get_str(data, hdr, name_sidx) == method_name:
+                result.add(mi)
+        except Exception:
+            continue
+    return result
+
+
 # ════════════════════════════════════════════════════════════════════
 #  RAW BYTE SCANNER  (second-pass fallback)
 #
@@ -827,13 +841,70 @@ def _recorder_ai_patch(dex_name: str, dex: bytearray) -> bool:
 # ── services.jar  ────────────────────────────────────────────────
 def _services_jar_patch(dex_name: str, dex: bytearray) -> bool:
     """
-    ActivityManagerService$$ExternalSyntheticLambda31::run()V → return-void.
-    registers 2 → 1, body cleared.
+    Dynamic two-case patch for showSystemReadyErrorDialogsIfNeeded suppression.
+
+    Case A — Lambda search (stable across builds):
+      Scan ALL ActivityManagerService$$ExternalSyntheticLambda* classes.
+      For each, walk its run()V code_item and look for invoke-* instructions
+      whose method_id refers to showSystemReadyErrorDialogsIfNeeded.
+      Patch only THAT lambda's run() → return-void.
+      (Avoids hardcoding Lambda31 which changes every build.)
+
+    Case B — Direct method fallback:
+      If no lambda match, scan all classes for showSystemReadyErrorDialogsIfNeeded
+      as a direct method and stub it. Covers builds where R8 inlines the lambda.
     """
-    if b'ExternalSyntheticLambda31' not in bytes(dex): return False
-    return binary_patch_method(dex,
-        "com/android/server/am/ActivityManagerService$$ExternalSyntheticLambda31",
-        "run", 1, _STUB_VOID)
+    raw = bytes(dex)
+    if (b'ActivityManagerService' not in raw and
+            b'ActivityTaskManagerInternal' not in raw):
+        return False
+
+    hdr = _parse_header(raw)
+    if not hdr: return False
+
+    # Find all method_ids named showSystemReadyErrorDialogsIfNeeded
+    target_mids = _find_method_ids_by_name(raw, hdr, 'showSystemReadyErrorDialogsIfNeeded')
+    if not target_mids and b'showSystemReadyErrorDialogsIfNeeded' not in raw:
+        return False
+
+    # All invoke opcodes (format 35c/3rc) — method ref is at bytes +2,+3
+    INVOKE_OPS = frozenset([0x6E, 0x6F, 0x70, 0x71, 0x72, 0x74, 0x75, 0x76, 0x77, 0x78])
+
+    # Case A: scan lambda classes for one that calls the target method
+    if target_mids and b'ExternalSyntheticLambda' in raw:
+        for insns_off, insns_len, type_str, mname in _iter_code_items(raw, hdr):
+            if 'ActivityManagerService$$ExternalSyntheticLambda' not in type_str: continue
+            if mname != 'run': continue
+            i = 0
+            while i < insns_len - 5:
+                op = raw[insns_off + i]
+                if op in INVOKE_OPS:
+                    ref_idx = struct.unpack_from('<H', raw, insns_off + i + 2)[0]
+                    if ref_idx in target_mids:
+                        cls_path = type_str[1:-1]
+                        info(f"  Case A: lambda {type_str} calls showSystemReadyErrorDialogsIfNeeded")
+                        return binary_patch_method(dex, cls_path, 'run', 1, _STUB_VOID)
+                i += 2
+
+    # Case B: stub showSystemReadyErrorDialogsIfNeeded directly in any matching class
+    for i in range(hdr['class_defs_size']):
+        base = hdr['class_defs_off'] + i * 32
+        if struct.unpack_from('<I', raw, base + 24)[0] == 0: continue
+        cls_idx = struct.unpack_from('<I', raw, base)[0]
+        try:
+            sidx     = struct.unpack_from('<I', raw, hdr['type_ids_off'] + cls_idx * 4)[0]
+            type_str = _get_str(raw, hdr, sidx)
+            if 'ActivityTaskManagerInternal' not in type_str: continue
+            cls_path = type_str[1:-1]
+            if binary_patch_method(dex, cls_path,
+                    'showSystemReadyErrorDialogsIfNeeded', 1, _STUB_VOID):
+                info(f"  Case B: stubbed showSystemReadyErrorDialogsIfNeeded in {type_str}")
+                return True
+        except Exception:
+            continue
+
+    warn("  showSystemReadyErrorDialogsIfNeeded: not found via lambda or direct method")
+    return False
 
 # ── IS_INTERNATIONAL_BUILD (Lmiui/os/Build;)  ────────────────────
 def _intl_build_patch(dex_name: str, dex: bytearray) -> bool:
@@ -898,19 +969,66 @@ def _systemui_all_patch(dex_name: str, dex: bytearray) -> bool:
     return patched
 
 # ── miui-framework.jar  ─────────────────────────────────────────
+# Target classes for IS_INTERNATIONAL_BUILD in miui-framework
+_FW_INTL_CLASSES = [
+    'AppOpsManagerInjector',   'NearbyUtils',             'ShortcutFunctionManager',
+    'MiInputShortcutFeature',  'MiInputShortcutUtil',     'FeatureConfiguration',
+    'InputFeature',            'TelephonyManagerEx',       'SystemServiceRegistryImpl',
+    'PackageManagerImpl',      'PackageParserImpl',        'LocaleComparator',
+    'MiuiSignalStrengthImpl',
+]
+
 def _miui_framework_patch(dex_name: str, dex: bytearray) -> bool:
     """
-    No patches applied to miui-framework.jar.
+    miui-framework.jar — two binary passes:
 
-    Previous patches (validateTheme, IS_GLOBAL_BUILD) were removed because:
-    - validateTheme: caused unintended side effects in framework DRM stack
-    - IS_GLOBAL_BUILD: flipping this in the framework jar causes Settings.apk
-      to crash at startup — Settings init calls framework APIs that branch
-      into global-ROM code paths not present in CN firmware
+    Pass 1 — IS_INTERNATIONAL_BUILD → const/4 1
+      Scoped to 13 specific classes only. These are the framework-side gating
+      classes that block international features. A global sweep is intentionally
+      avoided — it would flip IS_GLOBAL_BUILD-adjacent paths that crash Settings.
 
-    miui-framework.jar is left completely untouched.
+    Pass 2 — showSystemReadyErrorDialogsIfNeeded → return-void
+      Scan all classes for ActivityTaskManagerInternal (or any class that defines
+      the method) and stub it. Prevents AMS from showing system-ready error dialogs
+      on CN ROMs running in global mode.
+
+    NOTE: IS_GLOBAL_BUILD is NOT patched here (Settings crash risk).
+          Gboard IME swap is done via apktool in manager (string not in DEX pool).
     """
-    return False
+    raw = bytes(dex)
+    patched = False
+
+    # Pass 1 — IS_INTERNATIONAL_BUILD in 13 framework classes
+    if b'IS_INTERNATIONAL_BUILD' in raw:
+        n = 0
+        for cls in _FW_INTL_CLASSES:
+            n += binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD',
+                                            only_class=cls, use_const4=True)
+        if n > 0:
+            patched = True
+            raw = bytes(dex)
+
+    # Pass 2 — showSystemReadyErrorDialogsIfNeeded in ActivityTaskManagerInternal
+    if b'ActivityTaskManagerInternal' in raw:
+        hdr = _parse_header(raw)
+        if hdr:
+            for i in range(hdr['class_defs_size']):
+                base = hdr['class_defs_off'] + i * 32
+                if struct.unpack_from('<I', raw, base + 24)[0] == 0: continue
+                cls_idx = struct.unpack_from('<I', raw, base)[0]
+                try:
+                    sidx     = struct.unpack_from('<I', raw, hdr['type_ids_off'] + cls_idx * 4)[0]
+                    type_str = _get_str(raw, hdr, sidx)
+                    if 'ActivityTaskManagerInternal' not in type_str: continue
+                    cls_path = type_str[1:-1]
+                    if binary_patch_method(dex, cls_path,
+                            'showSystemReadyErrorDialogsIfNeeded', 1, _STUB_VOID):
+                        patched = True
+                        raw = bytes(dex)
+                except Exception:
+                    continue
+
+    return patched
 
 # ── Settings.apk region unlock  ─────────────────────────────────
 def _settings_region_patch(dex_name: str, dex: bytearray) -> bool:
