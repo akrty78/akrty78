@@ -492,11 +492,17 @@ def _iter_code_items(data: bytes, hdr: dict):
             dm,  pos = _uleb128(data, pos); vm,  pos = _uleb128(data, pos)
         except Exception: continue
 
-        # skip fields — use _skip_uleb128 (never throws, just advances offset)
-        # Each encoded_field is exactly 2 ULEB128 values: field_idx_diff + access_flags
+        # skip fields: _uleb128 + break is intentional.
+        # _skip_uleb128 mis-advances pos for classes like OtherPersonalSettings
+        # whose class_data has variable-width ULEB128 field entries.
+        # The original _uleb128+break was verified to work for all Settings classes.
+        # Kotlin inner/coroutine classes in SystemUI are handled by _raw_sget_scan.
         for _ in range(sf + inf):
-            pos = _skip_uleb128(data, pos)  # field_idx_diff
-            pos = _skip_uleb128(data, pos)  # access_flags
+            try:
+                _, pos = _uleb128(data, pos)   # field_idx_diff
+                _, pos = _uleb128(data, pos)   # access_flags
+            except Exception:
+                break
 
         midx = 0
         for _ in range(dm + vm):
@@ -1231,24 +1237,17 @@ def _systemui_all_patch(dex_name: str, dex: bytearray) -> bool:
 # ── miui-framework.jar  ─────────────────────────────────────────
 def _miui_framework_patch(dex_name: str, dex: bytearray) -> bool:
     """
-    ONLY patch: ThemeReceiver::validateTheme → return-void.
+    No patches applied to miui-framework.jar.
 
-    IS_GLOBAL_BUILD is intentionally NOT patched here.
-    Flipping IS_GLOBAL_BUILD in the framework jar causes Settings.apk to crash
-    at startup because Settings calls framework APIs during init — those APIs
-    then return IS_GLOBAL_BUILD=true and branch into code paths that require
-    global-ROM services not present in CN firmware.
+    Previous patches (validateTheme, IS_GLOBAL_BUILD) were removed because:
+    - validateTheme: caused unintended side effects in framework DRM stack
+    - IS_GLOBAL_BUILD: flipping this in the framework jar causes Settings.apk
+      to crash at startup — Settings init calls framework APIs that branch
+      into global-ROM code paths not present in CN firmware
 
-    Region unlock (IS_GLOBAL_BUILD) belongs only in Settings.apk's locale
-    classes (LocaleController, LocaleSettingsTree, OtherPersonalSettings).
+    miui-framework.jar is left completely untouched.
     """
-    if b'ThemeReceiver' not in bytes(dex): return False
-    patched = binary_patch_method(dex,
-            "miui/drm/ThemeReceiver", "validateTheme",
-            stub_regs=5, stub_insns=_STUB_VOID, trim=True)
-    if patched:
-        _clear_method_annotations(dex, "miui/drm/ThemeReceiver", "validateTheme")
-    return patched
+    return False
 
 # ── Settings.apk region unlock  ─────────────────────────────────
 def _settings_region_patch(dex_name: str, dex: bytearray) -> bool:
