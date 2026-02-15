@@ -2793,25 +2793,6 @@ CUSTKEYS
 
         fi
 
-
-import sys, re, pathlib, collections
-
-root = pathlib.Path(sys.argv[1])
-TARGET_NAME = "input_bottom_background_color"
-# Exact match: only "input_bottom_background_color" not "input_bottom_background_color_old"
-# Pattern matches the opening tag and captures optional existing value
-ENTRY_RE = re.compile(
-    r'<color\s+name="' + re.escape(TARGET_NAME) + r'">[^<]*</color>'
-)
-ALREADY_MONET_RE = re.compile(r'@android:color/')
-HEX_VALUE_RE = re.compile(r'^#[0-9A-Fa-f]{3,8}$')
-
-xml_files = sorted(root.glob("res/values*/colors.xml"))
-if not xml_files:
-    print("[WARNING] No colors.xml found in decoded resources")
-    sys.exit(0)
-
-
         # G. NEXPACKAGE
         if [ "$part" == "product" ]; then
             log_info "📦 Injecting NexPackage assets..."
