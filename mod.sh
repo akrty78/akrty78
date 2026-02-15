@@ -2794,15 +2794,6 @@ CUSTKEYS
         fi
 
 
-
-        # E. MIUI-FRAMEWORK (handled via dex_patcher.py miui-framework profile above)
-        #    ThemeReceiver bypass + IS_GLOBAL_BUILD already done in D8 above.
-
-                    fi
-
-                    # ── Steps 3+4+5: Color patch + dedup validation ────────
-                    log_info "  [Steps 3-5] Patching Monet colors + validating..."
-                    python3 - "$MFP_WORK" <<'COLOR_PY'
 import sys, re, pathlib, collections
 
 root = pathlib.Path(sys.argv[1])
