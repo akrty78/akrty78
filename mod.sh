@@ -3017,28 +3017,24 @@ if [ ! -z "$TELEGRAM_TOKEN" ] && [ ! -z "$CHAT_ID" ]; then
     # We strip special characters from MSG_TEXT for safety if needed, but jq handles most.
     # We use a simplified text for the JSON to ensure it doesn't break.
     
-    SAFE_TEXT="NEXDROID BUILD COMPLETE
----------------------------
-\`in quotes\`
-Device  : $DEVICE_CODE
-Version : $OS_VER
-Android : $ANDROID_VER
-Built   : $BUILD_DATE
+    SAFE_TEXT="🔥 NexDroid Build Compiled
+• • • • • • • • • •
+\`📣 Info:\`
+📱 Device  : $DEVICE_CODE
+🏷️ Version : $OS_VER
+🤖 Android : $ANDROID_VER
+⌛ Built   : $BUILD_DATE
 
-\`work done\`
-All patches applied successfully.
-Mods: \`$MODS_SELECTED\`
+\`⚙️ Patches Applied:\`
+📦 Mods: \`$MODS_SELECTED\`
 
-\`error\`
-No critical errors.
-
-_Click the button below to download._"
+⬇️_Click the button below to download._"
 
     JSON_PAYLOAD=$(jq -n \
         --arg chat_id "$CHAT_ID" \
         --arg text "$SAFE_TEXT" \
         --arg url "$LINK_ZIP" \
-        --arg btn "⬇️ Download ROM" \
+        --arg btn "🔗 Download ROM" \
         '{
             chat_id: $chat_id,
             parse_mode: "Markdown",
