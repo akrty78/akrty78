@@ -1757,6 +1757,7 @@ inject_miui_mod() {
     fi
 
     log_info "[$label] Extracting..."
+    tg_progress "🧩 **Mod:** Extracting \`$label\`..."
     unzip -qq -o "$zip_path" -d "$MOD_EXTRACT_DIR"
     rm -f "$zip_path"
 
@@ -2523,6 +2524,7 @@ PYTHON_EOF
                 return 0
             fi
             log_info "$label → $(basename "$archive")"
+            tg_progress "🔨 **Patching:** \`$label\`"
             python3 "$BIN_DIR/dex_patcher.py" "$cmd" "$archive" 2>&1 | \
             while IFS= read -r line; do
                 case "$line" in
@@ -2890,12 +2892,14 @@ sys.exit(0)
 
                 # ── Step 1: Install required MIUI frameworks ──────────────
                 log_info "  [Step 1] Installing frameworks into apktool registry..."
-                _FW_RES=$(find "$GITHUB_WORKSPACE" "$DUMP_DIR" \
-                    -name "framework-res.apk" -type f 2>/dev/null | head -1)
-                _MIUI_FW_RES=$(find "$GITHUB_WORKSPACE" "$DUMP_DIR" \
-                    -name "miui-framework-res.apk" -type f 2>/dev/null | head -1)
-                _MIUI_FW_JAR=$(find "$GITHUB_WORKSPACE" "$DUMP_DIR" \
-                    -name "miui-framework.jar" -type f 2>/dev/null | head -1)
+                
+                # Robust search for framework APKs in dumped partitions
+                _FW_RES=$(find "$DUMP_DIR" -name "framework-res.apk" -type f 2>/dev/null | head -1)
+                _MIUI_FW_RES=$(find "$DUMP_DIR" -name "miui-framework-res.apk" -type f 2>/dev/null | head -1)
+                _MIUI_FW_JAR=$(find "$DUMP_DIR" -name "miui-framework.jar" -type f 2>/dev/null | head -1)
+
+                # Fallback search in case dump structure varies
+                [ -z "$_MIUI_FW_RES" ] && _MIUI_FW_RES=$(find "$GITHUB_WORKSPACE" -name "miui-framework-res.apk" -type f 2>/dev/null | head -1)
 
                 for _fw_file in "$_FW_RES" "$_MIUI_FW_RES" "$_MIUI_FW_JAR"; do
                     [ -z "$_fw_file" ] && continue
@@ -3366,12 +3370,16 @@ if [ ! -z "$TELEGRAM_TOKEN" ] && [ ! -z "$CHAT_ID" ]; then
     
     BUILD_DATE=$(date +"%Y-%m-%d %H:%M")
     
-    # Delete the progress message so the final report is fresh (optional, but cleaner)
+    # Delete the progress message so the final report is fresh
     curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/deleteMessage" \
         -d chat_id="$CHAT_ID" \
         -d message_id="$TG_MSG_ID" >/dev/null
 
-    MSG_TEXT="✅ *NEXDROID BUILD SUCCESS*
+    # Safe Construction of JSON Payload using jq
+    # We strip special characters from MSG_TEXT for safety if needed, but jq handles most.
+    # We use a simplified text for the JSON to ensure it doesn't break.
+    
+    SAFE_TEXT="✅ *NEXDROID BUILD SUCCESS*
 ━━━━━━━━━━━━━━━━━━
 📱 *Device:* \`$DEVICE_CODE\`
 💿 *Version:* \`$OS_VER\`
@@ -3386,11 +3394,11 @@ if [ ! -z "$TELEGRAM_TOKEN" ] && [ ! -z "$CHAT_ID" ]; then
 • Performance Boosted
 • Custom Mods: \`$MODS_SELECTED\`
 
-_Click the button below to download or upload to cloud._"
+_Click the button below to download._"
 
     JSON_PAYLOAD=$(jq -n \
         --arg chat_id "$CHAT_ID" \
-        --arg text "$MSG_TEXT" \
+        --arg text "$SAFE_TEXT" \
         --arg url "$LINK_ZIP" \
         --arg btn "⬇️ Download ROM" \
         '{
@@ -3403,16 +3411,19 @@ _Click the button below to download or upload to cloud._"
                     [{text: "☁️ Save to Cloud", url: $url}]
                 ]
             }
-        }')
+        }') 
 
-    RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
+    # Send with error capture
+    HTTP_CODE=$(curl -s -o response.json -w "%{http_code}" -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
         -H "Content-Type: application/json" \
         -d "$JSON_PAYLOAD")
     
-    if [[ "$RESPONSE" == *"200"* ]]; then
+    if [ "$HTTP_CODE" -eq 200 ]; then
         log_success "✓ Telegram notification sent"
     else
-        log_warning "Telegram notification failed, trying fallback..."
+        log_warning "Telegram notification failed (HTTP $HTTP_CODE), output:"
+        cat response.json
+        log_warning "Trying fallback..."
         curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
             -d chat_id="$CHAT_ID" \
             -d text="✅ Build Done: $LINK_ZIP" >/dev/null
@@ -3420,6 +3431,7 @@ _Click the button below to download or upload to cloud._"
 else
     log_warning "Skipping Telegram notification (Missing TOKEN/CHAT_ID)"
 fi
+
 
 # =========================================================
 #  8. BUILD SUMMARY
