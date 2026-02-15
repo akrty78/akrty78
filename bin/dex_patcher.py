@@ -468,8 +468,14 @@ def binary_patch_method(dex: bytearray, class_desc: str, method_name: str,
         err(f"  Stub {stub_units} cu > original {insns_size} cu — cannot patch in-place")
         return False
 
-    # registers_size must be >= ins_size (parameter slots are always at top of frame)
-    new_regs = max(stub_regs, orig_ins)
+    # registers_size = stub_regs + orig_ins
+    #   Dalvik frame layout: locals occupy BOTTOM (v0..v(stub_regs-1)),
+    #   parameter registers occupy TOP (v(stub_regs)..v(stub_regs+orig_ins-1)).
+    #   Using max() instead of addition is WRONG when orig_ins > 0:
+    #     max(1,1)=1 → registers_size=1, ins_size=1 → v0 IS p0 (no local slots).
+    #     With const/4 v0, 0x1 / return v0, that writes the param reg, not a local.
+    #   Correct: stub_regs + orig_ins = 1+1 = 2 → v0=local, v1=p0. Clean separation.
+    new_regs = stub_regs + orig_ins
 
     # ── Patch code_item header ────────────────────────────────────────
     struct.pack_into('<H', dex, code_off + 0, new_regs)   # registers_size
@@ -869,8 +875,8 @@ def _services_jar_patch(dex_name: str, dex: bytearray) -> bool:
     TARGET INSTRUCTION:
       invoke-virtual {vX}, Lcom/android/server/wm/ActivityTaskManagerInternal;
           ->showSystemReadyErrorDialogsIfNeeded()V
-      opcode: 0x6E (invoke-virtual, format 35c, 3 code-units = 6 bytes)
-      or:     0x74 (invoke-virtual/range, format 3rc, 3 code-units = 6 bytes)
+      opcode: any invoke-* (0x6E-0x72, 0x74-0x78), format 35c or 3rc, 6 bytes
+      ActivityTaskManagerInternal is abstract → call is usually invoke-interface (0x72)
 
     PATCH:
       Replace the 6 bytes of the invoke instruction with 0x00 0x00 0x00 0x00 0x00 0x00
@@ -883,7 +889,7 @@ def _services_jar_patch(dex_name: str, dex: bytearray) -> bool:
       PanningScalingHandler, ActivityTaskManagerService, etc.
 
     SAFETY:
-      - Only 0x6E / 0x74 opcodes are touched (invoke-virtual / invoke-virtual/range).
+      - All 10 invoke-* opcodes (0x6E-0x72, 0x74-0x78) checked; only exact method_id matches NOP'd.
       - Only exact method_id matches are patched.
       - All code_item boundaries are respected — scan uses _iter_code_items.
       - If no call site found: returns False (graceful skip), does not abort build.
@@ -926,8 +932,19 @@ def _services_jar_patch(dex_name: str, dex: bytearray) -> bool:
 
     # Step 2: scan all code_items for invoke-virtual / invoke-virtual/range
     #   with this exact method_id and NOP them (6 bytes → 6 × 0x00).
-    INVOKE_VIRTUAL       = 0x6E   # format 35c,  3 code-units (6 bytes)
-    INVOKE_VIRTUAL_RANGE = 0x74   # format 3rc,  3 code-units (6 bytes)
+    # All invoke-* opcodes that embed a method_ref at bytes +2,+3 (LE uint16).
+    # Format 35c (3 code-units, 6 bytes): virtual/super/direct/static/interface
+    # Format 3rc (3 code-units, 6 bytes): same five, range variant
+    # ActivityTaskManagerInternal is abstract, so the call is invoke-interface (0x72).
+    # We catch all variants to be build-agnostic.
+    INVOKE_OPS_ALL = {
+        0x6E: 'invoke-virtual',       0x6F: 'invoke-super',
+        0x70: 'invoke-direct',        0x71: 'invoke-static',
+        0x72: 'invoke-interface',
+        0x74: 'invoke-virtual/range', 0x75: 'invoke-super/range',
+        0x76: 'invoke-direct/range',  0x77: 'invoke-static/range',
+        0x78: 'invoke-interface/range',
+    }
     raw_w = bytearray(dex)
     count = 0
 
@@ -935,14 +952,14 @@ def _services_jar_patch(dex_name: str, dex: bytearray) -> bool:
         i = 0
         while i <= insns_len * 2 - 6:   # need 6 bytes ahead
             op = raw[insns_off + i]
-            if op in (INVOKE_VIRTUAL, INVOKE_VIRTUAL_RANGE):
+            if op in INVOKE_OPS_ALL:
                 mid_ref = struct.unpack_from('<H', raw, insns_off + i + 2)[0]
                 if mid_ref == target_mid:
-                    # NOP out the 6-byte invoke instruction
+                    op_name = INVOKE_OPS_ALL[op]
+                    # NOP out the 6-byte invoke instruction (3 code-units × 0x00)
                     for b in range(6):
                         raw_w[insns_off + i + b] = 0x00
-                    op_name = ('invoke-virtual' if op == 0x6E else 'invoke-virtual/range')
-                    ok(f"  NOP'd {op_name} call in {type_str}::{mname} @ +{i}")
+                    ok(f"  NOP'd [{op_name}] call in {type_str}::{mname} @ +{i}")
                     count += 1
                     i += 6
                     continue
