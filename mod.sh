@@ -805,8 +805,14 @@ def binary_patch_method(dex: bytearray, class_desc: str, method_name: str,
         err(f"  Stub {stub_units} cu > original {insns_size} cu — cannot patch in-place")
         return False
 
-    # registers_size must be >= ins_size (parameter slots are always at top of frame)
-    new_regs = max(stub_regs, orig_ins)
+    # registers_size = stub_regs + orig_ins
+    #   Dalvik frame layout: locals occupy BOTTOM (v0..v(stub_regs-1)),
+    #   parameter registers occupy TOP (v(stub_regs)..v(stub_regs+orig_ins-1)).
+    #   Using max() instead of addition is WRONG when orig_ins > 0:
+    #     max(1,1)=1 → registers_size=1, ins_size=1 → v0 IS p0 (no local slots).
+    #     With const/4 v0, 0x1 / return v0, that writes the param reg, not a local.
+    #   Correct: stub_regs + orig_ins = 1+1 = 2 → v0=local, v1=p0. Clean separation.
+    new_regs = stub_regs + orig_ins
 
     # ── Patch code_item header ────────────────────────────────────────
     struct.pack_into('<H', dex, code_off + 0, new_regs)   # registers_size
@@ -1206,8 +1212,8 @@ def _services_jar_patch(dex_name: str, dex: bytearray) -> bool:
     TARGET INSTRUCTION:
       invoke-virtual {vX}, Lcom/android/server/wm/ActivityTaskManagerInternal;
           ->showSystemReadyErrorDialogsIfNeeded()V
-      opcode: 0x6E (invoke-virtual, format 35c, 3 code-units = 6 bytes)
-      or:     0x74 (invoke-virtual/range, format 3rc, 3 code-units = 6 bytes)
+      opcode: any invoke-* (0x6E-0x72, 0x74-0x78), format 35c or 3rc, 6 bytes
+      ActivityTaskManagerInternal is abstract → call is usually invoke-interface (0x72)
 
     PATCH:
       Replace the 6 bytes of the invoke instruction with 0x00 0x00 0x00 0x00 0x00 0x00
@@ -1220,7 +1226,7 @@ def _services_jar_patch(dex_name: str, dex: bytearray) -> bool:
       PanningScalingHandler, ActivityTaskManagerService, etc.
 
     SAFETY:
-      - Only 0x6E / 0x74 opcodes are touched (invoke-virtual / invoke-virtual/range).
+      - All 10 invoke-* opcodes (0x6E-0x72, 0x74-0x78) checked; only exact method_id matches NOP'd.
       - Only exact method_id matches are patched.
       - All code_item boundaries are respected — scan uses _iter_code_items.
       - If no call site found: returns False (graceful skip), does not abort build.
@@ -1263,8 +1269,19 @@ def _services_jar_patch(dex_name: str, dex: bytearray) -> bool:
 
     # Step 2: scan all code_items for invoke-virtual / invoke-virtual/range
     #   with this exact method_id and NOP them (6 bytes → 6 × 0x00).
-    INVOKE_VIRTUAL       = 0x6E   # format 35c,  3 code-units (6 bytes)
-    INVOKE_VIRTUAL_RANGE = 0x74   # format 3rc,  3 code-units (6 bytes)
+    # All invoke-* opcodes that embed a method_ref at bytes +2,+3 (LE uint16).
+    # Format 35c (3 code-units, 6 bytes): virtual/super/direct/static/interface
+    # Format 3rc (3 code-units, 6 bytes): same five, range variant
+    # ActivityTaskManagerInternal is abstract, so the call is invoke-interface (0x72).
+    # We catch all variants to be build-agnostic.
+    INVOKE_OPS_ALL = {
+        0x6E: 'invoke-virtual',       0x6F: 'invoke-super',
+        0x70: 'invoke-direct',        0x71: 'invoke-static',
+        0x72: 'invoke-interface',
+        0x74: 'invoke-virtual/range', 0x75: 'invoke-super/range',
+        0x76: 'invoke-direct/range',  0x77: 'invoke-static/range',
+        0x78: 'invoke-interface/range',
+    }
     raw_w = bytearray(dex)
     count = 0
 
@@ -1272,14 +1289,14 @@ def _services_jar_patch(dex_name: str, dex: bytearray) -> bool:
         i = 0
         while i <= insns_len * 2 - 6:   # need 6 bytes ahead
             op = raw[insns_off + i]
-            if op in (INVOKE_VIRTUAL, INVOKE_VIRTUAL_RANGE):
+            if op in INVOKE_OPS_ALL:
                 mid_ref = struct.unpack_from('<H', raw, insns_off + i + 2)[0]
                 if mid_ref == target_mid:
-                    # NOP out the 6-byte invoke instruction
+                    op_name = INVOKE_OPS_ALL[op]
+                    # NOP out the 6-byte invoke instruction (3 code-units × 0x00)
                     for b in range(6):
                         raw_w[insns_off + i + b] = 0x00
-                    op_name = ('invoke-virtual' if op == 0x6E else 'invoke-virtual/range')
-                    ok(f"  NOP'd {op_name} call in {type_str}::{mname} @ +{i}")
+                    ok(f"  NOP'd [{op_name}] call in {type_str}::{mname} @ +{i}")
                     count += 1
                     i += 6
                     continue
@@ -2547,27 +2564,47 @@ CUSTKEYS
         # E. MIUI-FRAMEWORK (handled via dex_patcher.py miui-framework profile above)
         #    ThemeReceiver bypass + IS_GLOBAL_BUILD already done in D8 above.
 
-        # F. MIUI FREQUENT PHRASE — Gboard redirect + Monet colors
-        #
-        #   ARCHITECTURE:
-        #   Pass 1 (binary) — try DEX string swap without apktool (fastest, zero timeout).
-        #   Pass 2 (apktool FULL decode, no -r) — handles BOTH smali + colors in ONE pass:
-        #     - Smali: sed Baidu→Gboard in target classes
-        #     - Colors: modify decoded res/values/colors.xml and res/values-night/colors.xml
-        #     - Rebuild: apktool b → fix resources.arsc alignment (R+ compliance)
-        #     NOTE: -r must NOT be used when color patching is needed. resources.arsc
-        #           is binary; colors only become editable after full decode (no -r).
+        # ════════════════════════════════════════════════════════════════
+        # F. MIUIFrequentPhrase — Monet color patch + Gboard redirect
+        #    Spec steps: 0 (env verify) → 1 (fw install) → 2 (decode) →
+        #                3+4 (color patch) → 5 (validate/dedup) →
+        #                6 (rebuild) → 7 (sign)
+        # ════════════════════════════════════════════════════════════════
         MFP_APK=$(find "$DUMP_DIR" -name "MIUIFrequentPhrase.apk" -type f -print -quit)
         if [ -n "$MFP_APK" ]; then
-            log_info "🎨 Modding MIUIFrequentPhrase..."
+            log_info "🎨 MIUIFrequentPhrase: Monet color patch + Gboard redirect"
+
+            # ── Step 0: Verify environment ────────────────────────────────
+            log_info "  [Step 0] Verifying build environment..."
+            _APKT_VER=$(apktool --version 2>/dev/null | head -1 | grep -oP '\d+\.\d+\.?\d*' | head -1)
+            _JAVA_VER=$(java -version 2>&1 | head -1)
+            log_info "  apktool version: ${_APKT_VER:-NOT FOUND}"
+            log_info "  java:  $_JAVA_VER"
+
+            if [ -z "$_APKT_VER" ]; then
+                log_warning "  apktool not found — MIUIFrequentPhrase color patch skipped"
+                # Fall through to binary-only Gboard swap below
+            else
+                # Require apktool >= 2.9
+                _APKT_MAJOR=$(echo "$_APKT_VER" | cut -d. -f1)
+                _APKT_MINOR=$(echo "$_APKT_VER" | cut -d. -f2)
+                if [ "$_APKT_MAJOR" -lt 2 ] || \
+                   { [ "$_APKT_MAJOR" -eq 2 ] && [ "$_APKT_MINOR" -lt 9 ]; }; then
+                    log_warning "  apktool ${_APKT_VER} < 2.9 — color patch requires >= 2.9, skipping"
+                else
+                    log_success "  ✓ apktool ${_APKT_VER} (>= 2.9)"
+                fi
+            fi
+
             MFP_WORK="$TEMP_DIR/mfp_work"
             MFP_DEX="$TEMP_DIR/mfp_dex"
             MFP_ORIG="$TEMP_DIR/mfp_orig.apk"
             rm -rf "$MFP_WORK" "$MFP_DEX"
-            # Save a copy of the original APK for safe DEX injection later
             cp "$MFP_APK" "$MFP_ORIG"
 
-            # Pass 1: binary DEX swap (no apktool, instant)
+            # ── Pass 1 (binary): DEX Gboard string swap ───────────────────
+            # Zero-timeout, no apktool. Works only when Gboard string is
+            # already in the DEX pool. Graceful skip if not.
             _run_dex_patch "MIUIFREQPHRASE GBOARD" "miuifreqphrase" "$MFP_APK"
             _MFP_BINARY_DONE=0
             python3 -c "
@@ -2580,107 +2617,267 @@ sys.exit(0)
 " "$MFP_APK" 2>/dev/null && _MFP_BINARY_DONE=1
 
             if [ "$_MFP_BINARY_DONE" -eq 1 ]; then
-                log_success "✓ Gboard redirect confirmed via binary swap"
+                log_success "  ✓ Gboard redirect confirmed via binary swap"
             else
-                log_warning "Binary swap incomplete — will patch via full apktool decode"
+                log_warning "  Binary Gboard swap incomplete — apktool smali fallback pending"
             fi
 
-            # Pass 2: full apktool decode (NO -r) — patches smali AND color resources
-            # JAVA_OPTS=-Xmx4G ensures apktool has enough heap for large APKs.
-            # Retry once if first attempt times out (45m per attempt).
-            log_info "  MIUIFrequentPhrase: full decode for color patching (JAVA_OPTS=-Xmx4G)..."
-            _MFP_DECODE_OK=0
-            for _attempt in 1 2; do
-                rm -rf "$MFP_WORK"
-                _T0=$(date +%s)
-                if JAVA_OPTS="-Xmx4G" timeout 45m apktool d -f "$MFP_ORIG" -o "$MFP_WORK" >/dev/null 2>&1; then
-                    _T1=$(date +%s)
-                    log_success "  ✓ Full decode succeeded in $(( _T1 - _T0 ))s (attempt $_attempt)"
-                    _MFP_DECODE_OK=1
-                    break
-                else
-                    _T1=$(date +%s)
-                    log_warning "  Attempt $_attempt: full decode failed after $(( _T1 - _T0 ))s — $([ $_attempt -eq 1 ] && echo "retrying..." || echo "giving up")"
-                fi
-            done
+            # ── Steps 1–7: apktool full pipeline ─────────────────────────
+            _MFP_APKT_OK=0
+            _APKT_MAJOR=${_APKT_MAJOR:-0}
+            _APKT_MINOR=${_APKT_MINOR:-0}
+            if [ "$_APKT_MAJOR" -gt 2 ] || \
+               { [ "$_APKT_MAJOR" -eq 2 ] && [ "$_APKT_MINOR" -ge 9 ]; }; then
 
-            if [ "$_MFP_DECODE_OK" -eq 1 ]; then
+                # ── Step 1: Install required MIUI frameworks ──────────────
+                log_info "  [Step 1] Installing frameworks into apktool registry..."
+                _FW_RES=$(find "$GITHUB_WORKSPACE" "$DUMP_DIR" \
+                    -name "framework-res.apk" -type f 2>/dev/null | head -1)
+                _MIUI_FW_RES=$(find "$GITHUB_WORKSPACE" "$DUMP_DIR" \
+                    -name "miui-framework-res.apk" -type f 2>/dev/null | head -1)
+                _MIUI_FW_JAR=$(find "$GITHUB_WORKSPACE" "$DUMP_DIR" \
+                    -name "miui-framework.jar" -type f 2>/dev/null | head -1)
 
-                # 2a. Smali: Baidu→Gboard (only if binary swap did not succeed)
-                if [ "$_MFP_BINARY_DONE" -eq 0 ]; then
-                    find "$MFP_WORK"                         \( -name "InputMethodBottomManager.smali"                            -o -name "InputProvider.smali" \)                         -exec sed -i                             's|com\.baidu\.input_mi|com.google.android.inputmethod.latin|g' {} +
-                    log_success "  ✓ Gboard string replaced in smali"
-                fi
+                for _fw_file in "$_FW_RES" "$_MIUI_FW_RES" "$_MIUI_FW_JAR"; do
+                    [ -z "$_fw_file" ] && continue
+                    _fw_name=$(basename "$_fw_file")
+                    if apktool if "$_fw_file" >/dev/null 2>&1; then
+                        log_success "  ✓ Framework installed: $_fw_name"
+                    else
+                        log_info "  Framework already installed or skipped: $_fw_name"
+                    fi
+                done
 
-                # 2b. Colors: modify decoded XML across ALL values directories
-                python3 - "$MFP_WORK" <<'COLOR_PY'
-import sys, re, pathlib
+                # ── Step 2: Full decode with --use-aapt2, retry once ──────
+                log_info "  [Step 2] Full decode (--use-aapt2, JAVA_OPTS=-Xmx4G, 45m×2)..."
+                _MFP_DECODE_OK=0
+                for _attempt in 1 2; do
+                    rm -rf "$MFP_WORK"
+                    _T0=$(date +%s)
+                    if JAVA_OPTS="-Xmx4G" timeout 45m \
+                       apktool d -f --use-aapt2 "$MFP_ORIG" -o "$MFP_WORK" 2>"$TEMP_DIR/mfp_decode_err.txt"; then
+                        _T1=$(date +%s)
+                        log_success "  ✓ Decode OK in $(( _T1 - _T0 ))s (attempt $_attempt)"
+                        _MFP_DECODE_OK=1
+                        break
+                    else
+                        _T1=$(date +%s)
+                        _err_line=$(tail -3 "$TEMP_DIR/mfp_decode_err.txt" 2>/dev/null | tr '\n' ' ')
+                        log_warning "  Attempt $_attempt failed after $(( _T1 - _T0 ))s: $_err_line"
+                        [ "$_attempt" -eq 1 ] && log_warning "  Retrying..." \
+                                               || log_warning "  Both attempts failed — aborting color patch"
+                    fi
+                done
+                rm -f "$TEMP_DIR/mfp_decode_err.txt"
+
+                if [ "$_MFP_DECODE_OK" -eq 1 ]; then
+
+                    # ── Step 2a: Smali Gboard swap (if binary didn't work) ─
+                    if [ "$_MFP_BINARY_DONE" -eq 0 ]; then
+                        find "$MFP_WORK" \
+                            \( -name "InputMethodBottomManager.smali" \
+                               -o -name "InputProvider.smali" \) \
+                            -exec sed -i \
+                                's|com\.baidu\.input_mi|com.google.android.inputmethod.latin|g' {} +
+                        log_success "  ✓ Gboard string replaced in smali"
+                    fi
+
+                    # ── Steps 3+4+5: Color patch + dedup validation ────────
+                    log_info "  [Steps 3-5] Patching Monet colors + validating..."
+                    python3 - "$MFP_WORK" <<'COLOR_PY'
+import sys, re, pathlib, collections
 
 root = pathlib.Path(sys.argv[1])
-xml_files = list(root.glob("res/values*/colors.xml"))
+TARGET_NAME = "input_bottom_background_color"
+# Exact match: only "input_bottom_background_color" not "input_bottom_background_color_old"
+# Pattern matches the opening tag and captures optional existing value
+ENTRY_RE = re.compile(
+    r'<color\s+name="' + re.escape(TARGET_NAME) + r'">[^<]*</color>'
+)
+ALREADY_MONET_RE = re.compile(r'@android:color/')
+HEX_VALUE_RE = re.compile(r'^#[0-9A-Fa-f]{3,8}$')
+
+xml_files = sorted(root.glob("res/values*/colors.xml"))
 if not xml_files:
-    print("[INFO] No colors.xml found in decoded resources — skip")
+    print("[WARNING] No colors.xml found in decoded resources")
     sys.exit(0)
 
-TARGET = "input_bottom_background_color"
-patched = 0
-for f in xml_files:
-    is_night = "night" in f.parent.name
-    replacement = "@android:color/system_neutral1_900" if is_night                   else "@android:color/system_neutral1_50"
-    txt = f.read_text(encoding="utf-8", errors="replace")
-    new_txt = re.sub(
-        rf'(<color name="{re.escape(TARGET)}">)[^<]*(</color>)',
-        rf'\g<1>{replacement}\g<2>',
-        txt)
-    if new_txt != txt:
-        f.write_text(new_txt, encoding="utf-8")
-        print(f"[SUCCESS] ✓ {f.relative_to(root)}: {TARGET} → {replacement}")
-        patched += 1
-    else:
-        print(f"[INFO] {f.relative_to(root)}: {TARGET} not found or already set")
+# Map folder → replacement
+def monet_for(folder_name: str) -> str:
+    return "@android:color/system_neutral1_900" if "night" in folder_name \
+           else "@android:color/system_neutral1_50"
 
-print(f"[{'SUCCESS' if patched else 'INFO'}] Colors: {patched} file(s) updated")
+errors = 0
+for f in xml_files:
+    folder  = f.parent.name
+    monet   = monet_for(folder)
+    txt     = f.read_text(encoding="utf-8", errors="replace")
+    matches = ENTRY_RE.findall(txt)
+
+    if not matches:
+        print(f"[INFO] {folder}/colors.xml: '{TARGET_NAME}' not present — skip")
+        continue
+
+    # Step 5a: Check for duplicates — keep only one Monet entry
+    if len(matches) > 1:
+        print(f"[WARNING] {folder}/colors.xml: {len(matches)} duplicate entries for "
+              f"'{TARGET_NAME}' — removing all, inserting one Monet entry")
+        # Remove ALL occurrences
+        txt = ENTRY_RE.sub('', txt)
+        # Remove any resulting double blank lines
+        txt = re.sub(r'\n{3,}', '\n\n', txt)
+        matches = []
+
+    # Step 3/4: Replace static hex with Monet reference
+    def replace_entry(m):
+        full = m.group(0)
+        # Extract current value between >...<
+        val_m = re.search(r'>([^<]*)<', full)
+        cur_val = val_m.group(1).strip() if val_m else ''
+        if ALREADY_MONET_RE.match(cur_val):
+            print(f"[INFO] {folder}/colors.xml: already Monet ({cur_val}) — skip")
+            return full
+        if not HEX_VALUE_RE.match(cur_val) and cur_val:
+            print(f"[WARNING] {folder}/colors.xml: unexpected value '{cur_val}' — replacing anyway")
+        return f'<color name="{TARGET_NAME}">{monet}</color>'
+
+    new_txt = ENTRY_RE.sub(replace_entry, txt)
+
+    # If duplicates were stripped above, re-insert a single Monet entry at end of <resources>
+    if not matches:
+        indent = '    '  # detect existing indentation
+        m_indent = re.search(r'\n( +)<color', new_txt)
+        if m_indent:
+            indent = m_indent.group(1)
+        monet_entry = f'{indent}<color name="{TARGET_NAME}">{monet}</color>'
+        new_txt = new_txt.replace('</resources>', monet_entry + '\n</resources>', 1)
+        print(f"[SUCCESS] ✓ {folder}/colors.xml: inserted {TARGET_NAME} → {monet} (dedup clean)")
+    elif new_txt != txt:
+        print(f"[SUCCESS] ✓ {folder}/colors.xml: {TARGET_NAME} → {monet}")
+    else:
+        print(f"[INFO] {folder}/colors.xml: no change needed")
+
+    # Step 5b: Verify exactly one Monet definition exists now
+    final_matches = ENTRY_RE.findall(new_txt)
+    if len(final_matches) != 1:
+        print(f"[ERROR] {folder}/colors.xml: post-patch has {len(final_matches)} entries — abort")
+        errors += 1
+        continue
+    final_val = re.search(r'>([^<]*)<', final_matches[0])
+    final_val = final_val.group(1).strip() if final_val else ''
+    if not ALREADY_MONET_RE.match(final_val):
+        print(f"[ERROR] {folder}/colors.xml: value '{final_val}' is not Monet — abort")
+        errors += 1
+        continue
+
+    f.write_text(new_txt, encoding="utf-8")
+    print(f"[INFO] {folder}/colors.xml: written (UTF-8, validation OK)")
+
+if errors:
+    print(f"[ERROR] {errors} validation error(s) — patch aborted")
+    sys.exit(1)
+print("[SUCCESS] ✓ All colors patched and validated")
 COLOR_PY
 
-                # 2c. Rebuild
-                log_info "  MIUIFrequentPhrase: rebuilding..."
-                _T0=$(date +%s)
-                if JAVA_OPTS="-Xmx4G" timeout 45m apktool b "$MFP_WORK" -o "${MFP_APK}.rebuilt" >/dev/null 2>&1; then
-                    _T1=$(date +%s)
-                    log_success "  ✓ rebuild succeeded in $(( _T1 - _T0 ))s"
-                    # Fix resources.arsc: must be UNCOMPRESSED + 4-byte aligned (R+ rule)
-                    _AARC_TMP="$TEMP_DIR/aarc_tmp"
-                    mkdir -p "$_AARC_TMP"
-                    (cd "$_AARC_TMP" && unzip -o "${MFP_APK}.rebuilt" resources.arsc >/dev/null 2>&1)
-                    if [ -f "$_AARC_TMP/resources.arsc" ]; then
-                        (cd "$_AARC_TMP" && zip -0 -u "${MFP_APK}.rebuilt" resources.arsc >/dev/null 2>&1)
-                        log_success "  ✓ resources.arsc stored uncompressed"
+                    _COLOR_EXIT=$?
+                    if [ "$_COLOR_EXIT" -ne 0 ]; then
+                        log_warning "  Color patch script reported errors — aborting MFP rebuild"
+                        _MFP_DECODE_OK=0
                     fi
-                    rm -rf "$_AARC_TMP"
+                fi   # color patch gate
 
-                    _ZA=$(which zipalign 2>/dev/null ||                           find "$BIN_DIR/android-sdk" -name zipalign 2>/dev/null | head -1)
-                    if [ -n "$_ZA" ]; then
-                        "$_ZA" -p -f 4 "${MFP_APK}.rebuilt" "${MFP_APK}.aligned" &&                             mv "${MFP_APK}.aligned" "$MFP_APK" &&                             log_success "✓ MIUIFrequentPhrase rebuilt + aligned (smali + colors)"
-                    else
+                if [ "$_MFP_DECODE_OK" -eq 1 ]; then
+                    # ── Step 6: Rebuild ────────────────────────────────────
+                    log_info "  [Step 6] Rebuilding APK (JAVA_OPTS=-Xmx4G)..."
+                    _T0=$(date +%s)
+                    if JAVA_OPTS="-Xmx4G" timeout 45m \
+                       apktool b "$MFP_WORK" -o "${MFP_APK}.rebuilt" \
+                       2>"$TEMP_DIR/mfp_build_err.txt"; then
+                        _T1=$(date +%s)
+                        log_success "  ✓ Rebuild OK in $(( _T1 - _T0 ))s"
+
+                        # Fix resources.arsc: UNCOMPRESSED + 4-byte aligned (Android R+ rule)
+                        _AARC_TMP="$TEMP_DIR/aarc_tmp"
+                        mkdir -p "$_AARC_TMP"
+                        (cd "$_AARC_TMP" && unzip -o "${MFP_APK}.rebuilt" resources.arsc >/dev/null 2>&1)
+                        if [ -f "$_AARC_TMP/resources.arsc" ]; then
+                            (cd "$_AARC_TMP" && zip -0 -u "${MFP_APK}.rebuilt" resources.arsc >/dev/null 2>&1)
+                            log_success "  ✓ resources.arsc stored uncompressed"
+                        fi
+                        rm -rf "$_AARC_TMP"
+
+                        # zipalign
+                        _ZA=$(which zipalign 2>/dev/null || \
+                              find "$BIN_DIR/android-sdk" -name zipalign 2>/dev/null | head -1)
+                        if [ -n "$_ZA" ]; then
+                            if "$_ZA" -p -f 4 "${MFP_APK}.rebuilt" "${MFP_APK}.aligned"; then
+                                mv "${MFP_APK}.aligned" "${MFP_APK}.rebuilt"
+                                log_success "  ✓ zipalign -p -f 4 applied"
+                            else
+                                log_warning "  zipalign failed — proceeding without alignment"
+                            fi
+                        else
+                            log_warning "  zipalign not found — skipping (may fail on R+)"
+                        fi
+
+                        # ── Step 7: Sign ───────────────────────────────────
+                        log_info "  [Step 7] Signing rebuilt APK..."
+                        _MFP_KS=${KEYSTORE_PATH:-$(find "$GITHUB_WORKSPACE" -maxdepth 2 \
+                            \( -name "testkey.jks" -o -name "release.jks" -o -name "*.keystore" \) \
+                            2>/dev/null | head -1)}
+                        _MFP_KS_PASS=${KEYSTORE_PASS:-android}
+                        _MFP_KS_ALIAS=${KEY_ALIAS:-testkey}
+
+                        if [ -n "$_MFP_KS" ] && [ -f "$_MFP_KS" ]; then
+                            if apksigner sign \
+                                --ks "$_MFP_KS" \
+                                --ks-pass "pass:$_MFP_KS_PASS" \
+                                --ks-key-alias "$_MFP_KS_ALIAS" \
+                                --in "${MFP_APK}.rebuilt" \
+                                --out "${MFP_APK}.signed" 2>/dev/null; then
+                                mv "${MFP_APK}.signed" "${MFP_APK}.rebuilt"
+                                log_success "  ✓ APK signed with $(basename "$_MFP_KS")"
+                            else
+                                log_warning "  apksigner failed — APK unsigned (system partition may not require signing)"
+                                rm -f "${MFP_APK}.signed"
+                            fi
+                        else
+                            log_warning "  No keystore found (set KEYSTORE_PATH env var to sign)"
+                            log_info   "  APK unsigned — acceptable for system partition injection"
+                        fi
+
+                        # Commit result
                         mv "${MFP_APK}.rebuilt" "$MFP_APK"
-                        log_warning "  zipalign not found — alignment may fail on device"
-                        log_success "✓ MIUIFrequentPhrase rebuilt (smali + colors, no align)"
+                        log_success "✓ MIUIFrequentPhrase: Monet + Gboard patched, aligned, committed"
+                        _MFP_APKT_OK=1
+
+                    else
+                        _T1=$(date +%s)
+                        _berr=$(tail -5 "$TEMP_DIR/mfp_build_err.txt" 2>/dev/null | tr '\n' ' ')
+                        rm -f "${MFP_APK}.rebuilt"
+                        log_warning "  [Step 6] apktool build FAILED after $(( _T1 - _T0 ))s"
+                        log_warning "  Error: $_berr"
                     fi
-                    rm -f "${MFP_APK}.rebuilt"
+                    rm -f "$TEMP_DIR/mfp_build_err.txt"
+                fi   # decode+color gate
+
+            fi   # apktool >= 2.9 gate
+
+            # Fallback: if apktool pipeline didn't complete, ensure Gboard swap is still applied
+            if [ "$_MFP_APKT_OK" -eq 0 ]; then
+                if [ "$_MFP_BINARY_DONE" -eq 1 ]; then
+                    log_warning "  ⚠ Colors NOT patched (apktool pipeline failed)"
+                    log_warning "  Gboard redirect applied via binary swap only"
                 else
-                    _T1=$(date +%s)
-                    rm -f "${MFP_APK}.rebuilt"
-                    log_warning "apktool rebuild failed after $(( _T1 - _T0 ))s — MIUIFrequentPhrase colors skipped"
+                    log_warning "  ⚠ MIUIFrequentPhrase: NO patches applied"
                 fi
-            else
-                log_warning "⚠ apktool full decode failed after 2 attempts — colors patch SKIPPED (mandatory step)"
-                log_warning "  Consider running manually: JAVA_OPTS=-Xmx4G apktool d -f MIUIFrequentPhrase.apk"
             fi
 
             rm -rf "$MFP_WORK" "$MFP_DEX"
-            rm -f "$MFP_ORIG"
+            rm -f "$MFP_ORIG" "$TEMP_DIR/mfp_decode_err.txt" "$TEMP_DIR/mfp_build_err.txt"
             cd "$GITHUB_WORKSPACE"
         fi
+
 
         # G. NEXPACKAGE
         if [ "$part" == "product" ]; then
