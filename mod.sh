@@ -1635,6 +1635,7 @@ if __name__ == "__main__":
     main()
 PYTHON_EOF
 chmod +x "$BIN_DIR/dex_patcher.py"
+SMALI_TOOLS_OK=1
 log_success "✓ DEX patcher ready (binary in-place, no baksmali/smali required)"
 # Verify zipalign is available
 python3 "$BIN_DIR/dex_patcher.py" verify 2>&1 | while IFS= read -r l; do
