@@ -2648,27 +2648,40 @@ sys.exit(0)
                     fi
                 done
 
-                # ── Step 2: Full decode with --use-aapt2, retry once ──────
-                log_info "  [Step 2] Full decode (--use-aapt2, JAVA_OPTS=-Xmx4G, 45m×2)..."
+                # ── Step 2: Full decode (aapt2 is used internally by default) ──
+                # --use-aapt2 was removed: apktool 2.9+ uses aapt2 automatically
+                # and the flag does not exist — passing it prints the usage screen
+                # and exits non-zero immediately.  Never retry on argument errors:
+                # if apktool prints "Unrecognized option" or the usage screen,
+                # break immediately and log the flag as the root cause.
+                log_info "  [Step 2] Full decode (JAVA_OPTS=-Xmx4G, 45m×2)..."
                 _MFP_DECODE_OK=0
+                _MFP_DECODE_ERR="$TEMP_DIR/mfp_decode_err.txt"
                 for _attempt in 1 2; do
                     rm -rf "$MFP_WORK"
                     _T0=$(date +%s)
                     if JAVA_OPTS="-Xmx4G" timeout 45m \
-                       apktool d -f --use-aapt2 "$MFP_ORIG" -o "$MFP_WORK" 2>"$TEMP_DIR/mfp_decode_err.txt"; then
+                       apktool d -f "$MFP_ORIG" -o "$MFP_WORK" 2>"$_MFP_DECODE_ERR"; then
                         _T1=$(date +%s)
                         log_success "  ✓ Decode OK in $(( _T1 - _T0 ))s (attempt $_attempt)"
                         _MFP_DECODE_OK=1
                         break
                     else
                         _T1=$(date +%s)
-                        _err_line=$(tail -3 "$TEMP_DIR/mfp_decode_err.txt" 2>/dev/null | tr '\n' ' ')
-                        log_warning "  Attempt $_attempt failed after $(( _T1 - _T0 ))s: $_err_line"
+                        _err_line=$(tail -3 "$_MFP_DECODE_ERR" 2>/dev/null | tr '\n' ' ')
+                        log_warning "  Attempt $_attempt failed after $(( _T1 - _T0 ))s: ${_err_line}"
+                        # Hard-abort on argument errors — retrying will produce identical failure
+                        if grep -qiE "Unrecognized option|usage: apktool" "$_MFP_DECODE_ERR" 2>/dev/null; then
+                            log_warning "  ✗ apktool rejected a command-line flag (argument error, not a timeout)"
+                            log_warning "  ✗ Full error: $(head -1 "$_MFP_DECODE_ERR")"
+                            log_warning "  ✗ NOT retrying — fix the apktool flags"
+                            break
+                        fi
                         [ "$_attempt" -eq 1 ] && log_warning "  Retrying..." \
                                                || log_warning "  Both attempts failed — aborting color patch"
                     fi
                 done
-                rm -f "$TEMP_DIR/mfp_decode_err.txt"
+                rm -f "$_MFP_DECODE_ERR"
 
                 if [ "$_MFP_DECODE_OK" -eq 1 ]; then
 
