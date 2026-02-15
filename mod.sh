@@ -415,6 +415,8 @@ def err(m):   _p("ERROR",   m)
 _STUB_TRUE = bytes([0x12, 0x10, 0x0F, 0x00])
 # return-void                    (format 10x = 1 code-unit = 2 bytes)
 _STUB_VOID = bytes([0x0E, 0x00])
+# const/4 v0, 0x0 ; return v0   (format 11n + 11x = 2 code-units = 4 bytes)
+_STUB_FALSE = bytes([0x12, 0x00, 0x0F, 0x00])
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -1585,6 +1587,65 @@ def _incallui_patch(dex_name: str, dex: bytearray) -> bool:
     return False
 
 
+# ── MIUIQuickSearchBox.apk — ad/recommendation removal + Google default ──
+def _qsb_debloat_patch(dex_name: str, dex: bytearray) -> bool:
+    """
+    MIUIQuickSearchBox debloat — 5-pass binary patch:
+    Pass 1: Swap default search engine "baidu" → "google" in searchengine classes.
+    Pass 2: Stub HomepageAdData.getShowAdMark() → return false (suppress ad banners).
+    Pass 3: Stub LandingPageService.onTransact() → return true (kill AIDL ad IPC).
+    Pass 4: Redirect /qsb/getAppSuggest API endpoint to dead path.
+    Pass 5: Break hotword ad JSON key so ad model info is never parsed.
+    """
+    patched = False
+    raw = bytes(dex)
+
+    # Pass 1: Search engine default — "baidu" → "google"
+    if b'baidu' in raw and b'google' in raw and b'searchengine' in raw:
+        n = binary_swap_string(dex, 'baidu', 'google',
+                              only_class='searchengine')
+        if n > 0:
+            patched = True
+            raw = bytes(dex)
+            ok(f"  Pass 1: {n} x 'baidu' -> 'google' in searchengine classes")
+
+    # Pass 2: Homepage ads — getShowAdMark() → return false
+    if b'HomepageAdData' in raw and b'getShowAdMark' in raw:
+        if binary_patch_method(dex,
+                'com/android/quicksearchbox/bean/HomepageAdData',
+                'getShowAdMark', stub_regs=1, stub_insns=_STUB_FALSE):
+            patched = True
+            raw = bytes(dex)
+            ok("  Pass 2: HomepageAdData.getShowAdMark() -> return false")
+
+    # Pass 3: Landing page ads — LandingPageService.onTransact → return true
+    if b'LandingPageService' in raw and b'onTransact' in raw:
+        if binary_patch_method(dex,
+                'com/miui/systemAdSolution/landingPage/LandingPageService',
+                'onTransact', stub_regs=1, stub_insns=_STUB_TRUE):
+            patched = True
+            raw = bytes(dex)
+            ok("  Pass 3: LandingPageService.onTransact() -> return true")
+
+    # Pass 4: App suggestions — redirect API endpoint
+    if b'/qsb/getAppSuggest' in raw:
+        n = binary_swap_string(dex, '/qsb/getAppSuggest', '/qsb/getAppDisabled')
+        if n > 0:
+            patched = True
+            raw = bytes(dex)
+            ok(f"  Pass 4: {n} x getAppSuggest endpoint redirected")
+
+    # Pass 5: Hotword ads — break ad model JSON key
+    if b'hotWord.adModelInfo' in raw:
+        n = binary_swap_string(dex, 'hotWord.adModelInfo', 'hotWord.adModelNone')
+        if n > 0:
+            patched = True
+            raw = bytes(dex)
+            ok(f"  Pass 5: {n} x hotWord ad model key renamed")
+
+    return patched
+
+
 # ════════════════════════════════════════════════════════════════════
 #  COMMAND TABLE  +  ENTRY POINT
 # ════════════════════════════════════════════════════════════════════
@@ -1599,6 +1660,7 @@ PROFILES = {
     "systemui-volte":    _systemui_all_patch,       # VoLTE + QuickShare(const/4) + WA-notif
     "miui-framework":    _miui_framework_patch,     # validateTheme(trim) + IS_GLOBAL_BUILD
     "incallui-ai":       _incallui_patch,           # RecorderUtils::isAiRecordEnable
+    "qsb-debloat":       _qsb_debloat_patch,        # QSB ads/recommendations + Google default
 }
 
 def main():
@@ -2605,6 +2667,11 @@ PYTHON_EOF
             # D3b. InCallUI — AI recording gate: RecorderUtils::isAiRecordEnable → true
             _run_dex_patch "INCALLUI AI" "incallui-ai" \
                 "$(find "$DUMP_DIR" -path "*/priv-app/InCallUI/InCallUI.apk" -type f | head -n1)"
+            cd "$GITHUB_WORKSPACE"
+
+            # D3c. QuickSearchBox — ads off + Google default engine
+            _run_dex_patch "QSB DEBLOAT" "qsb-debloat" \
+                "$(find "$DUMP_DIR" -path "*/priv-app/*" -name "MIUIQuickSearchBox.apk" -type f | head -n1)"
             cd "$GITHUB_WORKSPACE"
 
         fi
