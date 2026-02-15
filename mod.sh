@@ -24,6 +24,7 @@ log_step() { echo -e "${MAGENTA}[STEP]${NC} $(date +"%H:%M:%S") - $1"; }
 
 # --- INPUTS ---
 ROM_URL="$1"
+MODS_SELECTED="${2:-}"   # comma-separated: launcher,thememanager,securitycenter
 
 # --- 1. INSTANT METADATA EXTRACTION ---
 FILENAME=$(basename "$ROM_URL" | cut -d'?' -f1)
@@ -1680,6 +1681,197 @@ fi
 log_success "All resources downloaded successfully"
 
 # =========================================================
+#  3b. MIUI MOD INJECTION SYSTEM
+#  Triggered by MODS_SELECTED (comma-separated list from bot)
+#  Each mod: GitHub API → download zip → extract → inject → permissions → cleanup
+# =========================================================
+
+# Generic helper: fetch latest release zip from a GitHub repo
+# Usage: inject_miui_mod <owner/repo> <label>
+# Sets MOD_EXTRACT_DIR on success, returns 1 on failure
+inject_miui_mod() {
+    local repo="$1" label="$2"
+    MOD_EXTRACT_DIR="$TEMP_DIR/mod_${label}"
+    rm -rf "$MOD_EXTRACT_DIR"
+    mkdir -p "$MOD_EXTRACT_DIR"
+
+    log_info "🧩 [$label] Fetching latest release from $repo..."
+    local api_resp
+    api_resp=$(curl -sfL --retry 3 --connect-timeout 30 \
+        "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null)
+    if [ -z "$api_resp" ]; then
+        log_error "[$label] GitHub API request failed — aborting mod"
+        rm -rf "$MOD_EXTRACT_DIR"
+        return 1
+    fi
+
+    local zip_url
+    zip_url=$(echo "$api_resp" | jq -r \
+        '.assets[] | select(.name | endswith(".zip")) | .browser_download_url' | head -n 1)
+    if [ -z "$zip_url" ] || [ "$zip_url" == "null" ]; then
+        log_error "[$label] No .zip asset found in latest release — aborting mod"
+        rm -rf "$MOD_EXTRACT_DIR"
+        return 1
+    fi
+
+    local zip_path="$TEMP_DIR/mod_${label}.zip"
+    log_info "[$label] Downloading: $(basename "$zip_url")"
+    if ! wget -q -O "$zip_path" "$zip_url"; then
+        log_error "[$label] Download failed — aborting mod"
+        rm -f "$zip_path"
+        rm -rf "$MOD_EXTRACT_DIR"
+        return 1
+    fi
+
+    log_info "[$label] Extracting..."
+    unzip -qq -o "$zip_path" -d "$MOD_EXTRACT_DIR"
+    rm -f "$zip_path"
+
+    # If the zip contains a single top-level folder, descend into it
+    local top_dirs
+    top_dirs=$(find "$MOD_EXTRACT_DIR" -mindepth 1 -maxdepth 1 -type d)
+    local dir_count
+    dir_count=$(echo "$top_dirs" | grep -c .)
+    if [ "$dir_count" -eq 1 ]; then
+        local inner_dir="$top_dirs"
+        # Move contents up one level
+        mv "$inner_dir"/* "$MOD_EXTRACT_DIR/" 2>/dev/null
+        mv "$inner_dir"/.* "$MOD_EXTRACT_DIR/" 2>/dev/null
+        rmdir "$inner_dir" 2>/dev/null
+    fi
+
+    log_success "[$label] Extraction complete"
+    return 0
+}
+
+# Post-injection: fix permissions and cleanup
+mod_finalize() {
+    local target_dir="$1" label="$2"
+    # APK permissions: 0644, directory permissions: 0755
+    find "$target_dir" -type f -name "*.apk" -exec chmod 0644 {} +
+    find "$target_dir" -type d -exec chmod 0755 {} +
+    # Cleanup extraction dir
+    rm -rf "$TEMP_DIR/mod_${label}"
+    log_success "[$label] Permissions set and temp cleaned"
+}
+
+# ── Mod 1: HyperOS Launcher ──────────────────────────────────
+inject_launcher_mod() {
+    local dump_dir="$1"
+    if ! inject_miui_mod "Mods-Center/HyperOS-Launcher" "launcher"; then
+        return 1
+    fi
+
+    local src="$MOD_EXTRACT_DIR"
+
+    # MiuiHome.apk → product/priv-app/MiuiHome/
+    local home_apk=$(find "$src" -name "MiuiHome.apk" -type f | head -n 1)
+    if [ -z "$home_apk" ]; then
+        log_error "[launcher] MiuiHome.apk not found in module — aborting"
+        rm -rf "$TEMP_DIR/mod_launcher"
+        return 1
+    fi
+    mkdir -p "$dump_dir/priv-app/MiuiHome"
+    cp -f "$home_apk" "$dump_dir/priv-app/MiuiHome/MiuiHome.apk"
+    log_success "[launcher] ✓ MiuiHome.apk injected"
+
+    # XiaomiEUExt.apk → product/priv-app/XiaomiEUExt/
+    local ext_apk=$(find "$src" -name "XiaomiEUExt.apk" -type f | head -n 1)
+    if [ -n "$ext_apk" ]; then
+        mkdir -p "$dump_dir/priv-app/XiaomiEUExt"
+        cp -f "$ext_apk" "$dump_dir/priv-app/XiaomiEUExt/XiaomiEUExt.apk"
+        log_success "[launcher] ✓ XiaomiEUExt.apk injected"
+    else
+        log_info "[launcher] XiaomiEUExt.apk not present in module — skipping"
+    fi
+
+    # Permissions XMLs → product/etc/permissions/
+    local perm_src=$(find "$src" -type d -name "permissions" | head -n 1)
+    if [ -n "$perm_src" ]; then
+        mkdir -p "$dump_dir/etc/permissions"
+        cp -f "$perm_src"/*.xml "$dump_dir/etc/permissions/" 2>/dev/null
+        log_success "[launcher] ✓ Permission XMLs injected"
+    fi
+
+    mod_finalize "$dump_dir/priv-app/MiuiHome" "launcher"
+    log_success "✅ HyperOS Launcher mod injected successfully"
+}
+
+# ── Mod 2: HyperOS Theme Manager ─────────────────────────────
+inject_theme_mod() {
+    local dump_dir="$1"
+    if ! inject_miui_mod "Mods-Center/HyperOS-Theme-Manager" "thememanager"; then
+        return 1
+    fi
+
+    local src="$MOD_EXTRACT_DIR"
+
+    # Delete existing ThemeManager directory first
+    if [ -d "$dump_dir/app/MIUIThemeManager" ]; then
+        rm -rf "$dump_dir/app/MIUIThemeManager"/*
+        log_info "[thememanager] Cleared existing MIUIThemeManager directory"
+    fi
+    mkdir -p "$dump_dir/app/MIUIThemeManager"
+
+    # MIUIThemeManager.apk
+    local theme_apk=$(find "$src" -name "MIUIThemeManager.apk" -type f | head -n 1)
+    if [ -z "$theme_apk" ]; then
+        log_error "[thememanager] MIUIThemeManager.apk not found in module — aborting"
+        rm -rf "$TEMP_DIR/mod_thememanager"
+        return 1
+    fi
+    cp -f "$theme_apk" "$dump_dir/app/MIUIThemeManager/MIUIThemeManager.apk"
+    log_success "[thememanager] ✓ MIUIThemeManager.apk injected"
+
+    # lib/ directory
+    local lib_src=$(find "$src" -type d -name "lib" | head -n 1)
+    if [ -n "$lib_src" ]; then
+        cp -rf "$lib_src" "$dump_dir/app/MIUIThemeManager/"
+        log_success "[thememanager] ✓ lib/ directory injected"
+    else
+        log_info "[thememanager] No lib/ directory in module"
+    fi
+
+    mod_finalize "$dump_dir/app/MIUIThemeManager" "thememanager"
+    log_success "✅ HyperOS Theme Manager mod injected successfully"
+}
+
+# ── Mod 3: HyperOS Security Center ───────────────────────────
+inject_security_mod() {
+    local dump_dir="$1"
+    if ! inject_miui_mod "Mods-Center/HyperOS-Security-Center" "securitycenter"; then
+        return 1
+    fi
+
+    local src="$MOD_EXTRACT_DIR"
+
+    # SecurityCenter.apk → rename to MIUISecurityCenter.apk, replace dir
+    local sec_apk=$(find "$src" -name "SecurityCenter.apk" -type f | head -n 1)
+    if [ -z "$sec_apk" ]; then
+        log_error "[securitycenter] SecurityCenter.apk not found in module — aborting"
+        rm -rf "$TEMP_DIR/mod_securitycenter"
+        return 1
+    fi
+
+    # Replace entire target directory
+    rm -rf "$dump_dir/priv-app/MIUISecurityCenter"
+    mkdir -p "$dump_dir/priv-app/MIUISecurityCenter"
+    cp -f "$sec_apk" "$dump_dir/priv-app/MIUISecurityCenter/MIUISecurityCenter.apk"
+    log_success "[securitycenter] ✓ MIUISecurityCenter.apk injected (renamed from SecurityCenter.apk)"
+
+    # Permissions XMLs → product/etc/permissions/
+    local perm_src=$(find "$src" -type d -name "permissions" | head -n 1)
+    if [ -n "$perm_src" ]; then
+        mkdir -p "$dump_dir/etc/permissions"
+        cp -f "$perm_src"/*.xml "$dump_dir/etc/permissions/" 2>/dev/null
+        log_success "[securitycenter] ✓ Permission XMLs injected"
+    fi
+
+    mod_finalize "$dump_dir/priv-app/MIUISecurityCenter" "securitycenter"
+    log_success "✅ HyperOS Security Center mod injected successfully"
+}
+
+# =========================================================
 #  4. DOWNLOAD & EXTRACT ROM
 # =========================================================
 log_step "📦 Downloading ROM..."
@@ -2005,6 +2197,28 @@ for part in $LOGICALS; do
             
             install_gapp_logic "$P_PRIV" "$PRIV_ROOT"
             install_gapp_logic "$P_APP" "$APP_ROOT"
+        fi
+
+        # B2. MIUI MOD INJECTION (optional, triggered by MODS_SELECTED)
+        if [ -n "$MODS_SELECTED" ]; then
+            log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            log_step "🧩 MIUI MOD INJECTION"
+            log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            log_info "Selected mods: $MODS_SELECTED"
+
+            if [[ ",$MODS_SELECTED," == *",launcher,"* ]]; then
+                inject_launcher_mod "$DUMP_DIR"
+            fi
+            if [[ ",$MODS_SELECTED," == *",thememanager,"* ]]; then
+                inject_theme_mod "$DUMP_DIR"
+            fi
+            if [[ ",$MODS_SELECTED," == *",securitycenter,"* ]]; then
+                inject_security_mod "$DUMP_DIR"
+            fi
+
+            log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            log_success "✅ MOD INJECTION COMPLETE"
+            log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         fi
 
         # C. MIUI BOOSTER - DEVICE LEVEL OVERRIDE (COMPLETE METHOD REPLACEMENT)
