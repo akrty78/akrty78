@@ -3019,12 +3019,12 @@ if [ ! -z "$TELEGRAM_TOKEN" ] && [ ! -z "$CHAT_ID" ]; then
     # We use a simplified text for the JSON to ensure it doesn't break.
     
     SAFE_TEXT="🔥 NexDroid Build Compiled
-• • • • • • • • • •
-\`📣 Info:\`
-📱 Device  : $DEVICE_CODE
-🏷️ Version : $OS_VER
-🤖 Android : $ANDROID_VER
-⌛ Built   : $BUILD_DATE
+-----------------
+
+Device  : $DEVICE_CODE
+Version : $OS_VER
+Android : $ANDROID_VER
+Built   : $BUILD_DATE
 
 \`⚙️ Patches Applied:\`
 📦 Mods: \`$MODS_SELECTED\`
