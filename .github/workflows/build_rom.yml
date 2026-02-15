@@ -44,7 +44,7 @@ jobs:
         run: |
           # The script handles the build, upload, AND success notification
           # We pipe output to both console (tee) and file for logging
-          bash mod.sh "${{ github.event.client_payload.rom_url }}" 2>&1 | tee build.log
+          bash mod.sh "${{ github.event.client_payload.rom_url }}" "${{ github.event.client_payload.mods_selected }}" 2>&1 | tee build.log
 
       # --- ERROR HANDLING ---
       # Only runs if the previous step failed
@@ -71,8 +71,4 @@ jobs:
           \`\`\`
           
           🔍 Check GitHub Actions for full details."
-      - name: Setup Baksmali
-        run: |
-          mkdir -p bin
-          curl -L https://github.com/baksmali/smali/releases/download/v3.0.9/baksmali-3.0.9-fat.jar -o bin/baksmali.jar
-          chmod +x bin/baksmali.jar
+
