@@ -388,7 +388,6 @@ TECHNIQUE: NexBinaryPatch  — binary in-place DEX patch, zero baksmali/smali.
 
 Commands:
   verify              check zipalign + java
-  framework-sig       ApkSignatureVerifier → getMinimumSignatureSchemeVersionForTargetSdk = 1
   settings-ai         InternalDeviceUtils  → isAiSupported = true
   voice-recorder-ai   SoundRecorder        → isAiRecordEnable = true
   services-jar        ActivityManagerService$$ExternalSyntheticLambda31 → run() = void
@@ -1144,26 +1143,6 @@ def run_patches(archive: Path, patch_fn, label: str) -> int:
 #  PATCH PROFILES
 # ════════════════════════════════════════════════════════════════════
 
-# ── framework.jar  ───────────────────────────────────────────────
-def _fw_sig_patch(dex_name: str, dex: bytearray) -> bool:
-    """
-    Patch getMinimumSignatureSchemeVersionForTargetSdk → return 1 (const/4 v0, 0x1).
-
-    MUST use trim=True:
-      trim=False (default) leaves the original insns_size in the code_item header
-      and NOP-pads the remainder, producing:
-          const/4 v0, 0x1 ; return v0 ; nop ; nop ; ...
-      trim=True shrinks insns_size to exactly 2 code-units (4 bytes), giving the
-      clean output the verifier and baksmali both expect:
-          const/4 v0, 0x1
-          return v0
-    """
-    if b'ApkSignatureVerifier' not in bytes(dex): return False
-    return binary_patch_method(dex,
-        "android/util/apk/ApkSignatureVerifier",
-        "getMinimumSignatureSchemeVersionForTargetSdk", 1, _STUB_TRUE,
-        trim=True)
-
 # ── Settings.apk  ────────────────────────────────────────────────
 def _settings_ai_patch(dex_name: str, dex: bytearray) -> bool:
     if b'InternalDeviceUtils' not in bytes(dex): return False
@@ -1351,16 +1330,20 @@ def _provision_gms_patch(dex_name: str, dex: bytearray) -> bool:
     STRICT SCOPE: patch exactly ONE sget-boolean of IS_INTERNATIONAL_BUILD
     inside Utils::setGmsAppEnabledStateForCn — no other class, no other method.
 
-    Correct encoding:  const/4 v0, 0x1   →   bytes 12 10
-      opcode 0x12, second byte = (value<<4)|reg = (1<<4)|0 = 0x10
-    Wrong encoding from old _intl_build_patch (no use_const4):
-      const/16 v0, 0x1  →  bytes 13 00 01 00  (opcode 0x13, not 0x15 which is const/high16)
+    Encoding used:  const/16 v0, 0x1  →  bytes 13 00 01 00
+      opcode 0x13 (const/16, format 21s), exactly 4 bytes — same width as sget-boolean.
+      No NOP padding needed. Clean single-instruction replacement.
+
+      WHY NOT const/4 (use_const4=True):
+        const/4 is only 2 bytes (1 code unit). Replacing a 4-byte sget leaves 2 bytes
+        that must be padded with a NOP code unit (0x00 0x00), producing a spurious
+        "nop" line in baksmali output. const/16 fills all 4 bytes cleanly.
 
     Constraints enforced:
       - class filter: 'Utils' must be in type_str (catches com/android/provision/Utils)
       - method filter: exact name 'setGmsAppEnabledStateForCn'
       - first-occurrence only: count is tracked; abort if 0 matches
-      - use_const4=True: guarantees opcode 0x12 output (const/4)
+      - use_const4=False: uses opcode 0x13 (const/16), no NOP padding
     """
     raw = bytes(dex)
     if b'IS_INTERNATIONAL_BUILD' not in raw: return False
@@ -1370,11 +1353,11 @@ def _provision_gms_patch(dex_name: str, dex: bytearray) -> bool:
             'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD',
             only_class='Utils',
             only_method='setGmsAppEnabledStateForCn',
-            use_const4=True)
+            use_const4=False)
     if n == 0:
         warn("  Provision: setGmsAppEnabledStateForCn not found or no IS_INTERNATIONAL_BUILD sget")
         return False
-    ok(f"  ✓ Provision Utils::setGmsAppEnabledStateForCn → const/4 v0, 0x1 ({n} sget)")
+    ok(f"  ✓ Provision Utils::setGmsAppEnabledStateForCn → const/16 v0, 0x1 ({n} sget, no NOP)")
     return True
 
 
@@ -1607,7 +1590,6 @@ def _incallui_patch(dex_name: str, dex: bytearray) -> bool:
 # ════════════════════════════════════════════════════════════════════
 
 PROFILES = {
-    "framework-sig":     _fw_sig_patch,
     "settings-ai":       _settings_ai_patch,
     "settings-region":   _settings_region_patch,   # exact 3 classes only
     "voice-recorder-ai": _recorder_ai_patch,        # AiDeviceUtil::isAiSupportedDevice
@@ -1877,6 +1859,80 @@ inject_security_mod() {
 
     mod_finalize "$dump_dir/priv-app/MIUISecurityCenter" "securitycenter"
     log_success "✅ HyperOS Security Center mod injected successfully"
+}
+
+# ── Mod 4: Multi-Language Overlays ───────────────────────────
+push_multilang() {
+    # Downloads the latest ZIP from the Multilang release tag, extracts it,
+    # and installs ALL .apk files found under any overlay/ directory strictly
+    # into product/overlay/ (no other partition).
+    local dump_dir="$1"   # must be the product dump dir
+    local overlay_dst="$dump_dir/overlay"
+
+    log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    log_step "🌐 MULTI-LANGUAGE OVERLAY PUSH"
+    log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    # Resolve latest asset URL for the Multilang tag via GitHub API
+    local api_url="https://api.github.com/repos/nexdroidwx/HyperOS-Modder/releases/tags/Multilang"
+    local asset_url
+    asset_url=$(curl -sSf -H "Authorization: token ${GITHUB_TOKEN}" "$api_url" \
+        | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+assets = data.get('assets', [])
+# prefer the first .zip asset
+for a in assets:
+    if a.get('name','').endswith('.zip'):
+        print(a['browser_download_url'])
+        break
+" 2>/dev/null)
+
+    if [ -z "$asset_url" ]; then
+        log_error "[multilang] Could not resolve Multilang release asset — skipping"
+        return 1
+    fi
+    log_info "[multilang] Asset: $asset_url"
+
+    # Download
+    local ml_work="$TEMP_DIR/multilang"
+    rm -rf "$ml_work" && mkdir -p "$ml_work"
+    curl -sSfL -H "Authorization: token ${GITHUB_TOKEN}" \
+        -o "$ml_work/multilang.zip" "$asset_url"
+    if [ $? -ne 0 ] || [ ! -s "$ml_work/multilang.zip" ]; then
+        log_error "[multilang] Download failed — skipping"
+        return 1
+    fi
+
+    # Extract
+    unzip -qq -o "$ml_work/multilang.zip" -d "$ml_work/extracted"
+    log_info "[multilang] Extracted $(find "$ml_work/extracted" -name "*.apk" | wc -l) APKs"
+
+    # Push all .apk from any overlay/ subdirectory → product/overlay/
+    mkdir -p "$overlay_dst"
+    local pushed=0
+    while IFS= read -r -d '' apk; do
+        # Only install APKs that live inside a directory named 'overlay'
+        local parent_dir
+        parent_dir=$(basename "$(dirname "$apk")")
+        if [ "$parent_dir" == "overlay" ]; then
+            cp -f "$apk" "$overlay_dst/"
+            log_success "[multilang] ✓ $(basename "$apk")"
+            pushed=$((pushed + 1))
+        fi
+    done < <(find "$ml_work/extracted" -name "*.apk" -print0)
+
+    rm -rf "$ml_work"
+
+    if [ "$pushed" -eq 0 ]; then
+        log_warning "[multilang] No overlay APKs found in archive"
+        return 1
+    fi
+
+    log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    log_success "✅ Multi-Language: $pushed overlay APK(s) → product/overlay/"
+    log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    return 0
 }
 
 # =========================================================
@@ -2213,14 +2269,14 @@ for part in $LOGICALS; do
             mkdir -p "$APP_ROOT" "$PRIV_ROOT"
             
             P_APP="SoundPickerGoogle MiuiBiometric LatinImeGoogle GoogleTTS GooglePartnerSetup GeminiShell"
-            P_PRIV="Wizard Velvet Phonesky MIUIPackageInstaller GoogleRestore GooglePartnerSetup Assistant AndroidAutoStub"
+            P_PRIV="Velvet Phonesky MIUIPackageInstaller GoogleRestore GooglePartnerSetup Assistant AndroidAutoStub"
             
             install_gapp_logic "$P_PRIV" "$PRIV_ROOT"
             install_gapp_logic "$P_APP" "$APP_ROOT"
         fi
 
-        # B2. MIUI MOD INJECTION (optional, triggered by MODS_SELECTED)
-        if [ -n "$MODS_SELECTED" ]; then
+        # B2. MIUI MOD INJECTION (optional, triggered by MODS_SELECTED, product only)
+        if [ "$part" == "product" ] && [ -n "$MODS_SELECTED" ]; then
             log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             log_step "🧩 MIUI MOD INJECTION"
             log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -2234,6 +2290,9 @@ for part in $LOGICALS; do
             fi
             if [[ ",$MODS_SELECTED," == *",securitycenter,"* ]]; then
                 inject_security_mod "$DUMP_DIR"
+            fi
+            if [[ ",$MODS_SELECTED," == *",multilang,"* ]]; then
+                push_multilang "$DUMP_DIR"
             fi
 
             log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -2517,12 +2576,7 @@ PYTHON_EOF
         # ── system partition ──────────────────────────────────────
         if [ "$part" == "system" ]; then
 
-            # D1. Signature verification bypass (framework.jar)
-            _run_dex_patch "SIGNATURE BYPASS" "framework-sig" \
-                "$(find "$DUMP_DIR" -path "*/framework/framework.jar" -type f | head -n1)"
-            cd "$GITHUB_WORKSPACE"
-
-            # D2. services.jar — suppress error dialogs
+            # D1. services.jar — suppress error dialogs
             #   Dynamic: scans ALL ActivityManagerService$$ExternalSyntheticLambda* classes
             #   for the one that calls showSystemReadyErrorDialogsIfNeeded and stubs its run().
             #   Falls back to stubbing showSystemReadyErrorDialogsIfNeeded directly in
@@ -2536,7 +2590,7 @@ PYTHON_EOF
         # ── product partition ────────────────────────────────────────
         if [ "$part" == "product" ]; then
 
-            # D3. AI Voice Recorder — exact path: product/data-app/...
+            # D2. AI Voice Recorder — exact path: product/data-app/...
             _RECORDER_APK=$(find "$DUMP_DIR" \
                 -path "*/data-app/MIUISoundRecorderTargetSdk30/MIUISoundRecorderTargetSdk30.apk" \
                 -type f | head -n1)
@@ -2558,7 +2612,20 @@ PYTHON_EOF
         # ── system_ext partition ──────────────────────────────────
         if [ "$part" == "system_ext" ]; then
 
-            # D4. Settings AI + Region unlock (IS_GLOBAL_BUILD in locale classes)
+            # B3. WIZARD APK — must live in system_ext/priv-app (not product)
+            if [ -d "$GITHUB_WORKSPACE/gapps_src" ]; then
+                _WIZ_SRC=$(find "$GITHUB_WORKSPACE/gapps_src" -name "Wizard.apk" -print -quit)
+                if [ -f "$_WIZ_SRC" ]; then
+                    mkdir -p "$DUMP_DIR/priv-app/Wizard"
+                    cp "$_WIZ_SRC" "$DUMP_DIR/priv-app/Wizard/Wizard.apk"
+                    chmod 644 "$DUMP_DIR/priv-app/Wizard/Wizard.apk"
+                    log_success "✓ Wizard.apk → system_ext/priv-app/Wizard/"
+                else
+                    log_warning "Wizard.apk not found in gapps_src — skipping"
+                fi
+            fi
+
+            # D3. Settings AI + Region unlock (IS_GLOBAL_BUILD in locale classes)
             _SETTINGS_APK="$(find "$DUMP_DIR" -name "Settings.apk" -type f | head -n1)"
             _run_dex_patch "SETTINGS AI"     "settings-ai"     "$_SETTINGS_APK"
             cd "$GITHUB_WORKSPACE"
@@ -2619,22 +2686,22 @@ PYTHON_EOF
             rm -rf "$_OPS_WORK" "$_OPS_DEX"
             cd "$GITHUB_WORKSPACE"
 
-            # D5. Provision GMS support
+            # D4. Provision GMS support
             _run_dex_patch "PROVISION GMS" "provision-gms" \
                 "$(find "$DUMP_DIR" -name "Provision.apk" -type f | head -n1)"
             cd "$GITHUB_WORKSPACE"
 
-            # D6. MIUI service CN→Global
+            # D5. MIUI service CN→Global
             _run_dex_patch "MIUI SERVICE CN→GLOBAL" "miui-service" \
                 "$(find "$DUMP_DIR" -name "miui-services.jar" -type f | head -n1)"
             cd "$GITHUB_WORKSPACE"
 
-            # D7. SystemUI: VoLTE + QuickShare + WhatsApp notification fix
+            # D6. SystemUI: VoLTE + QuickShare + WhatsApp notification fix
             _run_dex_patch "SYSTEMUI ALL" "systemui-volte" \
                 "$(find "$DUMP_DIR" \( -name "MiuiSystemUI.apk" -o -name "SystemUI.apk" \) -type f | head -n1)"
             cd "$GITHUB_WORKSPACE"
 
-            # D8. miui-framework: IS_INTERNATIONAL_BUILD(13 classes) + showSystemReadyErrorDialogsIfNeeded
+            # D7. miui-framework: IS_INTERNATIONAL_BUILD(13 classes) + showSystemReadyErrorDialogsIfNeeded
             _FW_JAR="$(find "$DUMP_DIR" -name "miui-framework.jar" -type f | head -n1)"
             _run_dex_patch "MIUI FRAMEWORK" "miui-framework" "$_FW_JAR"
             cd "$GITHUB_WORKSPACE"
@@ -2713,7 +2780,7 @@ SRED_PY
                 cd "$GITHUB_WORKSPACE"
             fi
 
-            # D9. nexdroid.rc — bootloader spoof init script
+            # D8. nexdroid.rc — bootloader spoof init script
             log_info "💉 Writing nexdroid.rc bootloader spoof..."
             _INIT_DIR="$DUMP_DIR/etc/init"
             mkdir -p "$_INIT_DIR"
@@ -3019,12 +3086,12 @@ if [ ! -z "$TELEGRAM_TOKEN" ] && [ ! -z "$CHAT_ID" ]; then
     # We use a simplified text for the JSON to ensure it doesn't break.
     
     SAFE_TEXT="🔥 NexDroid Build Compiled
------------------
-
-Device  : $DEVICE_CODE
-Version : $OS_VER
-Android : $ANDROID_VER
-Built   : $BUILD_DATE
+• • • • • • • • • •
+\`📣 Info:\`
+📱 Device  : $DEVICE_CODE
+🏷️ Version : $OS_VER
+🤖 Android : $ANDROID_VER
+⌛ Built   : $BUILD_DATE
 
 \`⚙️ Patches Applied:\`
 📦 Mods: \`$MODS_SELECTED\`
