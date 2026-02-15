@@ -22,6 +22,39 @@ log_warning() { echo -e "${YELLOW}[WARNING]${NC} $(date +"%H:%M:%S") - $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $(date +"%H:%M:%S") - $1"; }
 log_step() { echo -e "${MAGENTA}[STEP]${NC} $(date +"%H:%M:%S") - $1"; }
 
+# --- TELEGRAM PROGRESS STREAMING ---
+TG_MSG_ID=""
+
+tg_progress() {
+    # Usage: tg_progress "Status Message"
+    [ -z "$TELEGRAM_TOKEN" ] || [ -z "$CHAT_ID" ] && return
+
+    local msg="$1"
+    local timestamp=$(date +"%H:%M:%S")
+    local full_text="🚀 *NexDroid Build Status*
+\`$DEVICE_CODE | $OS_VER\`
+
+$msg
+_Last Update: $timestamp_"
+
+    if [ -z "$TG_MSG_ID" ]; then
+        # Send initial message
+        local resp
+        resp=$(curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
+            -d chat_id="$CHAT_ID" \
+            -d parse_mode="Markdown" \
+            -d text="$full_text")
+        TG_MSG_ID=$(echo "$resp" | jq -r '.result.message_id')
+    else
+        # Edit existing message
+        curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/editMessageText" \
+            -d chat_id="$CHAT_ID" \
+            -d message_id="$TG_MSG_ID" \
+            -d parse_mode="Markdown" \
+            -d text="$full_text" >/dev/null
+    fi
+}
+
 # --- INPUTS ---
 ROM_URL="$1"
 MODS_SELECTED="${2:-}"   # comma-separated: launcher,thememanager,securitycenter
@@ -1874,6 +1907,10 @@ inject_security_mod() {
 # =========================================================
 #  4. DOWNLOAD & EXTRACT ROM
 # =========================================================
+# =========================================================
+#  4. DOWNLOAD & EXTRACT ROM
+# =========================================================
+tg_progress "⬇️ **Downloading ROM...**"
 log_step "📦 Downloading ROM..."
 cd "$TEMP_DIR"
 START_TIME=$(date +%s)
@@ -1891,6 +1928,9 @@ log_step "📂 Extracting ROM payload..."
 unzip -qq -o "rom.zip" payload.bin && rm "rom.zip" 
 log_success "Payload extracted"
 
+log_success "Payload extracted"
+
+tg_progress "📂 **Extracting Firmware...**"
 log_step "🔍 Extracting firmware images..."
 START_TIME=$(date +%s)
 payload-dumper-go -o "$IMAGES_DIR" payload.bin > /dev/null 2>&1
@@ -2068,6 +2108,7 @@ chmod +x "$BIN_DIR/vbmeta_patcher.py"
 log_success "✓ Professional vbmeta patcher ready"
 
 # Patch vbmeta.img
+tg_progress "🔓 **Disabling Verification...**"
 VBMETA_IMG="$IMAGES_DIR/vbmeta.img"
 if [ -f "$VBMETA_IMG" ]; then
     log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -2128,6 +2169,10 @@ log_step "━━━━━━━━━━━━━━━━━━━━━━━�
 # =========================================================
 #  5. PARTITION MODIFICATION LOOP
 # =========================================================
+# =========================================================
+#  5. PARTITION MODIFICATION LOOP
+# =========================================================
+tg_progress "🔄 **Processing Partitions...**"
 log_step "🔄 Processing Partitions..."
 LOGICALS="system system_ext product mi_ext vendor odm"
 
@@ -3221,6 +3266,7 @@ done
 #  6. PACKAGING & UPLOAD
 # =========================================================
 log_step "📦 Creating Final Package..."
+tg_progress "🗜️ **Packing ROM...**"
 PACK_DIR="$OUTPUT_DIR/Final_Pack"
 mkdir -p "$PACK_DIR/super" "$PACK_DIR/images"
 
@@ -3282,6 +3328,7 @@ else
 fi
 
 log_step "☁️  Uploading to PixelDrain..."
+tg_progress "☁️ **Uploading to PixelDrain...**"
 cd "$OUTPUT_DIR"
 
 upload() {
@@ -3310,28 +3357,51 @@ fi
 # =========================================================
 #  7. TELEGRAM NOTIFICATION
 # =========================================================
+# =========================================================
+#  7. TELEGRAM NOTIFICATION
+# =========================================================
 if [ ! -z "$TELEGRAM_TOKEN" ] && [ ! -z "$CHAT_ID" ]; then
     log_step "📣 Sending Telegram notification..."
+    tg_progress "✅ **Build Complete! Sending report...**"
+    
     BUILD_DATE=$(date +"%Y-%m-%d %H:%M")
     
-    MSG_TEXT="**NEXDROID BUILD COMPLETE**
----------------------------
-\`Device  : $DEVICE_CODE\`
-\`Version : $OS_VER\`
-\`Android : $ANDROID_VER\`
-\`Built   : $BUILD_DATE\`"
+    # Delete the progress message so the final report is fresh (optional, but cleaner)
+    curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/deleteMessage" \
+        -d chat_id="$CHAT_ID" \
+        -d message_id="$TG_MSG_ID" >/dev/null
+
+    MSG_TEXT="✅ *NEXDROID BUILD SUCCESS*
+━━━━━━━━━━━━━━━━━━
+📱 *Device:* \`$DEVICE_CODE\`
+💿 *Version:* \`$OS_VER\`
+🤖 *Android:* \`$ANDROID_VER\`
+📦 *Size:* \`$ZIP_SIZE\`
+🕒 *Built:* \`$BUILD_DATE\`
+
+🛠 *Modifications:*
+• Verification Disabled
+• Bloatware Removed
+• GApps Injected
+• Performance Boosted
+• Custom Mods: \`$MODS_SELECTED\`
+
+_Click the button below to download or upload to cloud._"
 
     JSON_PAYLOAD=$(jq -n \
         --arg chat_id "$CHAT_ID" \
         --arg text "$MSG_TEXT" \
         --arg url "$LINK_ZIP" \
-        --arg btn "$BTN_TEXT" \
+        --arg btn "⬇️ Download ROM" \
         '{
             chat_id: $chat_id,
             parse_mode: "Markdown",
             text: $text,
             reply_markup: {
-                inline_keyboard: [[{text: $btn, url: $url}]]
+                inline_keyboard: [
+                    [{text: $btn, url: $url}],
+                    [{text: "☁️ Save to Cloud", url: $url}]
+                ]
             }
         }')
 
