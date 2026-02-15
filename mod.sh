@@ -540,21 +540,24 @@ def _iter_code_items(data: bytes, hdr: dict):
                 break
 
         midx = 0
-        for _ in range(dm + vm):
-            try:
-                d, pos   = _uleb128(data, pos); midx += d
-                _,  pos  = _uleb128(data, pos)          # access_flags
-                code_off, pos = _uleb128(data, pos)
-            except Exception: break
-            if code_off == 0: continue
-            try:
-                mid_base  = hdr['method_ids_off'] + midx * 8
-                name_sidx = struct.unpack_from('<I', data, mid_base + 4)[0]
-                mname     = _get_str(data, hdr, name_sidx)
-                insns_size = struct.unpack_from('<I', data, code_off + 12)[0]
-                yield code_off + 16, insns_size * 2, type_str, mname
-            except Exception:
-                continue
+        for phase in range(2):
+            count = dm if phase == 0 else vm
+            if phase == 1: midx = 0   # DEX spec: virtual method list restarts absolute
+            for _ in range(count):
+                try:
+                    d, pos   = _uleb128(data, pos); midx += d
+                    _,  pos  = _uleb128(data, pos)          # access_flags
+                    code_off, pos = _uleb128(data, pos)
+                except Exception: break
+                if code_off == 0: continue
+                try:
+                    mid_base  = hdr['method_ids_off'] + midx * 8
+                    name_sidx = struct.unpack_from('<I', data, mid_base + 4)[0]
+                    mname     = _get_str(data, hdr, name_sidx)
+                    insns_size = struct.unpack_from('<I', data, code_off + 12)[0]
+                    yield code_off + 16, insns_size * 2, type_str, mname
+                except Exception:
+                    continue
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -812,18 +815,22 @@ def binary_patch_method(dex: bytearray, class_desc: str, method_name: str,
 
     code_off = None
     midx = 0
-    for _ in range(dm + vm):
-        d, pos = _uleb128(data, pos); midx += d
-        _, pos = _uleb128(data, pos)
-        c_off, pos = _uleb128(data, pos)
-        if c_off == 0: continue
-        try:
-            mid_base  = hdr['method_ids_off'] + midx * 8
-            name_sidx = struct.unpack_from('<I', data, mid_base + 4)[0]
-            if _get_str(data, hdr, name_sidx) == method_name:
-                code_off = c_off; break
-        except Exception:
-            continue
+    for phase in range(2):
+        count = dm if phase == 0 else vm
+        if phase == 1: midx = 0   # DEX spec: virtual method list restarts absolute
+        for _ in range(count):
+            d, pos = _uleb128(data, pos); midx += d
+            _, pos = _uleb128(data, pos)
+            c_off, pos = _uleb128(data, pos)
+            if c_off == 0: continue
+            try:
+                mid_base  = hdr['method_ids_off'] + midx * 8
+                name_sidx = struct.unpack_from('<I', data, mid_base + 4)[0]
+                if _get_str(data, hdr, name_sidx) == method_name:
+                    code_off = c_off; break
+            except Exception:
+                continue
+        if code_off is not None: break
 
     if code_off is None:
         warn(f"  Method {method_name} not found"); return False
@@ -1025,6 +1032,45 @@ def _find_string_idx(data: bytes, hdr: dict, target: str) -> Optional[int]:
         if s < target:  lo = mid + 1
         else:           hi = mid - 1
     return None
+
+def binary_replace_string_data(dex: bytearray, old_str: str, new_str: str) -> int:
+    """
+    In-place replacement of string DATA bytes in the DEX string pool.
+    Replacement must be <= same byte length as original.
+    Returns count of replacements (0 or 1).
+    """
+    data = bytes(dex)
+    hdr  = _parse_header(data)
+    if not hdr: return 0
+
+    old_bytes = old_str.encode('utf-8')
+    new_bytes = new_str.encode('utf-8')
+
+    if len(new_bytes) > len(old_bytes):
+        warn(f"  Replacement '{new_str}' ({len(new_bytes)}B) longer than "
+             f"'{old_str}' ({len(old_bytes)}B) -- cannot patch in-place")
+        return 0
+
+    idx = _find_string_idx(data, hdr, old_str)
+    if idx is None:
+        warn(f"  String '{old_str}' not in DEX pool -- skip")
+        return 0
+
+    str_data_off = struct.unpack_from('<I', data, hdr['string_ids_off'] + idx * 4)[0]
+    _, content_off = _uleb128(data, str_data_off)
+
+    for i, b in enumerate(new_bytes):
+        dex[content_off + i] = b
+    for i in range(len(new_bytes), len(old_bytes)):
+        dex[content_off + i] = 0x00
+
+    if len(new_str) != len(old_str):
+        if len(new_str) < 128:
+            dex[str_data_off] = len(new_str)
+
+    _fix_checksums(dex)
+    ok(f"  String data '{old_str}' -> '{new_str}' patched in-place")
+    return 1
 
 def binary_swap_string(dex: bytearray, old_str: str, new_str: str,
                        only_class: str = None) -> int:
@@ -1600,16 +1646,23 @@ def _qsb_debloat_patch(dex_name: str, dex: bytearray) -> bool:
     patched = False
     raw = bytes(dex)
 
-    # Pass 1: Search engine default — "baidu" → "google"
-    if b'baidu' in raw and b'google' in raw and b'searchengine' in raw:
-        n = binary_swap_string(dex, 'baidu', 'google',
-                              only_class='searchengine')
-        if n > 0:
-            patched = True
-            raw = bytes(dex)
-            ok(f"  Pass 1: {n} x 'baidu' -> 'google' in searchengine classes")
+    # Pass 1: Search engine default
+    if b'baidu' in raw:
+        if b'google' in raw:
+            n = binary_swap_string(dex, 'baidu', 'google',
+                                  only_class='searchengine')
+            if n > 0:
+                patched = True
+                raw = bytes(dex)
+                ok(f"  Pass 1: {n} x 'baidu' -> 'google' (index swap)")
+        if not patched and b'searchengine' in raw:
+            n = binary_replace_string_data(dex, 'baidu', '')
+            if n > 0:
+                patched = True
+                raw = bytes(dex)
+                ok("  Pass 1: 'baidu' string data cleared")
 
-    # Pass 2: Homepage ads — getShowAdMark() → return false
+    # Pass 2: Homepage ads
     if b'HomepageAdData' in raw and b'getShowAdMark' in raw:
         if binary_patch_method(dex,
                 'com/android/quicksearchbox/bean/HomepageAdData',
@@ -1618,7 +1671,7 @@ def _qsb_debloat_patch(dex_name: str, dex: bytearray) -> bool:
             raw = bytes(dex)
             ok("  Pass 2: HomepageAdData.getShowAdMark() -> return false")
 
-    # Pass 3: Landing page ads — LandingPageService.onTransact → return true
+    # Pass 3: Landing page ads
     if b'LandingPageService' in raw and b'onTransact' in raw:
         if binary_patch_method(dex,
                 'com/miui/systemAdSolution/landingPage/LandingPageService',
@@ -1627,21 +1680,21 @@ def _qsb_debloat_patch(dex_name: str, dex: bytearray) -> bool:
             raw = bytes(dex)
             ok("  Pass 3: LandingPageService.onTransact() -> return true")
 
-    # Pass 4: App suggestions — redirect API endpoint
+    # Pass 4: App suggestions
     if b'/qsb/getAppSuggest' in raw:
-        n = binary_swap_string(dex, '/qsb/getAppSuggest', '/qsb/getAppDisabled')
+        n = binary_replace_string_data(dex, '/qsb/getAppSuggest', '/qsb/_disabled_')
         if n > 0:
             patched = True
             raw = bytes(dex)
-            ok(f"  Pass 4: {n} x getAppSuggest endpoint redirected")
+            ok("  Pass 4: getAppSuggest endpoint broken")
 
-    # Pass 5: Hotword ads — break ad model JSON key
+    # Pass 5: Hotword ads
     if b'hotWord.adModelInfo' in raw:
-        n = binary_swap_string(dex, 'hotWord.adModelInfo', 'hotWord.adModelNone')
+        n = binary_replace_string_data(dex, 'hotWord.adModelInfo', 'hotWord.adModelNone')
         if n > 0:
             patched = True
             raw = bytes(dex)
-            ok(f"  Pass 5: {n} x hotWord ad model key renamed")
+            ok("  Pass 5: hotWord ad model key renamed")
 
     return patched
 
