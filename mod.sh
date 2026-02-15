@@ -1757,7 +1757,8 @@ inject_miui_mod() {
     fi
 
     log_info "[$label] Extracting..."
-    tg_progress "🧩 **Mod:** Extracting \`$label\`..."
+    log_info "[$label] Extracting..."
+    # tg_progress removed as per user request
     unzip -qq -o "$zip_path" -d "$MOD_EXTRACT_DIR"
     rm -f "$zip_path"
 
@@ -2524,7 +2525,7 @@ PYTHON_EOF
                 return 0
             fi
             log_info "$label → $(basename "$archive")"
-            tg_progress "🔨 **Patching:** \`$label\`"
+            # tg_progress removed as per user request
             python3 "$BIN_DIR/dex_patcher.py" "$cmd" "$archive" 2>&1 | \
             while IFS= read -r line; do
                 case "$line" in
@@ -2893,13 +2894,23 @@ sys.exit(0)
                 # ── Step 1: Install required MIUI frameworks ──────────────
                 log_info "  [Step 1] Installing frameworks into apktool registry..."
                 
-                # Robust search for framework APKs in dumped partitions
-                _FW_RES=$(find "$DUMP_DIR" -name "framework-res.apk" -type f 2>/dev/null | head -1)
-                _MIUI_FW_RES=$(find "$DUMP_DIR" -name "miui-framework-res.apk" -type f 2>/dev/null | head -1)
-                _MIUI_FW_JAR=$(find "$DUMP_DIR" -name "miui-framework.jar" -type f 2>/dev/null | head -1)
+                # Robust search (case-insensitive, recursive in DUMP_DIR and GITHUB_WORKSPACE)
+                # Find any file matching *framework-res.apk (miui-, framework-, etc)
+                # But we need specific ones.
+                
+                _FW_RES=$(find "$DUMP_DIR" "$GITHUB_WORKSPACE" -iname "framework-res.apk" -type f 2>/dev/null | head -1)
+                _MIUI_FW_RES=$(find "$DUMP_DIR" "$GITHUB_WORKSPACE" -iname "miui-framework-res.apk" -type f 2>/dev/null | head -1)
+                _MIUI_FW_JAR=$(find "$DUMP_DIR" "$GITHUB_WORKSPACE" -iname "miui-framework.jar" -type f 2>/dev/null | head -1)
 
-                # Fallback search in case dump structure varies
-                [ -z "$_MIUI_FW_RES" ] && _MIUI_FW_RES=$(find "$GITHUB_WORKSPACE" -name "miui-framework-res.apk" -type f 2>/dev/null | head -1)
+                if [ -z "$_MIUI_FW_RES" ]; then
+                     log_warning "  ⚠️ miui-framework-res.apk NOT FOUND in dump! Color patch requires it."
+                     # Try to find anything with 'miui' and 'framework' and 'res' and 'apk'
+                     _FUZZY=$(find "$DUMP_DIR" -iname "*miui*framework*res*.apk" -type f 2>/dev/null | head -1)
+                     if [ -n "$_FUZZY" ]; then
+                         log_info "  Found fuzzy match: $_FUZZY"
+                         _MIUI_FW_RES="$_FUZZY"
+                     fi
+                fi
 
                 for _fw_file in "$_FW_RES" "$_MIUI_FW_RES" "$_MIUI_FW_JAR"; do
                     [ -z "$_fw_file" ] && continue
@@ -3379,20 +3390,20 @@ if [ ! -z "$TELEGRAM_TOKEN" ] && [ ! -z "$CHAT_ID" ]; then
     # We strip special characters from MSG_TEXT for safety if needed, but jq handles most.
     # We use a simplified text for the JSON to ensure it doesn't break.
     
-    SAFE_TEXT="✅ *NEXDROID BUILD SUCCESS*
-━━━━━━━━━━━━━━━━━━
-📱 *Device:* \`$DEVICE_CODE\`
-💿 *Version:* \`$OS_VER\`
-🤖 *Android:* \`$ANDROID_VER\`
-📦 *Size:* \`$ZIP_SIZE\`
-🕒 *Built:* \`$BUILD_DATE\`
+    SAFE_TEXT="NEXDROID BUILD COMPLETE
+---------------------------
+\`in quotes\`
+Device  : $DEVICE_CODE
+Version : $OS_VER
+Android : $ANDROID_VER
+Built   : $BUILD_DATE
 
-🛠 *Modifications:*
-• Verification Disabled
-• Bloatware Removed
-• GApps Injected
-• Performance Boosted
-• Custom Mods: \`$MODS_SELECTED\`
+\`work done\`
+All patches applied successfully.
+Mods: \`$MODS_SELECTED\`
+
+\`error\`
+No critical errors.
 
 _Click the button below to download._"
 
