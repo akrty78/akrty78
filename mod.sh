@@ -493,16 +493,6 @@ def _get_type_str(data: bytes, hdr: dict, tidx: int) -> str:
 
 # ════════════════════════════════════════════════════════════════════
 #  CODE-ITEM ITERATOR  (THE FIX for sget-boolean false-positives)
-#
-#  Previous approach scanned raw DEX bytes from offset 0x70 linearly.
-#  When a 0x60 byte appears in string/type/field index tables and the
-#  next two bytes happen to match a target field index, the scanner
-#  advances 4 bytes instead of 2 — misaligning all subsequent scans
-#  and missing real sget-boolean instructions in code sections.
-#
-#  Correct approach: iterate only over verified code_item instruction
-#  arrays by walking class_defs → class_data_item → encoded_method.
-#  Each insns array IS a valid aligned instruction stream.
 # ════════════════════════════════════════════════════════════════════
 
 def _iter_code_items(data: bytes, hdr: dict):
@@ -526,11 +516,6 @@ def _iter_code_items(data: bytes, hdr: dict):
             dm,  pos = _uleb128(data, pos); vm,  pos = _uleb128(data, pos)
         except Exception: continue
 
-        # skip fields: _uleb128 + break is intentional.
-        # _skip_uleb128 mis-advances pos for classes like OtherPersonalSettings
-        # whose class_data has variable-width ULEB128 field entries.
-        # The original _uleb128+break was verified to work for all Settings classes.
-        # Kotlin inner/coroutine classes in SystemUI are handled by _raw_sget_scan.
         for _ in range(sf + inf):
             try:
                 _, pos = _uleb128(data, pos)   # field_idx_diff
@@ -592,27 +577,10 @@ def _find_method_ids_by_name(data: bytes, hdr: dict, method_name: str) -> set:
 
 # ════════════════════════════════════════════════════════════════════
 #  RAW BYTE SCANNER  (second-pass fallback)
-#
-#  _iter_code_items can miss code_items when class_data ULEB128 parsing
-#  goes wrong for Kotlin inner/coroutine classes (e.g., $bind$1$1$10).
-#  Those classes have many synthetic captured fields; if even one ULEB128
-#  read is mis-stepped, pos ends up wrong and method code_offs are garbage,
-#  silently skipping the whole class.
-#
-#  This scanner bypasses class_data entirely: it scans raw DEX bytes in
-#  2-byte steps (code-unit aligned) starting after all static tables,
-#  looking for [SGET_OPCODE] [reg] [field_lo] [field_hi].
-#  Already-patched slots are 0x12/0x13 — not in SGET_OPCODES — so it
-#  never double-patches and is safe to call after the normal sweep.
 # ════════════════════════════════════════════════════════════════════
 
 def _raw_sget_scan(dex: bytearray, field_class: str, field_name: str,
                    use_const4: bool = False) -> int:
-    """
-    Raw second-pass: scan DEX bytes 2 bytes at a time from the data section
-    start for sget-* instructions referencing field_class->field_name.
-    Returns count of additional replacements (those missed by _iter_code_items).
-    """
     data = bytes(dex)
     hdr  = _parse_header(data)
     if not hdr: return 0
@@ -622,9 +590,7 @@ def _raw_sget_scan(dex: bytearray, field_class: str, field_name: str,
 
     SGET_OPCODES = frozenset([0x60, 0x63, 0x64, 0x65, 0x66])
 
-    # Scan start: right after class_defs table (last static table before data)
     scan_start = hdr['class_defs_off'] + hdr['class_defs_size'] * 32
-    # Round up to 4-byte boundary (code_items are 4-byte aligned)
     if scan_start & 3:
         scan_start = (scan_start | 3) + 1
 
@@ -645,7 +611,6 @@ def _raw_sget_scan(dex: bytearray, field_class: str, field_name: str,
                     raw[i + 2] = 0x00
                     raw[i + 3] = 0x00
                 else:
-                    # const/16 vAA, 0x1  (opcode 0x13, format 21s)
                     raw[i]     = 0x13
                     raw[i + 1] = reg
                     raw[i + 2] = 0x01
@@ -653,7 +618,7 @@ def _raw_sget_scan(dex: bytearray, field_class: str, field_name: str,
                 count += 1
                 i += 4
                 continue
-        i += 2   # step by one code unit (2 bytes), instruction-aligned
+        i += 2
 
     if count:
         mode = "const/4" if use_const4 else "const/16"
@@ -674,28 +639,12 @@ def _fix_checksums(dex: bytearray):
     struct.pack_into('<I', dex, 8, adler)
 
 def _clear_method_annotations(dex: bytearray, class_desc: str, method_name: str) -> bool:
-    """
-    Zero the annotations_off entry for a specific method inside the DEX
-    annotations_directory_item. This stops baksmali from emitting Signature
-    (or any other) annotation blocks for that method.
-
-    class_def_item layout (32 bytes):
-      +0  class_idx
-      +4  access_flags
-      +8  superclass_idx
-      +12 interfaces_off
-      +16 source_file_idx
-      +20 annotations_off   ← annotations_directory_item
-      +24 class_data_off
-      +28 static_values_off
-    """
     data = bytes(dex)
     hdr  = _parse_header(data)
     if not hdr: return False
 
     target_type = f'L{class_desc};'
 
-    # 1. Find class_def row for target class
     class_def_base = None
     for i in range(hdr['class_defs_size']):
         base    = hdr['class_defs_off'] + i * 32
@@ -714,7 +663,6 @@ def _clear_method_annotations(dex: bytearray, class_desc: str, method_name: str)
     class_data_off   = struct.unpack_from('<I', data, class_def_base + 24)[0]
     if annotations_off == 0 or class_data_off == 0: return False
 
-    # 2. Walk class_data_item to find the absolute method_idx for method_name
     target_midx = None
     pos = class_data_off
     sf, pos  = _uleb128(data, pos)
@@ -726,8 +674,8 @@ def _clear_method_annotations(dex: bytearray, class_desc: str, method_name: str)
     midx = 0
     for _ in range(dm + vm):
         d,   pos = _uleb128(data, pos); midx += d
-        _,   pos = _uleb128(data, pos)   # access_flags
-        _,   pos = _uleb128(data, pos)   # code_off
+        _,   pos = _uleb128(data, pos)
+        _,   pos = _uleb128(data, pos)
         try:
             mid_base  = hdr['method_ids_off'] + midx * 8
             name_sidx = struct.unpack_from('<I', data, mid_base + 4)[0]
@@ -739,22 +687,18 @@ def _clear_method_annotations(dex: bytearray, class_desc: str, method_name: str)
 
     if target_midx is None: return False
 
-    # 3. Parse annotations_directory_item to locate this method's entry
-    #    Header: class_annotations_off(4), fields_size(4),
-    #            annotated_methods_size(4), annotated_parameters_size(4)
     pos = annotations_off
-    pos += 4                                                    # skip class_annotations_off
+    pos += 4
     fields_sz   = struct.unpack_from('<I', data, pos)[0]; pos += 4
     methods_sz  = struct.unpack_from('<I', data, pos)[0]; pos += 4
-    pos += 4                                                    # skip annotated_parameters_size
-    pos += fields_sz * 8                                        # skip field_annotation entries
+    pos += 4
+    pos += fields_sz * 8
 
-    # method_annotation entries: { uint method_idx, uint annotations_off }
     for j in range(methods_sz):
         entry = pos + j * 8
         m_idx = struct.unpack_from('<I', data, entry)[0]
         if m_idx == target_midx:
-            struct.pack_into('<I', dex, entry + 4, 0)   # zero the annotations_off
+            struct.pack_into('<I', dex, entry + 4, 0)
             _fix_checksums(dex)
             ok(f"  Cleared Signature annotation for {method_name}")
             return True
@@ -769,14 +713,6 @@ def _clear_method_annotations(dex: bytearray, class_desc: str, method_name: str)
 def binary_patch_method(dex: bytearray, class_desc: str, method_name: str,
                         stub_regs: int, stub_insns: bytes,
                         trim: bool = False) -> bool:
-    """
-    In-place patch: find method by exact class + name, replace code_item with stub.
-
-    trim=False (default): NOP-pads remainder → keeps insns_size, layout unchanged.
-    trim=True: shrinks insns_size in the header to stub length.
-      → Clean baksmali output (no nop flood, no spurious annotations).
-      → Use for validateTheme and any method where baksmali output matters.
-    """
     data = bytes(dex)
     hdr  = _parse_header(data)
     if not hdr: err("  Not a DEX"); return False
@@ -784,7 +720,6 @@ def binary_patch_method(dex: bytearray, class_desc: str, method_name: str,
     target_type = f'L{class_desc};'
     info(f"  Searching {target_type} → {method_name}")
 
-    # Find class_data_off
     class_data_off = None
     for i in range(hdr['class_defs_size']):
         base    = hdr['class_defs_off'] + i * 32
@@ -802,7 +737,6 @@ def binary_patch_method(dex: bytearray, class_desc: str, method_name: str,
     if class_data_off == 0:
         warn(f"  Class {target_type} has no class_data"); return False
 
-    # Walk methods to find code_item
     pos = class_data_off
     sf, pos = _uleb128(data, pos);  inf, pos = _uleb128(data, pos)
     dm, pos = _uleb128(data, pos);  vm,  pos = _uleb128(data, pos)
@@ -839,31 +773,20 @@ def binary_patch_method(dex: bytearray, class_desc: str, method_name: str,
         err(f"  Stub {stub_units} cu > original {insns_size} cu — cannot patch in-place")
         return False
 
-    # registers_size = stub_regs + orig_ins
-    #   Dalvik frame layout: locals occupy BOTTOM (v0..v(stub_regs-1)),
-    #   parameter registers occupy TOP (v(stub_regs)..v(stub_regs+orig_ins-1)).
-    #   Using max() instead of addition is WRONG when orig_ins > 0:
-    #     max(1,1)=1 → registers_size=1, ins_size=1 → v0 IS p0 (no local slots).
-    #     With const/4 v0, 0x1 / return v0, that writes the param reg, not a local.
-    #   Correct: stub_regs + orig_ins = 1+1 = 2 → v0=local, v1=p0. Clean separation.
     new_regs = stub_regs + orig_ins
 
-    # ── Patch code_item header ────────────────────────────────────────
-    struct.pack_into('<H', dex, code_off + 0, new_regs)   # registers_size
-    struct.pack_into('<H', dex, code_off + 4, 0)           # outs_size = 0
-    struct.pack_into('<H', dex, code_off + 6, 0)           # tries_size = 0
-    struct.pack_into('<I', dex, code_off + 8, 0)           # debug_info_off = 0
+    struct.pack_into('<H', dex, code_off + 0, new_regs)
+    struct.pack_into('<H', dex, code_off + 4, 0)
+    struct.pack_into('<H', dex, code_off + 6, 0)
+    struct.pack_into('<I', dex, code_off + 8, 0)
     if trim:
-        # Shrink insns_size → stub length. No NOP padding written.
-        # Safe: ART locates code_items by offset (class_data_item), not by sequential scan.
         struct.pack_into('<I', dex, code_off + 12, stub_units)
 
-    # ── Write stub + optional NOP padding ────────────────────────────
     for i, b in enumerate(stub_insns):
         dex[insns_off + i] = b
     if not trim:
         for i in range(len(stub_insns), insns_size * 2):
-            dex[insns_off + i] = 0x00   # NOP pad
+            dex[insns_off + i] = 0x00
 
     _fix_checksums(dex)
     nops = 0 if trim else (insns_size - stub_units)
@@ -874,7 +797,6 @@ def binary_patch_method(dex: bytearray, class_desc: str, method_name: str,
 
 # ════════════════════════════════════════════════════════════════════
 #  BINARY PATCH: sget-boolean field → const/4 1 (or const/16 with opcode 0x13)
-#  Scans ONLY within verified code_item instruction arrays.
 # ════════════════════════════════════════════════════════════════════
 
 def binary_patch_sget_to_true(dex: bytearray,
@@ -882,22 +804,6 @@ def binary_patch_sget_to_true(dex: bytearray,
                                only_class:  str = None,
                                only_method: str = None,
                                use_const4:  bool = False) -> int:
-    """
-    Within every code_item instruction array (never raw DEX tables), find:
-      sget-boolean vAA, <field_class>-><field_name>:Z   opcode 0x63, 4 bytes
-    Replace with const/4 or const/16 (both 4 bytes total in the stream):
-
-      use_const4=False (default):
-        const/16 vAA, 0x1   →  13 AA 01 00   (format 21s, 4 bytes)
-
-      use_const4=True (when user specifies const/4 explicitly):
-        const/4  vAA, 0x1   →  12 (0x10|AA) 00 00   (format 11n, 2 bytes + NOP NOP)
-        Only valid for register AA ≤ 15 (always true for low boolean regs).
-
-    Covers all sget variants (0x60/0x63/0x64/0x65/0x66 = format 21c, 4 bytes).
-    Optionally restrict to only_class (substring) and only_method.
-    Returns count of replacements.
-    """
     data = bytes(dex)
     hdr  = _parse_header(data)
     if not hdr: return 0
@@ -908,7 +814,6 @@ def binary_patch_sget_to_true(dex: bytearray,
     for fi in fids:
         info(f"  Found field: {field_class}->{field_name} @ field_id[{fi}] = 0x{fi:04X}")
 
-    # All sget variants (format 21c, 4 bytes): boolean=0x63, plain=0x60, byte=0x64, char=0x65, short=0x66
     SGET_OPCODES = frozenset([0x60, 0x63, 0x64, 0x65, 0x66])
 
     raw   = bytearray(dex)
@@ -925,14 +830,11 @@ def binary_patch_sget_to_true(dex: bytearray,
                 field_lo = struct.unpack_from('<H', raw, insns_off + i + 2)[0]
                 if field_lo in fids:
                     if use_const4 and reg <= 15:
-                        # const/4 vAA, 0x1  (11n: opcode=0x12, byte1=(value<<4)|reg)
                         raw[insns_off + i]     = 0x12
                         raw[insns_off + i + 1] = (0x1 << 4) | reg
-                        raw[insns_off + i + 2] = 0x00   # NOP
-                        raw[insns_off + i + 3] = 0x00   # NOP
+                        raw[insns_off + i + 2] = 0x00
+                        raw[insns_off + i + 3] = 0x00
                     else:
-                        # const/16 vAA, 0x1  (opcode 0x13, format 21s: 4 bytes)
-                        # 0x13 = const/16. NOT 0x15 which is const/high16 (shifts value <<16)
                         raw[insns_off + i]     = 0x13
                         raw[insns_off + i + 1] = reg
                         raw[insns_off + i + 2] = 0x01
@@ -954,8 +856,6 @@ def binary_patch_sget_to_true(dex: bytearray,
 
 # ════════════════════════════════════════════════════════════════════
 #  BINARY PATCH: swap field reference in a specific method
-#  Used for: NotificationUtil::isEmptySummary
-#    IS_INTERNATIONAL_BUILD  →  IS_ALPHA_BUILD
 # ════════════════════════════════════════════════════════════════════
 
 def binary_swap_field_ref(dex: bytearray,
@@ -978,7 +878,6 @@ def binary_swap_field_ref(dex: bytearray,
     if new_fi > 0xFFFF:
         err(f"  New field index 0x{new_fi:X} > 0xFFFF, cannot encode in 21c"); return False
 
-    # All sget variants (0x60–0x66) share format 21c — swap field index in any of them
     SGET_OPCODES = frozenset([0x60, 0x63, 0x64, 0x65, 0x66])
 
     raw = bytearray(dex)
@@ -1010,9 +909,10 @@ def binary_swap_field_ref(dex: bytearray,
 
 # ════════════════════════════════════════════════════════════════════
 #  BINARY PATCH: swap string literal reference
-#  Used for: MIUIFrequentPhrase Gboard redirect (no apktool, no timeout)
-#    const-string/const-string-jumbo that reference old_str → new_str
 # ════════════════════════════════════════════════════════════════════
+
+_BAIDU_IME  = "com.baidu.input_mi"
+_GBOARD_IME = "com.google.android.inputmethod.latin"
 
 def _find_string_idx(data: bytes, hdr: dict, target: str) -> Optional[int]:
     """Binary search the sorted DEX string pool. Returns index or None."""
@@ -1027,13 +927,6 @@ def _find_string_idx(data: bytes, hdr: dict, target: str) -> Optional[int]:
 
 def binary_swap_string(dex: bytearray, old_str: str, new_str: str,
                        only_class: str = None) -> int:
-    """
-    Replace const-string / const-string-jumbo instructions that reference
-    old_str with ones that reference new_str.
-    new_str must already exist in the DEX string pool (not injected).
-    Only scans verified code_item instruction arrays.
-    Returns count of replacements.
-    """
     data = bytes(dex)
     hdr  = _parse_header(data)
     if not hdr: return 0
@@ -1054,13 +947,13 @@ def binary_swap_string(dex: bytearray, old_str: str, new_str: str,
         i = 0
         while i < insns_len - 3:
             op = raw[insns_off + i]
-            if op == 0x1A and i + 3 < insns_len:    # const-string (21c, 4 bytes)
+            if op == 0x1A and i + 3 < insns_len:
                 sidx = struct.unpack_from('<H', raw, insns_off + i + 2)[0]
                 if sidx == old_idx:
                     struct.pack_into('<H', raw, insns_off + i + 2, new_idx & 0xFFFF)
                     count += 1
                 i += 4
-            elif op == 0x1B and i + 5 < insns_len:  # const-string/jumbo (31c, 6 bytes)
+            elif op == 0x1B and i + 5 < insns_len:
                 sidx = struct.unpack_from('<I', raw, insns_off + i + 2)[0]
                 if sidx == old_idx:
                     struct.pack_into('<I', raw, insns_off + i + 2, new_idx)
@@ -1103,10 +996,6 @@ def _inject_dex(archive: Path, dex_name: str, dex_bytes: bytes) -> bool:
         shutil.rmtree(work, ignore_errors=True)
 
 def run_patches(archive: Path, patch_fn, label: str) -> int:
-    """
-    Run patch_fn(dex_name, dex_bytearray) on every DEX.
-    ALWAYS exits 0 — graceful skip when nothing found (user requirement).
-    """
     archive = archive.resolve()
     if not archive.exists():
         warn(f"Archive not found: {archive}"); return 0
@@ -1135,56 +1024,31 @@ def run_patches(archive: Path, patch_fn, label: str) -> int:
         if is_apk: _zipalign(archive)
         ok(f"✅ {label}: {count} DEX(es) patched  ({archive.stat().st_size//1024}K)")
     else:
-        # Graceful skip — archive unchanged (backup exists but nothing was written)
         warn(f"⚠ {label}: no patches applied — archive unchanged")
-    return count   # caller always exits 0
+    return count
 
 
 # ════════════════════════════════════════════════════════════════════
 #  PATCH PROFILES
 # ════════════════════════════════════════════════════════════════════
 
-# ── framework.jar  ───────────────────────────────────────────────
 def _fw_sig_patch(dex_name: str, dex: bytearray) -> bool:
-    """
-    Patch getMinimumSignatureSchemeVersionForTargetSdk → return 1 (const/4 v0, 0x1).
-
-    MUST use trim=True:
-      trim=False (default) leaves the original insns_size in the code_item header
-      and NOP-pads the remainder, producing:
-          const/4 v0, 0x1 ; return v0 ; nop ; nop ; ...
-      trim=True shrinks insns_size to exactly 2 code-units (4 bytes), giving the
-      clean output the verifier and baksmali both expect:
-          const/4 v0, 0x1
-          return v0
-    """
     if b'ApkSignatureVerifier' not in bytes(dex): return False
     return binary_patch_method(dex,
         "android/util/apk/ApkSignatureVerifier",
         "getMinimumSignatureSchemeVersionForTargetSdk", 1, _STUB_TRUE,
         trim=True)
 
-# ── Settings.apk  ────────────────────────────────────────────────
 def _settings_ai_patch(dex_name: str, dex: bytearray) -> bool:
     if b'InternalDeviceUtils' not in bytes(dex): return False
     return binary_patch_method(dex,
         "com/android/settings/InternalDeviceUtils",
         "isAiSupported", 1, _STUB_TRUE)
 
-# ── SoundRecorder APK  ──────────────────────────────────────────
 def _recorder_ai_patch(dex_name: str, dex: bytearray) -> bool:
-    """
-    Two-pass:
-    1. AiDeviceUtil::isAiSupportedDevice → return true.
-       Tries known paths; if class present but path differs, scans all class defs.
-    2. IS_INTERNATIONAL_BUILD (Lmiui/os/Build;) → const/16 1 across entire DEX.
-       Handles region gating that exists alongside the AI method gate.
-    Returns True if either pass patched anything.
-    """
     patched = False
     raw = bytes(dex)
 
-    # Pass 1 — AiDeviceUtil::isAiSupportedDevice
     if b'AiDeviceUtil' in raw:
         for cls in (
             "com/miui/soundrecorder/utils/AiDeviceUtil",
@@ -1199,7 +1063,6 @@ def _recorder_ai_patch(dex_name: str, dex: bytearray) -> bool:
                 break
 
         if not patched:
-            # Package path unknown — scan every class def for AiDeviceUtil
             info("  AiDeviceUtil: scanning all class defs...")
             data = bytes(dex)
             hdr  = _parse_header(data)
@@ -1223,48 +1086,13 @@ def _recorder_ai_patch(dex_name: str, dex: bytearray) -> bool:
                     except Exception:
                         continue
 
-    # Pass 2 — IS_INTERNATIONAL_BUILD region gate
     if b'IS_INTERNATIONAL_BUILD' in raw:
         if binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD') > 0:
             patched = True
 
     return patched
 
-# ── services.jar  ────────────────────────────────────────────────
 def _services_jar_patch(dex_name: str, dex: bytearray) -> bool:
-    """
-    Suppress showSystemReadyErrorDialogsIfNeeded by patching the CALL SITE.
-
-    WHY CALL-SITE NOT METHOD STUB:
-      Stubbing ANY concrete implementation (Case B previously) patches classes
-      like PanningScalingHandler that legitimately implement the interface method
-      for their own purposes — breaking unrelated functionality.
-      The correct approach is to find the invoke-virtual instruction that dispatches
-      through ActivityTaskManagerInternal and NOP it, leaving all implementations
-      untouched.
-
-    TARGET INSTRUCTION:
-      invoke-virtual {vX}, Lcom/android/server/wm/ActivityTaskManagerInternal;
-          ->showSystemReadyErrorDialogsIfNeeded()V
-      opcode: any invoke-* (0x6E-0x72, 0x74-0x78), format 35c or 3rc, 6 bytes
-      ActivityTaskManagerInternal is abstract → call is usually invoke-interface (0x72)
-
-    PATCH:
-      Replace the 6 bytes of the invoke instruction with 0x00 0x00 0x00 0x00 0x00 0x00
-      (3 × NOP code units). Method is void so no move-result follows.
-
-    IDENTIFICATION:
-      The method_id for ActivityTaskManagerInternal::showSystemReadyErrorDialogsIfNeeded
-      is identified by matching BOTH the class type string AND the method name in the
-      method_ids table — not just the name, which would also match implementations in
-      PanningScalingHandler, ActivityTaskManagerService, etc.
-
-    SAFETY:
-      - All 10 invoke-* opcodes (0x6E-0x72, 0x74-0x78) checked; only exact method_id matches NOP'd.
-      - Only exact method_id matches are patched.
-      - All code_item boundaries are respected — scan uses _iter_code_items.
-      - If no call site found: returns False (graceful skip), does not abort build.
-    """
     raw = bytes(dex)
     METHOD   = 'showSystemReadyErrorDialogsIfNeeded'
     TARGET_C = 'Lcom/android/server/wm/ActivityTaskManagerInternal;'
@@ -1275,20 +1103,15 @@ def _services_jar_patch(dex_name: str, dex: bytearray) -> bool:
     hdr = _parse_header(raw)
     if not hdr: return False
 
-    # Step 1: find the specific method_id for ActivityTaskManagerInternal::METHOD
-    #   Must match BOTH class type AND method name.
-    #   Walking all method_ids: method_id_item = { class_idx:H, proto_idx:H, name_idx:I }
     target_mid = None
     for mi in range(hdr['method_ids_size']):
         base = hdr['method_ids_off'] + mi * 8
         try:
             cls_idx   = struct.unpack_from('<H', raw, base + 0)[0]
             name_sidx = struct.unpack_from('<I', raw, base + 4)[0]
-            # Resolve class type
             type_sidx = struct.unpack_from('<I', raw, hdr['type_ids_off'] + cls_idx * 4)[0]
             cls_str   = _get_str(raw, hdr, type_sidx)
             if cls_str != TARGET_C: continue
-            # Resolve method name
             mname = _get_str(raw, hdr, name_sidx)
             if mname != METHOD: continue
             target_mid = mi
@@ -1301,13 +1124,6 @@ def _services_jar_patch(dex_name: str, dex: bytearray) -> bool:
         warn(f"  method_id for {TARGET_C}->{METHOD}() not found in this DEX")
         return False
 
-    # Step 2: scan all code_items for invoke-virtual / invoke-virtual/range
-    #   with this exact method_id and NOP them (6 bytes → 6 × 0x00).
-    # All invoke-* opcodes that embed a method_ref at bytes +2,+3 (LE uint16).
-    # Format 35c (3 code-units, 6 bytes): virtual/super/direct/static/interface
-    # Format 3rc (3 code-units, 6 bytes): same five, range variant
-    # ActivityTaskManagerInternal is abstract, so the call is invoke-interface (0x72).
-    # We catch all variants to be build-agnostic.
     INVOKE_OPS_ALL = {
         0x6E: 'invoke-virtual',       0x6F: 'invoke-super',
         0x70: 'invoke-direct',        0x71: 'invoke-static',
@@ -1321,13 +1137,12 @@ def _services_jar_patch(dex_name: str, dex: bytearray) -> bool:
 
     for insns_off, insns_len, type_str, mname in _iter_code_items(raw, hdr):
         i = 0
-        while i <= insns_len * 2 - 6:   # need 6 bytes ahead
+        while i <= insns_len * 2 - 6:
             op = raw[insns_off + i]
             if op in INVOKE_OPS_ALL:
                 mid_ref = struct.unpack_from('<H', raw, insns_off + i + 2)[0]
                 if mid_ref == target_mid:
                     op_name = INVOKE_OPS_ALL[op]
-                    # NOP out the 6-byte invoke instruction (3 code-units × 0x00)
                     for b in range(6):
                         raw_w[insns_off + i + b] = 0x00
                     ok(f"  NOP'd [{op_name}] call in {type_str}::{mname} @ +{i}")
@@ -1345,23 +1160,7 @@ def _services_jar_patch(dex_name: str, dex: bytearray) -> bool:
     ok(f"  ✓ {METHOD}: {count} call site(s) NOP'd")
     return True
 
-# ── Provision.apk: Utils::setGmsAppEnabledStateForCn  ──────────────
 def _provision_gms_patch(dex_name: str, dex: bytearray) -> bool:
-    """
-    STRICT SCOPE: patch exactly ONE sget-boolean of IS_INTERNATIONAL_BUILD
-    inside Utils::setGmsAppEnabledStateForCn — no other class, no other method.
-
-    Correct encoding:  const/4 v0, 0x1   →   bytes 12 10
-      opcode 0x12, second byte = (value<<4)|reg = (1<<4)|0 = 0x10
-    Wrong encoding from old _intl_build_patch (no use_const4):
-      const/16 v0, 0x1  →  bytes 13 00 01 00  (opcode 0x13, not 0x15 which is const/high16)
-
-    Constraints enforced:
-      - class filter: 'Utils' must be in type_str (catches com/android/provision/Utils)
-      - method filter: exact name 'setGmsAppEnabledStateForCn'
-      - first-occurrence only: count is tracked; abort if 0 matches
-      - use_const4=True: guarantees opcode 0x12 output (const/4)
-    """
     raw = bytes(dex)
     if b'IS_INTERNATIONAL_BUILD' not in raw: return False
     if b'setGmsAppEnabledStateForCn' not in raw: return False
@@ -1378,14 +1177,7 @@ def _provision_gms_patch(dex_name: str, dex: bytearray) -> bool:
     return True
 
 
-# ── miui-services.jar: global IS_INTERNATIONAL_BUILD sweep  ──────────
 def _miui_service_patch(dex_name: str, dex: bytearray) -> bool:
-    """
-    Global sweep of Lmiui/os/Build;->IS_INTERNATIONAL_BUILD in miui-services.jar.
-    No class filter — flips all region gates in the service jar.
-    Uses const/4 (opcode 0x12) which is safe for all boolean registers (always ≤ 15).
-    Replaces the deleted _intl_build_patch which was using 0x15 (const/high16, wrong).
-    """
     raw = bytes(dex)
     if b'IS_INTERNATIONAL_BUILD' not in raw: return False
     n  = binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD',
@@ -1394,31 +1186,10 @@ def _miui_service_patch(dex_name: str, dex: bytearray) -> bool:
                         use_const4=True)
     return n > 0
 
-# ── SystemUI combined: VoLTE + QuickShare + WA notification  ─────
 def _systemui_all_patch(dex_name: str, dex: bytearray) -> bool:
-    """
-    Patch 1 — VoLTE: GLOBAL sweep of Lmiui/os/Build;->IS_INTERNATIONAL_BUILD.
-      No class filter. Targets like MiuiOperatorCustomizedPolicy,
-      MiuiCarrierTextController, MiuiCellularIconVM, MiuiMobileIconBinder
-      and their inner/anonymous classes read this flag via synthetic accessors —
-      the actual sget bytecode lives in those generated accessors, not the named
-      class body. A global sweep catches all of them regardless of which class
-      the compiler emitted the sget into. Uses const/4 vX, 0x1 (fallback const/16
-      if register > 15).
-
-    Patch 2 — QuickShare: Lcom/miui/utils/configs/MiuiConfigs;->IS_INTERNATIONAL_BUILD
-      → const/4 pX, 0x1. Class CurrentTilesInteractorImpl, all methods.
-
-    Patch 3 — WA notification: same MiuiConfigs field → const/4 vX, 0x1.
-      Scoped to NotificationUtil::isEmptySummary.
-    """
     patched = False
     raw = bytes(dex)
 
-    # Patch 1 — VoLTE: global sweep + raw-scan fallback, Lmiui/os/Build, const/4
-    #   Two passes guarantee MiuiMobileIconBinder$bind$1$1$10::invokeSuspend
-    #   and any other Kotlin coroutine class whose code_item _iter_code_items
-    #   mis-steps due to synthetic captured fields in class_data.
     if b'IS_INTERNATIONAL_BUILD' in raw and b'miui/os/Build' in raw:
         n1 = binary_patch_sget_to_true(dex,
                 'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD',
@@ -1430,7 +1201,6 @@ def _systemui_all_patch(dex_name: str, dex: bytearray) -> bool:
             patched = True
             raw = bytes(dex)
 
-    # Patch 2 — QuickShare: CurrentTilesInteractorImpl only, all methods, const/4
     if b'CurrentTilesInteractorImpl' in raw and b'MiuiConfigs' in raw:
         if binary_patch_sget_to_true(dex,
                 'Lcom/miui/utils/configs/MiuiConfigs;', 'IS_INTERNATIONAL_BUILD',
@@ -1439,7 +1209,6 @@ def _systemui_all_patch(dex_name: str, dex: bytearray) -> bool:
             patched = True
             raw = bytes(dex)
 
-    # Patch 3 — WA notification: NotificationUtil::isEmptySummary, const/4
     if b'NotificationUtil' in raw and b'MiuiConfigs' in raw:
         if binary_patch_sget_to_true(dex,
                 'Lcom/miui/utils/configs/MiuiConfigs;', 'IS_INTERNATIONAL_BUILD',
@@ -1450,8 +1219,6 @@ def _systemui_all_patch(dex_name: str, dex: bytearray) -> bool:
 
     return patched
 
-# ── miui-framework.jar  ─────────────────────────────────────────
-# Target classes for IS_INTERNATIONAL_BUILD in miui-framework
 _FW_INTL_CLASSES = [
     'AppOpsManagerInjector',   'NearbyUtils',             'ShortcutFunctionManager',
     'MiInputShortcutFeature',  'MiInputShortcutUtil',     'FeatureConfiguration',
@@ -1461,26 +1228,9 @@ _FW_INTL_CLASSES = [
 ]
 
 def _miui_framework_patch(dex_name: str, dex: bytearray) -> bool:
-    """
-    miui-framework.jar — two binary passes:
-
-    Pass 1 — IS_INTERNATIONAL_BUILD → const/4 1
-      Scoped to 13 specific classes only. These are the framework-side gating
-      classes that block international features. A global sweep is intentionally
-      avoided — it would flip IS_GLOBAL_BUILD-adjacent paths that crash Settings.
-
-    Pass 2 — showSystemReadyErrorDialogsIfNeeded → return-void
-      Scan all classes for ActivityTaskManagerInternal (or any class that defines
-      the method) and stub it. Prevents AMS from showing system-ready error dialogs
-      on CN ROMs running in global mode.
-
-    NOTE: IS_GLOBAL_BUILD is NOT patched here (Settings crash risk).
-          Gboard IME swap is done via apktool in manager (string not in DEX pool).
-    """
     raw = bytes(dex)
     patched = False
 
-    # Pass 1a — IS_INTERNATIONAL_BUILD in 13 framework classes
     if b'IS_INTERNATIONAL_BUILD' in raw:
         n = 0
         for cls in _FW_INTL_CLASSES:
@@ -1490,9 +1240,6 @@ def _miui_framework_patch(dex_name: str, dex: bytearray) -> bool:
             patched = True
             raw = bytes(dex)
 
-    # Pass 1b — Gboard swap in InputMethodManagerStubImpl (binary, no-op if string absent)
-    #   binary_swap_string requires "com.google.android.inputmethod.latin" in DEX pool.
-    #   If pool doesn't have it, apktool D8b smali sed handles it as fallback.
     if _BAIDU_IME.encode() in raw:
         n = binary_swap_string(dex, _BAIDU_IME, _GBOARD_IME,
                                only_class='InputMethodManagerStubImpl')
@@ -1500,7 +1247,6 @@ def _miui_framework_patch(dex_name: str, dex: bytearray) -> bool:
             patched = True
             raw = bytes(dex)
 
-    # Pass 2 — showSystemReadyErrorDialogsIfNeeded in ActivityTaskManagerInternal
     if b'ActivityTaskManagerInternal' in raw:
         hdr = _parse_header(raw)
         if hdr:
@@ -1522,25 +1268,7 @@ def _miui_framework_patch(dex_name: str, dex: bytearray) -> bool:
 
     return patched
 
-# ── Settings.apk region unlock  ─────────────────────────────────
 def _settings_region_patch(dex_name: str, dex: bytearray) -> bool:
-    """
-    Patch IS_GLOBAL_BUILD → const/4 pX, 0x1 scoped to exactly 3 classes.
-    NO global sweep. NO raw scan. Patching only:
-
-      LocaleController      — all methods (no method filter; the sget may be
-                               in a method other than getAvailabilityStatus)
-      LocaleSettingsTree    — all methods
-      OtherPersonalSettings — all methods (has 2 IS_GLOBAL_BUILD lines in onCreate)
-
-    Global sweep was used previously and patched 57 sgets in Settings.apk,
-    flipping region flags in unrelated classes and crashing the app.
-    Class-filtered approach patches only the 3 intended classes.
-
-    The improved _iter_code_items (using _skip_uleb128 instead of break in
-    the field-skip loop) ensures OtherPersonalSettings::onCreate is not
-    silently skipped due to ULEB128 mis-stepping on its instance fields.
-    """
     if b'IS_GLOBAL_BUILD' not in bytes(dex): return False
     n = 0
     n += binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
@@ -1555,25 +1283,16 @@ def _settings_region_patch(dex_name: str, dex: bytearray) -> bool:
     return n > 0
 
 
-# ── InCallUI.apk  ────────────────────────────────────────────────
 def _incallui_patch(dex_name: str, dex: bytearray) -> bool:
-    """
-    STRICT SCOPE: RecorderUtils::isAiRecordEnable → return true.
-    - Try known package first; if not found, scan all class defs for any class
-      whose simple name is 'RecorderUtils' (package may differ between builds).
-    - Do NOT touch other classes or instructions.
-    """
     if b'RecorderUtils' not in bytes(dex):
         return False
 
-    # Try known path first
     if binary_patch_method(dex,
             "com/android/incallui/RecorderUtils",
             "isAiRecordEnable",
             stub_regs=1, stub_insns=_STUB_TRUE):
         return True
 
-    # Package path unknown — scan all class defs
     info("  RecorderUtils: scanning all class defs for exact class name...")
     data = bytes(dex)
     hdr  = _parse_header(data)
@@ -1588,7 +1307,6 @@ def _incallui_patch(dex_name: str, dex: bytearray) -> bool:
         try:
             sidx     = struct.unpack_from('<I', data, hdr['type_ids_off'] + cls_idx * 4)[0]
             type_str = _get_str(data, hdr, sidx)
-            # Match exact simple class name: ends with /RecorderUtils;
             if type_str.endswith('/RecorderUtils;') and type_str.startswith('L'):
                 cls_path = type_str[1:-1]
                 info(f"  Found: {type_str} — trying isAiRecordEnable")
@@ -1609,14 +1327,14 @@ def _incallui_patch(dex_name: str, dex: bytearray) -> bool:
 PROFILES = {
     "framework-sig":     _fw_sig_patch,
     "settings-ai":       _settings_ai_patch,
-    "settings-region":   _settings_region_patch,   # exact 3 classes only
-    "voice-recorder-ai": _recorder_ai_patch,        # AiDeviceUtil::isAiSupportedDevice
+    "settings-region":   _settings_region_patch,
+    "voice-recorder-ai": _recorder_ai_patch,
     "services-jar":      _services_jar_patch,
-    "provision-gms":     _provision_gms_patch,    # Utils::setGmsAppEnabledStateForCn only
-    "miui-service":      _miui_service_patch,    # global IS_INTERNATIONAL_BUILD sweep
-    "systemui-volte":    _systemui_all_patch,       # VoLTE + QuickShare(const/4) + WA-notif
-    "miui-framework":    _miui_framework_patch,     # validateTheme(trim) + IS_GLOBAL_BUILD
-    "incallui-ai":       _incallui_patch,           # RecorderUtils::isAiRecordEnable
+    "provision-gms":     _provision_gms_patch,
+    "miui-service":      _miui_service_patch,
+    "systemui-volte":    _systemui_all_patch,
+    "miui-framework":    _miui_framework_patch,
+    "incallui-ai":       _incallui_patch,
 }
 
 def main():
@@ -1629,7 +1347,7 @@ def main():
     if len(sys.argv) < 3:
         err(f"Usage: dex_patcher.py {cmd} <archive>"); sys.exit(1)
     run_patches(Path(sys.argv[2]), PROFILES[cmd], cmd)
-    sys.exit(0)   # ALWAYS exit 0 — graceful skip when nothing found
+    sys.exit(0)
 
 if __name__ == "__main__":
     main()
@@ -1687,13 +1405,8 @@ log_success "All resources downloaded successfully"
 
 # =========================================================
 #  3b. MIUI MOD INJECTION SYSTEM
-#  Triggered by MODS_SELECTED (comma-separated list from bot)
-#  Each mod: GitHub API → download zip → extract → inject → permissions → cleanup
 # =========================================================
 
-# Generic helper: fetch latest release zip from a GitHub repo
-# Usage: inject_miui_mod <owner/repo> <label>
-# Sets MOD_EXTRACT_DIR on success, returns 1 on failure
 inject_miui_mod() {
     local repo="$1" label="$2"
     MOD_EXTRACT_DIR="$TEMP_DIR/mod_${label}"
@@ -1729,19 +1442,15 @@ inject_miui_mod() {
     fi
 
     log_info "[$label] Extracting..."
-    log_info "[$label] Extracting..."
-    # tg_progress removed as per user request
     unzip -qq -o "$zip_path" -d "$MOD_EXTRACT_DIR"
     rm -f "$zip_path"
 
-    # If the zip contains a single top-level folder, descend into it
     local top_dirs
     top_dirs=$(find "$MOD_EXTRACT_DIR" -mindepth 1 -maxdepth 1 -type d)
     local dir_count
     dir_count=$(echo "$top_dirs" | grep -c .)
     if [ "$dir_count" -eq 1 ]; then
         local inner_dir="$top_dirs"
-        # Move contents up one level
         mv "$inner_dir"/* "$MOD_EXTRACT_DIR/" 2>/dev/null
         mv "$inner_dir"/.* "$MOD_EXTRACT_DIR/" 2>/dev/null
         rmdir "$inner_dir" 2>/dev/null
@@ -1751,18 +1460,14 @@ inject_miui_mod() {
     return 0
 }
 
-# Post-injection: fix permissions and cleanup
 mod_finalize() {
     local target_dir="$1" label="$2"
-    # APK permissions: 0644, directory permissions: 0755
     find "$target_dir" -type f -name "*.apk" -exec chmod 0644 {} +
     find "$target_dir" -type d -exec chmod 0755 {} +
-    # Cleanup extraction dir
     rm -rf "$TEMP_DIR/mod_${label}"
     log_success "[$label] Permissions set and temp cleaned"
 }
 
-# ── Mod 1: HyperOS Launcher ──────────────────────────────────
 inject_launcher_mod() {
     local dump_dir="$1"
     if ! inject_miui_mod "Mods-Center/HyperOS-Launcher" "launcher"; then
@@ -1771,7 +1476,6 @@ inject_launcher_mod() {
 
     local src="$MOD_EXTRACT_DIR"
 
-    # MiuiHome.apk → product/priv-app/MiuiHome/
     local home_apk=$(find "$src" -name "MiuiHome.apk" -type f | head -n 1)
     if [ -z "$home_apk" ]; then
         log_error "[launcher] MiuiHome.apk not found in module — aborting"
@@ -1782,7 +1486,6 @@ inject_launcher_mod() {
     cp -f "$home_apk" "$dump_dir/priv-app/MiuiHome/MiuiHome.apk"
     log_success "[launcher] ✓ MiuiHome.apk injected"
 
-    # XiaomiEUExt.apk → product/priv-app/XiaomiEUExt/
     local ext_apk=$(find "$src" -name "XiaomiEUExt.apk" -type f | head -n 1)
     if [ -n "$ext_apk" ]; then
         mkdir -p "$dump_dir/priv-app/XiaomiEUExt"
@@ -1792,7 +1495,6 @@ inject_launcher_mod() {
         log_info "[launcher] XiaomiEUExt.apk not present in module — skipping"
     fi
 
-    # Permissions XMLs → product/etc/permissions/
     local perm_src=$(find "$src" -type d -name "permissions" | head -n 1)
     if [ -n "$perm_src" ]; then
         mkdir -p "$dump_dir/etc/permissions"
@@ -1804,7 +1506,6 @@ inject_launcher_mod() {
     log_success "✅ HyperOS Launcher mod injected successfully"
 }
 
-# ── Mod 2: HyperOS Theme Manager ─────────────────────────────
 inject_theme_mod() {
     local dump_dir="$1"
     if ! inject_miui_mod "Mods-Center/HyperOS-Theme-Manager" "thememanager"; then
@@ -1813,14 +1514,12 @@ inject_theme_mod() {
 
     local src="$MOD_EXTRACT_DIR"
 
-    # Delete existing ThemeManager directory first
     if [ -d "$dump_dir/app/MIUIThemeManager" ]; then
         rm -rf "$dump_dir/app/MIUIThemeManager"/*
         log_info "[thememanager] Cleared existing MIUIThemeManager directory"
     fi
     mkdir -p "$dump_dir/app/MIUIThemeManager"
 
-    # MIUIThemeManager.apk
     local theme_apk=$(find "$src" -name "MIUIThemeManager.apk" -type f | head -n 1)
     if [ -z "$theme_apk" ]; then
         log_error "[thememanager] MIUIThemeManager.apk not found in module — aborting"
@@ -1830,7 +1529,6 @@ inject_theme_mod() {
     cp -f "$theme_apk" "$dump_dir/app/MIUIThemeManager/MIUIThemeManager.apk"
     log_success "[thememanager] ✓ MIUIThemeManager.apk injected"
 
-    # lib/ directory
     local lib_src=$(find "$src" -type d -name "lib" | head -n 1)
     if [ -n "$lib_src" ]; then
         cp -rf "$lib_src" "$dump_dir/app/MIUIThemeManager/"
@@ -1843,7 +1541,6 @@ inject_theme_mod() {
     log_success "✅ HyperOS Theme Manager mod injected successfully"
 }
 
-# ── Mod 3: HyperOS Security Center ───────────────────────────
 inject_security_mod() {
     local dump_dir="$1"
     if ! inject_miui_mod "Mods-Center/HyperOS-Security-Center" "securitycenter"; then
@@ -1852,7 +1549,6 @@ inject_security_mod() {
 
     local src="$MOD_EXTRACT_DIR"
 
-    # SecurityCenter.apk → rename to MIUISecurityCenter.apk, replace dir
     local sec_apk=$(find "$src" -name "SecurityCenter.apk" -type f | head -n 1)
     if [ -z "$sec_apk" ]; then
         log_error "[securitycenter] SecurityCenter.apk not found in module — aborting"
@@ -1860,13 +1556,11 @@ inject_security_mod() {
         return 1
     fi
 
-    # Replace entire target directory
     rm -rf "$dump_dir/priv-app/MIUISecurityCenter"
     mkdir -p "$dump_dir/priv-app/MIUISecurityCenter"
     cp -f "$sec_apk" "$dump_dir/priv-app/MIUISecurityCenter/MIUISecurityCenter.apk"
     log_success "[securitycenter] ✓ MIUISecurityCenter.apk injected (renamed from SecurityCenter.apk)"
 
-    # Permissions XMLs → product/etc/permissions/
     local perm_src=$(find "$src" -type d -name "permissions" | head -n 1)
     if [ -n "$perm_src" ]; then
         mkdir -p "$dump_dir/etc/permissions"
@@ -1878,9 +1572,6 @@ inject_security_mod() {
     log_success "✅ HyperOS Security Center mod injected successfully"
 }
 
-# =========================================================
-#  4. DOWNLOAD & EXTRACT ROM
-# =========================================================
 # =========================================================
 #  4. DOWNLOAD & EXTRACT ROM
 # =========================================================
@@ -1902,8 +1593,6 @@ log_step "📂 Extracting ROM payload..."
 unzip -qq -o "rom.zip" payload.bin && rm "rom.zip" 
 log_success "Payload extracted"
 
-log_success "Payload extracted"
-
 tg_progress "📂 **Extracting Firmware...**"
 log_step "🔍 Extracting firmware images..."
 START_TIME=$(date +%s)
@@ -1920,7 +1609,6 @@ log_step "━━━━━━━━━━━━━━━━━━━━━━━�
 log_step "🔓 VBMETA VERIFICATION DISABLER"
 log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-# Create professional vbmeta patcher
 cat > "$BIN_DIR/vbmeta_patcher.py" <<'PYTHON_EOF'
 #!/usr/bin/env python3
 import sys
@@ -1934,27 +1622,23 @@ class VBMetaPatcher:
     AVB_VERSION_MAJOR = 1
     AVB_VERSION_MINOR = 0
     
-    # AVB Header offsets
     MAGIC_OFFSET = 0
     VERSION_MAJOR_OFFSET = 4
     VERSION_MINOR_OFFSET = 8
-    FLAGS_OFFSET = 123  # Critical: flags field location
+    FLAGS_OFFSET = 123
     
-    # Flags to disable verification
     FLAG_VERIFICATION_DISABLED = 0x01
     FLAG_HASHTREE_DISABLED = 0x02
-    DISABLE_FLAGS = FLAG_VERIFICATION_DISABLED | FLAG_HASHTREE_DISABLED  # 0x03
+    DISABLE_FLAGS = FLAG_VERIFICATION_DISABLED | FLAG_HASHTREE_DISABLED
     
     def __init__(self, filepath):
         self.filepath = filepath
         self.original_size = os.path.getsize(filepath)
         
     def read_header(self):
-        """Read and validate AVB header"""
         print(f"[ACTION] Reading vbmeta header from {os.path.basename(self.filepath)}")
         
         with open(self.filepath, 'rb') as f:
-            # Read magic
             f.seek(self.MAGIC_OFFSET)
             magic = f.read(4)
             
@@ -1964,14 +1648,12 @@ class VBMetaPatcher:
             
             print(f"[SUCCESS] Valid AVB magic found: {magic.decode('ascii')}")
             
-            # Read version
             f.seek(self.VERSION_MAJOR_OFFSET)
             major = struct.unpack('>I', f.read(4))[0]
             minor = struct.unpack('>I', f.read(4))[0]
             
             print(f"[INFO] AVB Version: {major}.{minor}")
             
-            # Read current flags
             f.seek(self.FLAGS_OFFSET)
             current_flags = struct.unpack('B', f.read(1))[0]
             
@@ -1984,25 +1666,21 @@ class VBMetaPatcher:
             return True
     
     def patch(self):
-        """Patch vbmeta to disable verification"""
         print(f"[ACTION] Patching flags at offset {self.FLAGS_OFFSET}")
         
         try:
-            # Read entire file
             with open(self.filepath, 'rb') as f:
                 data = bytearray(f.read())
             
             original_flag = data[self.FLAGS_OFFSET]
             print(f"[INFO] Original flag value: 0x{original_flag:02X}")
             
-            # Set disable flags
             data[self.FLAGS_OFFSET] = self.DISABLE_FLAGS
             
             print(f"[ACTION] Setting new flag value: 0x{self.DISABLE_FLAGS:02X}")
             print(f"[INFO] Verification Disabled: {'YES' if self.DISABLE_FLAGS & 0x01 else 'NO'}")
             print(f"[INFO] Hashtree Disabled: {'YES' if self.DISABLE_FLAGS & 0x02 else 'NO'}")
             
-            # Write back
             with open(self.filepath, 'wb') as f:
                 f.write(data)
             
@@ -2015,7 +1693,6 @@ class VBMetaPatcher:
             return False
     
     def verify(self):
-        """Verify the patch was applied correctly"""
         print(f"[ACTION] Verifying patch...")
         
         with open(self.filepath, 'rb') as f:
@@ -2030,7 +1707,6 @@ class VBMetaPatcher:
             return False
     
     def get_info(self):
-        """Get image information"""
         size_kb = self.original_size / 1024
         size_mb = size_kb / 1024
         
@@ -2052,21 +1728,17 @@ def main():
     
     patcher = VBMetaPatcher(filepath)
     
-    # Show file info
     print(f"[INFO] File: {os.path.basename(filepath)}")
     print(f"[INFO] Size: {patcher.get_info()}")
     
-    # Read and validate header
     if not patcher.read_header():
         print("[ERROR] Invalid vbmeta image")
         sys.exit(1)
     
-    # Patch
     if not patcher.patch():
         print("[ERROR] Patching failed")
         sys.exit(1)
     
-    # Verify
     if not patcher.verify():
         print("[ERROR] Verification failed")
         sys.exit(1)
@@ -2081,7 +1753,6 @@ PYTHON_EOF
 chmod +x "$BIN_DIR/vbmeta_patcher.py"
 log_success "✓ Professional vbmeta patcher ready"
 
-# Patch vbmeta.img
 tg_progress "🔓 **Disabling Verification...**"
 VBMETA_IMG="$IMAGES_DIR/vbmeta.img"
 if [ -f "$VBMETA_IMG" ]; then
@@ -2108,7 +1779,6 @@ else
     log_warning "⚠️  vbmeta.img not found"
 fi
 
-# Patch vbmeta_system.img
 VBMETA_SYSTEM_IMG="$IMAGES_DIR/vbmeta_system.img"
 if [ -f "$VBMETA_SYSTEM_IMG" ]; then
     log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -2143,9 +1813,6 @@ log_step "━━━━━━━━━━━━━━━━━━━━━━━�
 # =========================================================
 #  5. PARTITION MODIFICATION LOOP
 # =========================================================
-# =========================================================
-#  5. PARTITION MODIFICATION LOOP
-# =========================================================
 tg_progress "🔄 **Processing Partitions...**"
 log_step "🔄 Processing Partitions..."
 LOGICALS="system system_ext product mi_ext vendor odm"
@@ -2159,11 +1826,9 @@ for part in $LOGICALS; do
         DUMP_DIR="$GITHUB_WORKSPACE/${part}_dump"
         MNT_DIR="$GITHUB_WORKSPACE/mnt"
         
-        # Ensure directories exist
         mkdir -p "$DUMP_DIR"
         mkdir -p "$MNT_DIR"
         
-        # Ensure we're in workspace
         cd "$GITHUB_WORKSPACE"
         
         log_info "Mounting ${part}.img..."
@@ -2189,7 +1854,6 @@ for part in $LOGICALS; do
         # A. DEBLOATER
         log_info "🗑️  Running debloater..."
         echo "$BLOAT_LIST" | tr ' ' '\n' | grep -v "^\s*$" > "$TEMP_DIR/bloat_target_list.txt"
-        # Touch log first so wc -l never fails on missing file
         touch "$TEMP_DIR/removed_bloat.log"
         find "$DUMP_DIR" -type f -name "*.apk" | while read apk_file; do
             pkg_name=$(aapt dump badging "$apk_file" 2>/dev/null | grep "package: name=" | cut -d"'" -f2)
@@ -2240,7 +1904,7 @@ for part in $LOGICALS; do
             log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         fi
 
-        # C. MIUI BOOSTER - DEVICE LEVEL OVERRIDE (COMPLETE METHOD REPLACEMENT)
+        # C. MIUI BOOSTER
         if [ "$part" == "system_ext" ]; then
             log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             log_step "🚀 MIUIBOOSTER PERFORMANCE PATCH"
@@ -2253,17 +1917,13 @@ for part in $LOGICALS; do
                 JAR_SIZE=$(du -h "$BOOST_JAR" | cut -f1)
                 log_info "Original size: $JAR_SIZE"
                 
-                # Create backup
-                log_info "Creating backup..."
                 cp "$BOOST_JAR" "${BOOST_JAR}.bak"
                 log_success "✓ Backup created: ${BOOST_JAR}.bak"
                 
-                # Setup working directory
                 rm -rf "$TEMP_DIR/boost_work"
                 mkdir -p "$TEMP_DIR/boost_work"
                 cd "$TEMP_DIR/boost_work"
                 
-                # Decompile JAR
                 log_info "Decompiling MiuiBooster.jar with apktool..."
                 START_TIME=$(date +%s)
                 
@@ -2272,7 +1932,6 @@ for part in $LOGICALS; do
                     DECOMPILE_TIME=$((END_TIME - START_TIME))
                     log_success "✓ Decompiled successfully in ${DECOMPILE_TIME}s"
                     
-                    # Find target smali file
                     log_info "Searching for DeviceLevelUtils.smali..."
                     SMALI_FILE=$(find "decompiled" -type f -path "*/com/miui/performance/DeviceLevelUtils.smali" | head -n 1)
                     
@@ -2280,17 +1939,6 @@ for part in $LOGICALS; do
                         SMALI_REL_PATH=$(echo "$SMALI_FILE" | sed "s|decompiled/||")
                         log_success "✓ Found: $SMALI_REL_PATH"
                         
-                        # Show original method preview
-                        log_info "Extracting original method signature..."
-                        ORIG_METHOD=$(grep -A 2 "\.method public initDeviceLevel()V" "$SMALI_FILE" | head -n 3)
-                        if [ ! -z "$ORIG_METHOD" ]; then
-                            log_info "Original method found:"
-                            echo "$ORIG_METHOD" | while IFS= read -r line; do
-                                log_info "  $line"
-                            done
-                        fi
-                        
-                        # Create Python patcher
                         log_info "Preparing method replacement patcher..."
                         cat > "patcher.py" <<'PYTHON_EOF'
 import sys
@@ -2306,7 +1954,6 @@ def patch_device_level(smali_file):
     original_length = len(content)
     print(f"[ACTION] Original file size: {original_length} bytes")
     
-    # New optimized method
     new_method = """.method public initDeviceLevel()V
     .registers 2
 
@@ -2319,25 +1966,21 @@ def patch_device_level(smali_file):
     return-void
 .end method"""
     
-    # Pattern to match the entire initDeviceLevel method
     print("[ACTION] Searching for initDeviceLevel()V method...")
     pattern = r'\.method\s+public\s+initDeviceLevel\(\)V.*?\.end\s+method'
     
     matches = re.findall(pattern, content, flags=re.DOTALL)
     if matches:
         print(f"[ACTION] Found method (length: {len(matches[0])} bytes)")
-        print("[ACTION] Original method structure:")
-        # Show first few lines of original
         orig_lines = matches[0].split('\n')[:5]
         for line in orig_lines:
             print(f"         {line}")
         if len(matches[0].split('\n')) > 5:
-            print(f"         ... (+{len(matches[0].split('\n')) - 5} more lines)")
+            print(f"         ... (+{len(matches[0].split(chr(10))) - 5} more lines)")
     else:
         print("[ERROR] Method not found!")
         return False
     
-    # Perform replacement
     print("[ACTION] Replacing method with optimized version...")
     new_content = re.sub(pattern, new_method, content, flags=re.DOTALL)
     
@@ -2345,12 +1988,6 @@ def patch_device_level(smali_file):
         new_length = len(new_content)
         size_diff = original_length - new_length
         print(f"[ACTION] New file size: {new_length} bytes (reduced by {size_diff} bytes)")
-        
-        # Show new method preview
-        print("[ACTION] New method structure:")
-        for line in new_method.split('\n')[:8]:
-            if line.strip():
-                print(f"         {line}")
         
         print(f"[ACTION] Writing patched content to {smali_file}")
         with open(smali_file, 'w', encoding='utf-8') as f:
@@ -2374,7 +2011,6 @@ PYTHON_EOF
                         
                         log_success "✓ Patcher ready"
                         
-                        # Execute patcher
                         log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
                         log_info "Executing method replacement..."
                         log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -2399,7 +2035,6 @@ PYTHON_EOF
                             log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
                             log_success "✓ Method patched successfully!"
                             
-                            # Verify the patch
                             log_info "Verifying patch..."
                             if grep -q 'const-string v0, "v:1,c:3,g:3"' "$SMALI_FILE"; then
                                 log_success "✓ Verification passed: Device level string found"
@@ -2407,7 +2042,6 @@ PYTHON_EOF
                                 log_error "✗ Verification failed: Device level string not found"
                             fi
                             
-                            # Rebuild JAR
                             log_info "Rebuilding MiuiBooster.jar with apktool..."
                             START_TIME=$(date +%s)
                             
@@ -2420,8 +2054,6 @@ PYTHON_EOF
                                     PATCHED_SIZE=$(du -h "MiuiBooster_patched.jar" | cut -f1)
                                     log_info "Patched JAR size: $PATCHED_SIZE"
                                     
-                                    # Replace original
-                                    log_info "Installing patched JAR..."
                                     mv "MiuiBooster_patched.jar" "$BOOST_JAR"
                                     log_success "✓ MiuiBooster.jar successfully patched!"
                                     
@@ -2433,60 +2065,41 @@ PYTHON_EOF
                                     log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
                                 else
                                     log_error "✗ Patched JAR not found after build"
-                                    log_info "Restoring original from backup..."
                                     cp "${BOOST_JAR}.bak" "$BOOST_JAR"
                                     log_warning "Original restored"
                                 fi
                             else
                                 log_error "✗ apktool build failed"
-                                cat apktool_build.log | tail -20 | while IFS= read -r line; do
-                                    log_error "   $line"
-                                    done
-                                log_info "Restoring original from backup..."
                                 cp "${BOOST_JAR}.bak" "$BOOST_JAR"
                                 log_warning "Original restored"
                             fi
                         else
                             log_error "✗ Method patching failed"
-                            log_info "Restoring original from backup..."
                             cp "${BOOST_JAR}.bak" "$BOOST_JAR"
                             log_warning "Original restored"
                         fi
                     else
                         log_error "✗ DeviceLevelUtils.smali not found in JAR"
-                        log_info "Expected path: */com/miui/performance/DeviceLevelUtils.smali"
                     fi
                 else
                     END_TIME=$(date +%s)
                     DECOMPILE_TIME=$((END_TIME - START_TIME))
                     log_error "✗ Decompile failed or timed out (${DECOMPILE_TIME}s)"
-                    
-                    if [ -f "apktool_decompile.log" ]; then
-                        log_error "Decompile errors:"
-                        tail -10 apktool_decompile.log | while IFS= read -r line; do
-                            log_error "   $line"
-                        done
-                    fi
                 fi
                 
-                # Cleanup
                 cd "$GITHUB_WORKSPACE"
                 rm -rf "$TEMP_DIR/boost_work"
             else
                 log_warning "⚠️  MiuiBooster.jar not found in system_ext partition"
-                log_info "This may be normal for some ROM versions"
             fi
         fi
 
 
-        # ═════════════════════════════════════════════════════════
+        # ═══════════════════════════════════════════════════════════
         #  DEX PATCHING  (via dex_patcher.py)
-        #  All calls: python3 $BIN_DIR/dex_patcher.py <cmd> <file>
-        #  Output forwarded through the manager logger.
-        # ═════════════════════════════════════════════════════════
+        # ═══════════════════════════════════════════════════════════
 
         _run_dex_patch() {
-            # _run_dex_patch <label> <command> <archive_path>
             local label="$1" cmd="$2" archive="$3"
             if [ "${SMALI_TOOLS_OK:-0}" -ne 1 ]; then
                 log_warning "DEX patcher not ready — skipping $label"
@@ -2497,7 +2110,6 @@ PYTHON_EOF
                 return 0
             fi
             log_info "$label → $(basename "$archive")"
-            # tg_progress removed as per user request
             python3 "$BIN_DIR/dex_patcher.py" "$cmd" "$archive" 2>&1 | \
             while IFS= read -r line; do
                 case "$line" in
@@ -2516,16 +2128,10 @@ PYTHON_EOF
         # ── system partition ──────────────────────────────────────
         if [ "$part" == "system" ]; then
 
-            # D1. Signature verification bypass (framework.jar)
             _run_dex_patch "SIGNATURE BYPASS" "framework-sig" \
                 "$(find "$DUMP_DIR" -path "*/framework/framework.jar" -type f | head -n1)"
             cd "$GITHUB_WORKSPACE"
 
-            # D2. services.jar — suppress error dialogs
-            #   Dynamic: scans ALL ActivityManagerService$$ExternalSyntheticLambda* classes
-            #   for the one that calls showSystemReadyErrorDialogsIfNeeded and stubs its run().
-            #   Falls back to stubbing showSystemReadyErrorDialogsIfNeeded directly in
-            #   ActivityTaskManagerInternal if no lambda match found.
             _run_dex_patch "SERVICES DIALOGS" "services-jar" \
                 "$(find "$DUMP_DIR" -path "*/framework/services.jar" -type f | head -n1)"
             cd "$GITHUB_WORKSPACE"
@@ -2535,7 +2141,6 @@ PYTHON_EOF
         # ── product partition ────────────────────────────────────────
         if [ "$part" == "product" ]; then
 
-            # D3. AI Voice Recorder — exact path: product/data-app/...
             _RECORDER_APK=$(find "$DUMP_DIR" \
                 -path "*/data-app/MIUISoundRecorderTargetSdk30/MIUISoundRecorderTargetSdk30.apk" \
                 -type f | head -n1)
@@ -2547,7 +2152,6 @@ PYTHON_EOF
             _run_dex_patch "VOICE RECORDER AI" "voice-recorder-ai" "$_RECORDER_APK"
             cd "$GITHUB_WORKSPACE"
 
-            # D3b. InCallUI — AI recording gate: RecorderUtils::isAiRecordEnable → true
             _run_dex_patch "INCALLUI AI" "incallui-ai" \
                 "$(find "$DUMP_DIR" -path "*/priv-app/InCallUI/InCallUI.apk" -type f | head -n1)"
             cd "$GITHUB_WORKSPACE"
@@ -2557,18 +2161,12 @@ PYTHON_EOF
         # ── system_ext partition ──────────────────────────────────
         if [ "$part" == "system_ext" ]; then
 
-            # D4. Settings AI + Region unlock (IS_GLOBAL_BUILD in locale classes)
             _SETTINGS_APK="$(find "$DUMP_DIR" -name "Settings.apk" -type f | head -n1)"
             _run_dex_patch "SETTINGS AI"     "settings-ai"     "$_SETTINGS_APK"
             cd "$GITHUB_WORKSPACE"
             _run_dex_patch "SETTINGS REGION" "settings-region" "$_SETTINGS_APK"
             cd "$GITHUB_WORKSPACE"
 
-            # D4b. OtherPersonalSettings — IS_GLOBAL_BUILD smali patch
-            #   Binary walker mis-steps on this class's class_data → apktool smali sed.
-            #   CRITICAL: after apktool b, inject ONLY patched DEX back into the
-            #   original APK (zip -0 -u). Avoids apktool re-compressing resources.arsc
-            #   which breaks the R+ 4-byte alignment requirement (error -124).
             log_info "🔧 OtherPersonalSettings: patching IS_GLOBAL_BUILD..."
             _OPS_WORK="$TEMP_DIR/ops_work"
             _OPS_DEX="$TEMP_DIR/ops_dex"
@@ -2581,23 +2179,25 @@ PYTHON_EOF
                 done
                 if [ "$_OPS_NEED" -eq 1 ]; then
                     for _f in $_OPS_FILES; do
-                        sed -i                             's|sget-boolean p1, Lmiui/os/Build;->IS_GLOBAL_BUILD:Z|const/4 p1, 0x1|g'                             "$_f"
+                        sed -i \
+                            's|sget-boolean p1, Lmiui/os/Build;->IS_GLOBAL_BUILD:Z|const/4 p1, 0x1|g' \
+                            "$_f"
                     done
                     log_success "  ✓ IS_GLOBAL_BUILD replaced in OtherPersonalSettings.smali"
                     if timeout 25m apktool b -c "$_OPS_WORK" -o "${_SETTINGS_APK}.apkbuild" >/dev/null 2>&1; then
-                        # Extract ONLY the patched DEX files from apktool output
                         mkdir -p "$_OPS_DEX"
                         cd "$_OPS_DEX"
                         unzip -o "${_SETTINGS_APK}.apkbuild" 'classes*.dex' >/dev/null 2>&1
                         _DEX_COUNT=$(ls classes*.dex 2>/dev/null | wc -l)
                         if [ "$_DEX_COUNT" -gt 0 ]; then
-                            # Inject DEX-only into original APK — resources.arsc untouched
                             zip -0 -u "$_SETTINGS_APK" classes*.dex >/dev/null 2>&1
                             cd "$GITHUB_WORKSPACE"
-                            # Re-align after DEX injection (DEX entries may shift offsets)
-                            _ZA=$(which zipalign 2>/dev/null ||                                   find "$BIN_DIR/android-sdk" -name zipalign 2>/dev/null | head -1)
+                            _ZA=$(which zipalign 2>/dev/null || \
+                                  find "$BIN_DIR/android-sdk" -name zipalign 2>/dev/null | head -1)
                             if [ -n "$_ZA" ]; then
-                                "$_ZA" -p -f 4 "$_SETTINGS_APK" "${_SETTINGS_APK}.aligned"                                     && mv "${_SETTINGS_APK}.aligned" "$_SETTINGS_APK"                                     && log_success "  ✓ zipalign applied"
+                                "$_ZA" -p -f 4 "$_SETTINGS_APK" "${_SETTINGS_APK}.aligned" \
+                                    && mv "${_SETTINGS_APK}.aligned" "$_SETTINGS_APK" \
+                                    && log_success "  ✓ zipalign applied"
                             fi
                             log_success "✓ OtherPersonalSettings: DEX injected, resources.arsc preserved"
                         else
@@ -2618,37 +2218,28 @@ PYTHON_EOF
             rm -rf "$_OPS_WORK" "$_OPS_DEX"
             cd "$GITHUB_WORKSPACE"
 
-            # D5. Provision GMS support
             _run_dex_patch "PROVISION GMS" "provision-gms" \
                 "$(find "$DUMP_DIR" -name "Provision.apk" -type f | head -n1)"
             cd "$GITHUB_WORKSPACE"
 
-            # D6. MIUI service CN→Global
             _run_dex_patch "MIUI SERVICE CN→GLOBAL" "miui-service" \
                 "$(find "$DUMP_DIR" -name "miui-services.jar" -type f | head -n1)"
             cd "$GITHUB_WORKSPACE"
 
-            # D7. SystemUI: VoLTE + QuickShare + WhatsApp notification fix
             _run_dex_patch "SYSTEMUI ALL" "systemui-volte" \
                 "$(find "$DUMP_DIR" \( -name "MiuiSystemUI.apk" -o -name "SystemUI.apk" \) -type f | head -n1)"
             cd "$GITHUB_WORKSPACE"
 
-            # D8. miui-framework: IS_INTERNATIONAL_BUILD(13 classes) + showSystemReadyErrorDialogsIfNeeded
             _FW_JAR="$(find "$DUMP_DIR" -name "miui-framework.jar" -type f | head -n1)"
             _run_dex_patch "MIUI FRAMEWORK" "miui-framework" "$_FW_JAR"
             cd "$GITHUB_WORKSPACE"
 
-            # D8b. miui-framework: Gboard IME swap via apktool
-            #   binary_swap_string can't inject a new string — Gboard package name is
-            #   longer than Baidu's and not in the DEX string pool. apktool smali sed
-            #   is the only reliable approach.
             if [ -n "$_FW_JAR" ]; then
                 log_info "🎹 miui-framework: Gboard IME swap..."
                 _FW_WORK="$TEMP_DIR/fw_smali"
                 rm -rf "$_FW_WORK"
                 _FW_APPLIED=0
                 if timeout 20m apktool d -r -f "$_FW_JAR" -o "$_FW_WORK" >/dev/null 2>&1; then
-                    # Patch 1a: InputMethodServiceInjector — Baidu → Gboard
                     _IMSI=$(find "$_FW_WORK" -name "InputMethodServiceInjector.smali" -type f | head -1)
                     if [ -n "$_IMSI" ] && grep -q "com\.baidu\.input_mi" "$_IMSI"; then
                         sed -i 's|com\.baidu\.input_mi|com.google.android.inputmethod.latin|g' "$_IMSI"
@@ -2657,8 +2248,6 @@ PYTHON_EOF
                     else
                         log_info "  InputMethodServiceInjector: com.baidu.input_mi not present"
                     fi
-                    # Patch 1b: InputMethodManagerStubImpl — Baidu → Gboard
-                    #   Separate class from 1a; may or may not exist depending on build.
                     _IMMS=$(find "$_FW_WORK" -name "InputMethodManagerStubImpl.smali" -type f | head -1)
                     if [ -n "$_IMMS" ] && grep -q "com\.baidu\.input_mi" "$_IMMS"; then
                         sed -i 's|com\.baidu\.input_mi|com.google.android.inputmethod.latin|g' "$_IMMS"
@@ -2667,23 +2256,15 @@ PYTHON_EOF
                     else
                         log_info "  InputMethodManagerStubImpl: com.baidu.input_mi not present"
                     fi
-                    # Patch 2: showSystemReadyErrorDialogsIfNeeded → return-void
-                    #   apktool fallback for builds where binary_patch_method misses it
-                    #   (abstract base class with code_off=0 in ActivityTaskManagerInternal)
                     _SRED_FILE=$(grep -rl "showSystemReadyErrorDialogsIfNeeded" "$_FW_WORK"/smali* 2>/dev/null | head -1)
                     if [ -n "$_SRED_FILE" ]; then
                         python3 - "$_SRED_FILE" "showSystemReadyErrorDialogsIfNeeded" <<'SRED_PY'
 import re, sys
 path, method = sys.argv[1], sys.argv[2]
 text = open(path).read()
-pat = rf'(\.method[^
-]*{re.escape(method)}[^
-]*
-).*?(\.end method)'
+pat = rf'(\.method[^\n]*{re.escape(method)}[^\n]*\n).*?(\.end method)'
 def stub(m):
-    return m.group(1) + "    .registers 1
-    return-void
-" + m.group(2)
+    return m.group(1) + "    .registers 1\n    return-void\n" + m.group(2)
 new = re.sub(pat, stub, text, flags=re.DOTALL)
 if new != text:
     open(path,'w').write(new)
@@ -2712,7 +2293,6 @@ SRED_PY
                 cd "$GITHUB_WORKSPACE"
             fi
 
-            # D9. nexdroid.rc — bootloader spoof init script
             log_info "💉 Writing nexdroid.rc bootloader spoof..."
             _INIT_DIR="$DUMP_DIR/etc/init"
             mkdir -p "$_INIT_DIR"
@@ -2744,7 +2324,6 @@ on init
 NEXRC
             log_success "✓ nexdroid.rc written to system_ext/etc/init/"
 
-            # D10. cust_prop_white_keys_list — append allowlisted props
             _CUST_KEYS="$DUMP_DIR/etc/cust_prop_white_keys_list"
             if [ -f "$_CUST_KEYS" ]; then
                 cat >> "$_CUST_KEYS" <<'CUSTKEYS'
@@ -2763,8 +2342,6 @@ CUSTKEYS
                 log_warning "cust_prop_white_keys_list not found — skipping"
             fi
 
-            # D10b. init.miui.ext.rc — launcher property fix
-            #   Replace globallauncher (CN POCO launcher) with com.miui.home
             _MIUI_EXT_RC=$(find "$DUMP_DIR" -name "init.miui.ext.rc" -type f | head -1)
             if [ -n "$_MIUI_EXT_RC" ]; then
                 if grep -q "com.mi.android.globallauncher" "$_MIUI_EXT_RC"; then
@@ -2779,7 +2356,6 @@ CUSTKEYS
                 log_warning "init.miui.ext.rc not found — launcher fix skipped"
             fi
 
-            # D11. Region settings extra files (GDrive: locale XMLs → system_ext/cust)
             log_info "⬇ Downloading region settings files..."
             REGION_GD_ID="14fD0DMOzcN2hWSWDQas577wu7POoXv3c"
             if gdown "$REGION_GD_ID" -O "$TEMP_DIR/region_files.zip" --fuzzy -q 2>/dev/null; then
@@ -2793,33 +2369,8 @@ CUSTKEYS
 
         fi
 
-
-
         # E. MIUI-FRAMEWORK (handled via dex_patcher.py miui-framework profile above)
         #    ThemeReceiver bypass + IS_GLOBAL_BUILD already done in D8 above.
-
-                    fi
-
-                    # ── Steps 3+4+5: Color patch + dedup validation ────────
-                    log_info "  [Steps 3-5] Patching Monet colors + validating..."
-                    python3 - "$MFP_WORK" <<'COLOR_PY'
-import sys, re, pathlib, collections
-
-root = pathlib.Path(sys.argv[1])
-TARGET_NAME = "input_bottom_background_color"
-# Exact match: only "input_bottom_background_color" not "input_bottom_background_color_old"
-# Pattern matches the opening tag and captures optional existing value
-ENTRY_RE = re.compile(
-    r'<color\s+name="' + re.escape(TARGET_NAME) + r'">[^<]*</color>'
-)
-ALREADY_MONET_RE = re.compile(r'@android:color/')
-HEX_VALUE_RE = re.compile(r'^#[0-9A-Fa-f]{3,8}$')
-
-xml_files = sorted(root.glob("res/values*/colors.xml"))
-if not xml_files:
-    print("[WARNING] No colors.xml found in decoded resources")
-    sys.exit(0)
-
 
         # G. NEXPACKAGE
         if [ "$part" == "product" ]; then
@@ -2833,7 +2384,6 @@ if not xml_files:
             mkdir -p "$PERM_DIR" "$DEF_PERM_DIR" "$OVERLAY_DIR" "$MEDIA_DIR" "$THEME_DIR"
             
             if [ -d "$GITHUB_WORKSPACE/nex_pkg" ]; then
-                # Permissions
                 DEF_XML="default-permissions-google.xml"
                 if [ -f "$GITHUB_WORKSPACE/nex_pkg/$DEF_XML" ]; then
                     cp "$GITHUB_WORKSPACE/nex_pkg/$DEF_XML" "$DEF_PERM_DIR/"
@@ -2844,17 +2394,14 @@ if not xml_files:
                 PERM_COUNT=$(find "$GITHUB_WORKSPACE/nex_pkg" -maxdepth 1 -name "*.xml" ! -name "$DEF_XML" -exec cp {} "$PERM_DIR/" \; -print | wc -l)
                 log_success "✓ Installed $PERM_COUNT permission files"
                 
-                # Overlays
                 OVERLAY_COUNT=$(find "$GITHUB_WORKSPACE/nex_pkg" -maxdepth 1 -name "*.apk" -exec cp {} "$OVERLAY_DIR/" \; -print | wc -l)
                 log_success "✓ Installed $OVERLAY_COUNT overlay APKs"
                 
-                # Boot animation
                 if [ -f "$GITHUB_WORKSPACE/nex_pkg/bootanimation.zip" ]; then
                     cp "$GITHUB_WORKSPACE/nex_pkg/bootanimation.zip" "$MEDIA_DIR/"
                     log_success "✓ Installed: bootanimation.zip"
                 fi
                 
-                # Lock wallpaper
                 if [ -f "$GITHUB_WORKSPACE/nex_pkg/lock_wallpaper" ]; then
                     cp "$GITHUB_WORKSPACE/nex_pkg/lock_wallpaper" "$THEME_DIR/"
                     log_success "✓ Installed: lock_wallpaper"
@@ -2865,24 +2412,26 @@ if not xml_files:
                 log_warning "NexPackage directory not found"
             fi
 
-            # H2. MIUI Uninstall Patcher (feb-x1.jar + feb-x1.xml + APK moves)
             log_info "🔧 Downloading MIUI uninstall patcher assets..."
             UNINSTALL_GD_ID="1lxkPJe5yn79Cb7YeoM3ScwjBD9TRWbYP"
             if gdown "$UNINSTALL_GD_ID" -O "$TEMP_DIR/uninstall_patch.zip" --fuzzy -q 2>/dev/null; then
-                # Push feb-x1.jar → product/framework
                 mkdir -p "$DUMP_DIR/framework"
-                unzip -qq -p "$TEMP_DIR/uninstall_patch.zip" "feb-x1.jar"                     > "$DUMP_DIR/framework/feb-x1.jar" 2>/dev/null &&                     log_success "✓ feb-x1.jar → product/framework" ||                     log_warning "feb-x1.jar not found in zip"
+                unzip -qq -p "$TEMP_DIR/uninstall_patch.zip" "feb-x1.jar" \
+                    > "$DUMP_DIR/framework/feb-x1.jar" 2>/dev/null && \
+                    log_success "✓ feb-x1.jar → product/framework" || \
+                    log_warning "feb-x1.jar not found in zip"
 
-                # Push feb-x1.xml → product/etc/permissions
                 mkdir -p "$DUMP_DIR/etc/permissions"
-                unzip -qq -p "$TEMP_DIR/uninstall_patch.zip" "feb-x1.xml"                     > "$DUMP_DIR/etc/permissions/feb-x1.xml" 2>/dev/null &&                     log_success "✓ feb-x1.xml → product/etc/permissions" ||                     log_warning "feb-x1.xml not found in zip"
+                unzip -qq -p "$TEMP_DIR/uninstall_patch.zip" "feb-x1.xml" \
+                    > "$DUMP_DIR/etc/permissions/feb-x1.xml" 2>/dev/null && \
+                    log_success "✓ feb-x1.xml → product/etc/permissions" || \
+                    log_warning "feb-x1.xml not found in zip"
 
                 rm -f "$TEMP_DIR/uninstall_patch.zip"
             else
                 log_warning "Uninstall patcher download failed — skipping"
             fi
 
-            # Move MIUISecurityManager + MIUIThemeStore from data-app → app
             for _APK_NAME in MIUISecurityManager MIUIThemeStore; do
                 _SRC_DIR="$DUMP_DIR/data-app/$_APK_NAME"
                 _DST_DIR="$DUMP_DIR/app/$_APK_NAME"
@@ -2896,11 +2445,10 @@ if not xml_files:
             done
         fi
 
-        # H. BUILD PROPS — ONLY /product/build.prop (never vendor/odm/system/system_ext)
+        # H. BUILD PROPS
         log_info "📝 Adding custom build properties..."
         if [ "$part" == "product" ]; then
             PRODUCT_PROP="$DUMP_DIR/etc/build.prop"
-            # Standard location is etc/build.prop inside the product partition dump
             if [ ! -f "$PRODUCT_PROP" ]; then
                 PRODUCT_PROP="$DUMP_DIR/build.prop"
             fi
@@ -2908,7 +2456,7 @@ if not xml_files:
                 echo "$PROPS_CONTENT" >> "$PRODUCT_PROP"
                 log_success "✓ Updated: $PRODUCT_PROP"
             else
-                log_error "✗ /product/build.prop not found — skipping props (will NOT fall back to other partitions)"
+                log_error "✗ /product/build.prop not found — skipping props"
             fi
         else
             log_info "Skipping build.prop for partition '${part}' — only product partition is allowed"
@@ -3027,24 +2575,16 @@ fi
 # =========================================================
 #  7. TELEGRAM NOTIFICATION
 # =========================================================
-# =========================================================
-#  7. TELEGRAM NOTIFICATION
-# =========================================================
 if [ ! -z "$TELEGRAM_TOKEN" ] && [ ! -z "$CHAT_ID" ]; then
     log_step "📣 Sending Telegram notification..."
     tg_progress "✅ **Build Complete! Sending report...**"
     
     BUILD_DATE=$(date +"%Y-%m-%d %H:%M")
     
-    # Delete the progress message so the final report is fresh
     curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/deleteMessage" \
         -d chat_id="$CHAT_ID" \
         -d message_id="$TG_MSG_ID" >/dev/null
 
-    # Safe Construction of JSON Payload using jq
-    # We strip special characters from MSG_TEXT for safety if needed, but jq handles most.
-    # We use a simplified text for the JSON to ensure it doesn't break.
-    
     SAFE_TEXT="NEXDROID BUILD COMPLETE
 ---------------------------
 \`in quotes\`
@@ -3079,7 +2619,6 @@ _Click the button below to download._"
             }
         }') 
 
-    # Send with error capture
     HTTP_CODE=$(curl -s -o response.json -w "%{http_code}" -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
         -H "Content-Type: application/json" \
         -d "$JSON_PAYLOAD")
