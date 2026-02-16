@@ -1312,85 +1312,50 @@ def _miuifreqphrase_patch(dex_name: str, dex: bytearray) -> bool:
     return n > 0
 
 
-# ── MIUIQuickSearchBox.apk — ad/recommendation removal + Google default ──
+# ── MIUIQuickSearchBox.apk — ad/recommendation removal ───────────
 def _qsb_debloat_patch(dex_name: str, dex: bytearray) -> bool:
     """
-    MIUIQuickSearchBox debloat — 5-pass binary patch:
+    MIUIQuickSearchBox debloat — 3-pass binary patch:
 
-    Pass 1: Swap default search engine "baidu" → "google" in string data.
-    Pass 2: Stub HomepageAdData.getShowAdMark() → return false (suppress ad banners).
-    Pass 3: Stub LandingPageService.onTransact() → return true (kill AIDL ad IPC).
-    Pass 4: Redirect /qsb/getAppSuggest API endpoint to dead path.
-    Pass 5: Break hotword ad JSON key so ad model info is never parsed.
+    Pass 1: Stub HomepageAdData.getShowAdMark() → return false (suppress ad banners).
+    Pass 2: Redirect /qsb/getAppSuggest API endpoint to dead path.
+    Pass 3: Break hotword ad JSON key so ad model info is never parsed.
+
+    NOTE: Search engine default is left as-is (binary_replace_string_data on
+    "baidu" nukes the entire string pool entry, crashing the app).
+    LandingPageService is already stubbed in the APK — no patch needed.
 
     All patches are binary in-place — no smali recompilation, ART dexopt safe.
     """
     patched = False
     raw = bytes(dex)
 
-    # ── Pass 1: Search engine default — "baidu" → "google" ────────────
-    #   Modify string pool data directly: "baidu" (5 bytes) is same length
-    #   as "google" (6 bytes) — WAIT, they differ. Use "googl" (5 bytes)
-    #   won't work. Instead, try binary_swap_string first (if 'google'
-    #   exists in pool), fall back to in-place string data replacement.
-    if b'baidu' in raw:
-        # Try index swap first (preserves string pool integrity)
-        if b'google' in raw:
-            n = binary_swap_string(dex, 'baidu', 'google',
-                                  only_class='searchengine')
-            if n > 0:
-                patched = True
-                raw = bytes(dex)
-                ok(f"  Pass 1: {n} x 'baidu' -> 'google' (index swap)")
-        # Fallback: in-place data replacement with same-length or shorter string
-        if not patched and b'searchengine' in raw:
-            # "baidu" → "googl" — 5 bytes each. This sets default to "googl"
-            # which won't match any engine, causing fallback to first registered.
-            # Better approach: keep "baidu" but force the pref key to load smth else.
-            # Actually, let's just replace the string data bytes.
-            # "baidu" = 5 chars, we can replace with any ≤5 char string.
-            # We'll use "" (empty) to force the fallback logic.
-            n = binary_replace_string_data(dex, 'baidu', '')
-            if n > 0:
-                patched = True
-                raw = bytes(dex)
-                ok("  Pass 1: 'baidu' string data cleared (forces engine fallback)")
-
-    # ── Pass 2: Homepage ads — getShowAdMark() → return false ────────
+    # ── Pass 1: Homepage ads — getShowAdMark() → return false ────────
     if b'HomepageAdData' in raw and b'getShowAdMark' in raw:
         if binary_patch_method(dex,
                 'com/android/quicksearchbox/bean/HomepageAdData',
                 'getShowAdMark', stub_regs=1, stub_insns=_STUB_FALSE):
             patched = True
             raw = bytes(dex)
-            ok("  Pass 2: HomepageAdData.getShowAdMark() -> return false")
+            ok("  Pass 1: HomepageAdData.getShowAdMark() -> return false")
 
-    # ── Pass 3: Landing page ads — LandingPageService.onTransact ─────
-    if b'LandingPageService' in raw and b'onTransact' in raw:
-        if binary_patch_method(dex,
-                'com/miui/systemAdSolution/landingPage/LandingPageService',
-                'onTransact', stub_regs=1, stub_insns=_STUB_TRUE):
-            patched = True
-            raw = bytes(dex)
-            ok("  Pass 3: LandingPageService.onTransact() -> return true")
-
-    # ── Pass 4: App suggestions — break API endpoint string ──────────
+    # ── Pass 2: App suggestions — break API endpoint string ──────────
     #   In-place replace "/qsb/getAppSuggest" (18 chars) → pad with nulls
     if b'/qsb/getAppSuggest' in raw:
         n = binary_replace_string_data(dex, '/qsb/getAppSuggest', '/qsb/_disabled_')
         if n > 0:
             patched = True
             raw = bytes(dex)
-            ok("  Pass 4: getAppSuggest endpoint broken")
+            ok("  Pass 2: getAppSuggest endpoint broken")
 
-    # ── Pass 5: Hotword ads — break ad model JSON key ────────────────
+    # ── Pass 3: Hotword ads — break ad model JSON key ────────────────
     #   In-place replace "hotWord.adModelInfo" (19 chars)
     if b'hotWord.adModelInfo' in raw:
         n = binary_replace_string_data(dex, 'hotWord.adModelInfo', 'hotWord.adModelNone')
         if n > 0:
             patched = True
             raw = bytes(dex)
-            ok("  Pass 5: hotWord ad model key renamed")
+            ok("  Pass 3: hotWord ad model key renamed")
 
     return patched
 
