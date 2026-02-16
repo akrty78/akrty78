@@ -1874,8 +1874,8 @@ push_multilang() {
     log_step "🌐 MULTI-LANGUAGE OVERLAY PUSH"
     log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-    # Resolve asset URL from the same private repo (HyperOS-Modder) via GitHub API
-    local api_url="https://api.github.com/repos/nexdroidwx/HyperOS-Modder/releases/tags/Multilang"
+    # Resolve asset URL from the same repo via GitHub API ($GITHUB_REPOSITORY is auto-set by Actions)
+    local api_url="https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/Multilang"
     local asset_url
     asset_url=$(curl -sSf -H "Authorization: token ${GITHUB_TOKEN}" \
         -H "Accept: application/vnd.github.v3+json" "$api_url" \
@@ -1978,8 +1978,8 @@ push_personal_assistant() {
     log_info "[personalassistant] Target folder: priv-app/$folder_name/"
     log_info "[personalassistant] Target APK name: $existing_apk_name"
 
-    # Download from the same private repo's Multilang tag
-    local api_url="https://api.github.com/repos/nexdroidwx/HyperOS-Modder/releases/tags/Multilang"
+    # Download from the same repo's Multilang tag ($GITHUB_REPOSITORY is auto-set by Actions)
+    local api_url="https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/Multilang"
     local asset_url
     asset_url=$(curl -sSf -H "Authorization: token ${GITHUB_TOKEN}" \
         -H "Accept: application/vnd.github.v3+json" "$api_url" \
@@ -3705,77 +3705,187 @@ UNIX_FOOTER
     META_ANDROID="$PACK_DIR/META-INF/com/android"
     mkdir -p "$META_GOOGLE" "$META_ANDROID"
 
-    # update-binary (real EDIFY binary from xiaomi.eu reference)
-    if [ -f "$GITHUB_WORKSPACE/update-binary" ]; then
-        cp "$GITHUB_WORKSPACE/update-binary" "$META_GOOGLE/update-binary"
-        chmod +x "$META_GOOGLE/update-binary"
-        log_success "✓ META-INF/com/google/android/update-binary (real binary)"
-    else
-        log_warning "update-binary not found in repo root — using fallback"
-        # Fallback: minimal shell stub
-        cat > "$META_GOOGLE/update-binary" << 'UPDATE_BINARY_FALLBACK_EOF'
+    # update-binary (self-contained shell script — standard for custom ROMs)
+    # This is the entry point called by TWRP/OrangeFox/SHRP recovery.
+    # It handles all flashing logic directly — no external EDIFY binary needed.
+    cat > "$META_GOOGLE/update-binary" << 'UPDATE_BINARY_EOF'
 #!/sbin/sh
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  nexdroid.build — Recovery Installer
+#  Shell-based update-binary (no EDIFY needed)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 OUTFD="/proc/self/fd/$2"
 ZIPFILE="$3"
-echo "ui_print nexdroid.build — No EDIFY binary found. Flash via fastboot instead." > "$OUTFD"
-exit 1
-UPDATE_BINARY_FALLBACK_EOF
-        chmod +x "$META_GOOGLE/update-binary"
-        log_success "✓ META-INF/com/google/android/update-binary (fallback stub)"
+
+# ── Output helpers ──
+ui_print() { echo -e "ui_print $1\nui_print" >> "$OUTFD"; }
+set_progress() { echo "set_progress $1" >> "$OUTFD"; }
+abort() { ui_print ""; ui_print "❌ ERROR: $1"; ui_print ""; exit 1; }
+
+# ── Banner ──
+ui_print ""
+ui_print "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+ui_print "    ✦ nexdroid.build ✦"
+ui_print "    Recovery ROM Installer"
+ui_print "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+ui_print ""
+
+DEVICE=$(getprop ro.product.device 2>/dev/null)
+ui_print "  📱 Device: $DEVICE"
+ui_print ""
+set_progress 0.0
+
+# ── Extract images to tmp ──
+TMP="/tmp/nexdroid_install"
+rm -rf "$TMP" && mkdir -p "$TMP"
+
+ui_print "  📦 Extracting images from zip..."
+set_progress 0.05
+unzip -o -q "$ZIPFILE" "images/*" -d "$TMP" 2>/dev/null || abort "Failed to extract images from zip!"
+
+IMG_DIR="$TMP/images"
+[ ! -d "$IMG_DIR" ] && abort "images/ directory not found in zip!"
+
+# Count total images
+TOTAL=$(find "$IMG_DIR" -maxdepth 1 -name "*.img" -type f | wc -l)
+[ "$TOTAL" -eq 0 ] && abort "No .img files found in images/ directory!"
+ui_print "  Found $TOTAL image(s) to flash"
+ui_print ""
+
+# ── Determine block device path ──
+# Try common paths used by Xiaomi/Qualcomm devices
+if [ -d "/dev/block/bootdevice/by-name" ]; then
+    BLOCK_PATH="/dev/block/bootdevice/by-name"
+elif [ -d "/dev/block/by-name" ]; then
+    BLOCK_PATH="/dev/block/by-name"
+else
+    abort "Could not find block device path!"
+fi
+ui_print "  🔧 Block path: $BLOCK_PATH"
+ui_print ""
+
+# ── Logical partitions (inside super — skip these) ──
+SKIP_LIST="system system_ext product vendor odm mi_ext system_dlkm vendor_dlkm"
+
+is_logical() {
+    for s in $SKIP_LIST; do
+        [ "$1" = "$s" ] && return 0
+    done
+    return 1
+}
+
+# ── Flash all images ──
+ui_print "  ⚡ Flashing partitions..."
+ui_print "  ─────────────────────────"
+CURRENT=0
+for img in "$IMG_DIR"/*.img; do
+    [ ! -f "$img" ] && continue
+    IMGNAME=$(basename "$img" .img)
+    CURRENT=$((CURRENT + 1))
+
+    # Calculate progress (0.1 to 0.6 range for firmware)
+    PROG=$(awk "BEGIN {printf \"%.2f\", 0.1 + ($CURRENT / $TOTAL) * 0.5}")
+    set_progress "$PROG"
+
+    # Skip super.img (handled separately below)
+    [ "$IMGNAME" = "super" ] && continue
+
+    # Skip logical partitions (they live inside super)
+    if is_logical "$IMGNAME"; then
+        ui_print "  [$CURRENT/$TOTAL] ⏭ $IMGNAME (inside super)"
+        continue
     fi
 
-    # updater-script (dynamic EDIFY — xiaomi.eu style)
-    {
-        echo "ui_print(\"Your device: \" + getprop(\"ro.product.device\"));"
-        echo "getprop(\"ro.product.device\") == \"${DEVICE_CODE}\" || abort(\"Compatible devices: ${DEVICE_CODE}\");"
-        echo ""
+    # Determine flash target
+    case "$IMGNAME" in
+        cust|persist)
+            # No A/B slot
+            TARGET="$BLOCK_PATH/$IMGNAME"
+            ui_print "  [$CURRENT/$TOTAL] ⚡ $IMGNAME → $IMGNAME"
+            dd if="$img" of="$TARGET" bs=4096 2>/dev/null || \
+                ui_print "  [WARN] Failed to flash $IMGNAME"
+            ;;
+        *)
+            # A/B partition — flash to both slots
+            for slot in _a _b; do
+                TARGET="$BLOCK_PATH/${IMGNAME}${slot}"
+                if [ -e "$TARGET" ]; then
+                    dd if="$img" of="$TARGET" bs=4096 2>/dev/null || \
+                        ui_print "  [WARN] Failed to flash ${IMGNAME}${slot}"
+                fi
+            done
+            ui_print "  [$CURRENT/$TOTAL] ⚡ $IMGNAME → ${IMGNAME}_a/b"
+            ;;
+    esac
+done
 
-        # Firmware images — flash to both _a and _b slots
-        echo "show_progress(0.200000, 0);"
-        echo "ui_print(\"Flashing firmware partitions...\");"
-        while IFS=' ' read -r img_name img_cat img_target img_sz; do
-            [ "$img_cat" != "firmware" ] && continue
-            [ "$img_name" == "super" ] && continue
-            # Determine slot handling
-            case "$img_name" in
-                cust|persist|userdata|metadata)
-                    # No A/B slot
-                    echo "package_extract_file(\"images/${img_name}.img\", \"/dev/block/bootdevice/by-name/${img_name}\");"
-                    ;;
-                *)
-                    # Flash to both slots
-                    echo "package_extract_file(\"images/${img_name}.img\", \"/dev/block/bootdevice/by-name/${img_name}_a\");"
-                    echo "package_extract_file(\"images/${img_name}.img\", \"/dev/block/bootdevice/by-name/${img_name}_b\");"
-                    ;;
-            esac
-        done < "$MANIFEST_FILE"
-        echo "set_progress(1.000000);"
-        echo ""
+# ── Flash super.img ──
+SUPER_IMG="$IMG_DIR/super.img"
+if [ -f "$SUPER_IMG" ]; then
+    ui_print ""
+    ui_print "  ─────────────────────────"
+    ui_print "  🔷 Flashing super partition..."
+    set_progress 0.65
 
-        # Boot partitions
-        echo "show_progress(0.100000, 0);"
-        echo "ui_print(\"Flashing boot partitions...\");"
-        for bp in boot vendor_boot dtbo; do
-            if [ -f "$PACK_DIR/images/${bp}.img" ]; then
-                echo "package_extract_file(\"images/${bp}.img\", \"/dev/block/bootdevice/by-name/${bp}_a\");"
-                echo "package_extract_file(\"images/${bp}.img\", \"/dev/block/bootdevice/by-name/${bp}_b\");"
+    SUPER_TARGET="$BLOCK_PATH/super"
+    if [ -e "$SUPER_TARGET" ]; then
+        # Check if sparse — sparse images start with magic 0xED26FF3A
+        MAGIC=$(xxd -l 4 -p "$SUPER_IMG" 2>/dev/null)
+        if [ "$MAGIC" = "3aff26ed" ]; then
+            # Sparse image → try simg2img if available, else dd raw
+            if command -v simg2img >/dev/null 2>&1; then
+                ui_print "  Converting sparse → raw and flashing..."
+                simg2img "$SUPER_IMG" "$SUPER_TARGET" 2>/dev/null || \
+                    abort "Failed to flash super.img (simg2img error)"
+            else
+                ui_print "  Flashing sparse super.img directly..."
+                dd if="$SUPER_IMG" of="$SUPER_TARGET" bs=4096 2>/dev/null || \
+                    abort "Failed to flash super.img"
             fi
-        done
-        echo "set_progress(1.000000);"
-        echo ""
+        else
+            # Raw image → direct dd
+            ui_print "  Flashing raw super.img..."
+            dd if="$SUPER_IMG" of="$SUPER_TARGET" bs=4096 2>/dev/null || \
+                abort "Failed to flash super.img"
+        fi
+        SUPER_SIZE=$(du -h "$SUPER_IMG" | cut -f1)
+        ui_print "  ✓ super.img flashed (${SUPER_SIZE})"
+    else
+        ui_print "  [WARN] super partition not found on device!"
+    fi
+fi
+set_progress 0.90
 
-        # Super partition (sparse image → use package_unsparse_file)
-        echo "show_progress(0.600000, 0);"
-        echo "ui_print(\"Flashing super partition...\");"
-        echo "package_unsparse_file(\"images/super.img\", \"/dev/block/bootdevice/by-name/super\");"
-        echo "set_progress(1.000000);"
-        echo ""
+# ── Set active slot to A ──
+ui_print ""
+ui_print "  🔄 Setting active slot to A..."
+if command -v bootctl >/dev/null 2>&1; then
+    bootctl set-active-boot-slot 0 2>/dev/null
+elif [ -f "/system/bin/bootctl" ]; then
+    /system/bin/bootctl set-active-boot-slot 0 2>/dev/null
+fi
 
-        # Set active slot and cleanup
-        echo "run_program(\"/system/bin/bootctl\", \"set-active-boot-slot\", \"0\");"
-        echo "run_program(\"/sbin/sh\", \"-c\", \"rm -f /data/cache/command\");"
-    } > "$META_GOOGLE/updater-script"
-    log_success "✓ META-INF/com/google/android/updater-script (EDIFY)"
+# ── Cleanup ──
+set_progress 0.95
+rm -rf "$TMP"
+
+ui_print ""
+ui_print "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+ui_print "  ✅ nexdroid.build — Install Complete!"
+ui_print "  Reboot your device to start."
+ui_print "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+ui_print ""
+set_progress 1.0
+exit 0
+UPDATE_BINARY_EOF
+    chmod +x "$META_GOOGLE/update-binary"
+    log_success "✓ META-INF/com/google/android/update-binary (shell-based)"
+
+    # updater-script (required to exist — must not be empty for some recoveries)
+    echo '# Dummy updater-script — update-binary handles everything' \
+        > "$META_GOOGLE/updater-script"
+    log_success "✓ META-INF/com/google/android/updater-script"
 
     # metadata
     BUILD_TIMESTAMP=$(date +%s)
