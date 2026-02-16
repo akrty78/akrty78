@@ -3060,10 +3060,11 @@ if [ "$BUILD_MODE" == "hybrid" ]; then
     log_step "🔨 Building super.img..."
     tg_progress "🔨 **Building super.img (lpmake)...**"
 
-    # Ensure lpmake is available — download prebuilt binary
+    # Ensure lpmake is available — download AOSP 15 prebuilt binary
     if ! command -v lpmake &>/dev/null; then
-        log_info "Installing lpmake (prebuilt binary)..."
-        LPMAKE_URL="https://raw.githubusercontent.com/whyshhnuv/lpunpack-lpmake-mirror/Linux-debian/binary/lpmake"
+        log_info "Installing lpmake (AOSP 15 prebuilt)..."
+        LPMAKE_URL="https://raw.githubusercontent.com/Rprop/aosp15_partition_tools/main/linux_glibc_x86_64/lpmake"
+        IMG2SIMG_URL="https://raw.githubusercontent.com/Rprop/aosp15_partition_tools/main/linux_glibc_x86_64/img2simg"
         if curl -fsSL --retry 3 --connect-timeout 30 -o "$BIN_DIR/lpmake" "$LPMAKE_URL"; then
             chmod +x "$BIN_DIR/lpmake"
             sudo cp "$BIN_DIR/lpmake" /usr/local/bin/lpmake
@@ -3072,10 +3073,13 @@ if [ "$BUILD_MODE" == "hybrid" ]; then
             log_error "✗ Failed to download lpmake binary"
             exit 1
         fi
+        # Also grab img2simg as utility
+        curl -fsSL --retry 3 -o "$BIN_DIR/img2simg" "$IMG2SIMG_URL" 2>/dev/null && \
+            chmod +x "$BIN_DIR/img2simg" && sudo cp "$BIN_DIR/img2simg" /usr/local/bin/img2simg || true
     fi
-    # Verify lpmake works
-    if ! lpmake --help &>/dev/null; then
-        log_error "✗ lpmake is not functional"
+    # Verify lpmake is functional (invoke without args — prints usage, returns non-zero but doesn't crash)
+    if ! lpmake 2>&1 | grep -qi "usage\|option\|partition\|device"; then
+        log_error "✗ lpmake binary is not functional on this system"
         exit 1
     fi
     log_success "✓ lpmake ready"
