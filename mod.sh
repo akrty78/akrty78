@@ -58,6 +58,7 @@ _Last Update: $timestamp_"
 # --- INPUTS ---
 ROM_URL="$1"
 MODS_SELECTED="${2:-}"   # comma-separated: launcher,thememanager,securitycenter
+BUILD_MODE="${3:-mod}"   # "mod" = current behavior, "hybrid" = full fastboot-flashable package
 
 # --- 1. INSTANT METADATA EXTRACTION ---
 FILENAME=$(basename "$ROM_URL" | cut -d'?' -f1)
@@ -1971,6 +1972,73 @@ rm payload.bin
 log_success "Firmware extracted in ${EXTRACT_TIME}s"
 
 # =========================================================
+#  4.1. FIRMWARE LOGIC ENGINE
+#  Classifies all extracted images into categories and generates
+#  a partition manifest for dynamic flashing script generation.
+# =========================================================
+log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+log_step "🧠 FIRMWARE LOGIC ENGINE"
+log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+# Super (logical) partitions — these get mounted, modified, repacked
+SUPER_PARTITIONS="system system_ext product mi_ext vendor odm system_dlkm vendor_dlkm"
+
+# Special partitions that do NOT use _ab suffix when flashing
+NO_AB_PARTITIONS="cust super userdata persist"
+
+# Partition manifest: <filename> <category> <flash_target> <size_bytes>
+MANIFEST_FILE="$TEMP_DIR/partition_manifest.txt"
+FIRMWARE_LIST=""
+SUPER_LIST=""
+> "$MANIFEST_FILE"
+
+for img_file in "$IMAGES_DIR"/*.img; do
+    [ ! -f "$img_file" ] && continue
+    img_name=$(basename "$img_file" .img)
+    img_size=$(stat -c%s "$img_file" 2>/dev/null || echo 0)
+    img_size_mb=$((img_size / 1024 / 1024))
+
+    # Classify
+    is_super=0
+    for sp in $SUPER_PARTITIONS; do
+        [ "$img_name" == "$sp" ] && is_super=1 && break
+    done
+
+    if [ "$is_super" -eq 1 ]; then
+        category="super"
+        flash_target="$img_name"
+        SUPER_LIST="$SUPER_LIST $img_name"
+    else
+        category="firmware"
+        # Determine flash target name (most partitions use _ab suffix for VAB)
+        is_no_ab=0
+        for nab in $NO_AB_PARTITIONS; do
+            [ "$img_name" == "$nab" ] && is_no_ab=1 && break
+        done
+        if [ "$is_no_ab" -eq 1 ]; then
+            flash_target="$img_name"
+        else
+            flash_target="${img_name}_ab"
+        fi
+        FIRMWARE_LIST="$FIRMWARE_LIST $img_name"
+    fi
+
+    echo "$img_name $category $flash_target $img_size" >> "$MANIFEST_FILE"
+
+    if [ "$category" == "super" ]; then
+        log_info "  📦 ${img_name}.img → [SUPER]  (${img_size_mb}MB)"
+    else
+        log_info "  ⚡ ${img_name}.img → [FIRMWARE] flash as ${flash_target}  (${img_size_mb}MB)"
+    fi
+done
+
+TOTAL_FW=$(echo $FIRMWARE_LIST | wc -w)
+TOTAL_SP=$(echo $SUPER_LIST | wc -w)
+log_success "✓ Classified $TOTAL_FW firmware + $TOTAL_SP super partitions"
+log_info "Build mode: $BUILD_MODE"
+log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+# =========================================================
 #  4.5. VBMETA VERIFICATION DISABLER (PROFESSIONAL)
 # =========================================================
 log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -2978,30 +3046,756 @@ done
 log_step "📦 Creating Final Package..."
 tg_progress "🗜️ **Packing ROM...**"
 PACK_DIR="$OUTPUT_DIR/Final_Pack"
-mkdir -p "$PACK_DIR/super" "$PACK_DIR/images"
 
-log_info "Organizing super partitions..."
-SUPER_TARGETS="system system_ext product mi_ext vendor odm system_dlkm vendor_dlkm"
-SUPER_COUNT=0
-for img in $SUPER_TARGETS; do
-    if [ -f "$SUPER_DIR/${img}.img" ]; then
-        mv "$SUPER_DIR/${img}.img" "$PACK_DIR/super/"
-        SUPER_COUNT=$((SUPER_COUNT + 1))
-        log_success "✓ Added to package: ${img}.img"
-    elif [ -f "$IMAGES_DIR/${img}.img" ]; then
-        mv "$IMAGES_DIR/${img}.img" "$PACK_DIR/super/"
-        SUPER_COUNT=$((SUPER_COUNT + 1))
-        log_success "✓ Added to package: ${img}.img"
+if [ "$BUILD_MODE" == "hybrid" ]; then
+    # ─────────────────────────────────────────────────────────
+    #  HYBRID ROM BUILD — Full fastboot-flashable package
+    # ─────────────────────────────────────────────────────────
+    log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    log_step "🔧 HYBRID ROM BUILDER"
+    log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    mkdir -p "$PACK_DIR/images"
+
+    # ── 6a. BUILD SUPER.IMG ──────────────────────────────────
+    log_step "🔨 Building super.img..."
+    tg_progress "🔨 **Building super.img (lpmake)...**"
+
+    # Ensure lpmake is available
+    if ! command -v lpmake &>/dev/null; then
+        log_info "Installing lpmake..."
+        sudo apt-get install -y android-sdk-libsparse-utils 2>/dev/null || true
+        pip3 install lptools --break-system-packages -q 2>/dev/null || true
     fi
+
+    SUPER_BUILD_DIR="$TEMP_DIR/super_build"
+    mkdir -p "$SUPER_BUILD_DIR"
+
+    # Calculate total super partition size
+    TOTAL_SUPER_SIZE=0
+    LPMAKE_PARTS=""
+    LPMAKE_IMAGES=""
+    SUPER_PART_COUNT=0
+
+    SUPER_TARGETS="system system_ext product mi_ext vendor odm system_dlkm vendor_dlkm"
+    for sp in $SUPER_TARGETS; do
+        sp_img=""
+        if [ -f "$SUPER_DIR/${sp}.img" ]; then
+            sp_img="$SUPER_DIR/${sp}.img"
+        elif [ -f "$IMAGES_DIR/${sp}.img" ]; then
+            sp_img="$IMAGES_DIR/${sp}.img"
+        fi
+        [ -z "$sp_img" ] && continue
+
+        sp_size=$(stat -c%s "$sp_img" 2>/dev/null || echo 0)
+        sp_size_mb=$((sp_size / 1024 / 1024))
+        TOTAL_SUPER_SIZE=$((TOTAL_SUPER_SIZE + sp_size))
+        SUPER_PART_COUNT=$((SUPER_PART_COUNT + 1))
+
+        # VAB: partition_a gets the image, partition_b is empty (size=0)
+        LPMAKE_PARTS="$LPMAKE_PARTS --partition ${sp}_a:readonly:${sp_size}:main_a"
+        LPMAKE_PARTS="$LPMAKE_PARTS --partition ${sp}_b:readonly:0:main_b"
+        LPMAKE_IMAGES="$LPMAKE_IMAGES --image ${sp}_a=$sp_img"
+
+        log_info "  📦 ${sp}.img → ${sp_size_mb}MB"
+    done
+
+    if [ "$SUPER_PART_COUNT" -eq 0 ]; then
+        log_error "No super partitions found — cannot build super.img"
+        exit 1
+    fi
+
+    # Group size = total partition sizes + 10% padding
+    PADDING=$((TOTAL_SUPER_SIZE / 10))
+    GROUP_SIZE=$((TOTAL_SUPER_SIZE + PADDING))
+
+    # Device size = group size + metadata (65536 * 2 slots * 2 for safety) + alignment
+    METADATA_SIZE=65536
+    DEVICE_SIZE=$((GROUP_SIZE + METADATA_SIZE * 4 + 4096))
+    # Align to 4096 boundary
+    DEVICE_SIZE=$(( (DEVICE_SIZE + 4095) / 4096 * 4096 ))
+
+    TOTAL_MB=$((TOTAL_SUPER_SIZE / 1024 / 1024))
+    DEVICE_MB=$((DEVICE_SIZE / 1024 / 1024))
+    log_info "Super partitions: $SUPER_PART_COUNT | Total: ${TOTAL_MB}MB | Device size: ${DEVICE_MB}MB"
+
+    SUPER_RAW="$SUPER_BUILD_DIR/super.img"
+
+    START_TIME=$(date +%s)
+    if lpmake \
+        --metadata-size $METADATA_SIZE \
+        --metadata-slots 2 \
+        --device "super:${DEVICE_SIZE}" \
+        --group "main_a:${GROUP_SIZE}" \
+        --group "main_b:0" \
+        $LPMAKE_PARTS \
+        $LPMAKE_IMAGES \
+        --sparse \
+        --output "$SUPER_RAW" 2>&1 | while IFS= read -r line; do
+            log_info "  lpmake: $line"
+        done; then
+        END_TIME=$(date +%s)
+        BUILD_TIME=$((END_TIME - START_TIME))
+        SUPER_SIZE=$(du -h "$SUPER_RAW" | cut -f1)
+        log_success "✓ super.img built (${SUPER_SIZE}) in ${BUILD_TIME}s"
+    else
+        log_error "✗ lpmake failed!"
+        exit 1
+    fi
+
+    # Split sparse super.img into ~500MB chunks
+    log_info "Splitting super.img into chunks..."
+    cd "$SUPER_BUILD_DIR"
+    split -b 500M -d "$SUPER_RAW" super.img.
+    rm -f "$SUPER_RAW"
+
+    # Rename chunks: super.img.00 → super.img.0, etc.
+    CHUNK_COUNT=0
+    for chunk in super.img.*; do
+        [ ! -f "$chunk" ] && continue
+        # strip leading zeros from suffix
+        suffix="${chunk#super.img.}"
+        new_suffix=$((10#$suffix))
+        if [ "$suffix" != "$new_suffix" ]; then
+            mv "$chunk" "super.img.${new_suffix}"
+        fi
+        chunk_size=$(du -h "super.img.${new_suffix}" | cut -f1)
+        log_success "  ✓ super.img.${new_suffix} (${chunk_size})"
+        mv "super.img.${new_suffix}" "$PACK_DIR/images/"
+        CHUNK_COUNT=$((CHUNK_COUNT + 1))
+    done
+    log_success "✓ Split into $CHUNK_COUNT chunks → images/"
+
+    cd "$GITHUB_WORKSPACE"
+    rm -rf "$SUPER_BUILD_DIR"
+
+    # ── 6b. MOVE FIRMWARE IMAGES ─────────────────────────────
+    log_info "Organizing firmware images..."
+    FW_COUNT=0
+    while IFS=' ' read -r img_name img_cat img_target img_sz; do
+        [ "$img_cat" != "firmware" ] && continue
+        if [ -f "$IMAGES_DIR/${img_name}.img" ]; then
+            mv "$IMAGES_DIR/${img_name}.img" "$PACK_DIR/images/"
+            FW_COUNT=$((FW_COUNT + 1))
+        fi
+    done < "$MANIFEST_FILE"
+    log_success "✓ Moved $FW_COUNT firmware images"
+
+    # ── 6c. DOWNLOAD PLATFORM TOOLS (bin/) ───────────────────
+    log_step "⬇️  Downloading platform tools..."
+    tg_progress "⬇️ **Downloading platform tools...**"
+    TOOLS_DIR="$PACK_DIR/bin"
+    mkdir -p "$TOOLS_DIR/windows" "$TOOLS_DIR/linux" "$TOOLS_DIR/macos"
+
+    _download_platform_tools() {
+        local os_name="$1" url="$2" subdir="$3"
+        local zip_path="$TEMP_DIR/pt_${os_name}.zip"
+        log_info "  $os_name → downloading..."
+        if curl -fsSL --retry 3 --connect-timeout 30 -o "$zip_path" "$url" 2>/dev/null; then
+            local extract_dir="$TEMP_DIR/pt_${os_name}"
+            mkdir -p "$extract_dir"
+            unzip -qq -o "$zip_path" -d "$extract_dir"
+            # Find and copy fastboot + adb
+            find "$extract_dir" -name "fastboot*" -type f -exec cp {} "$TOOLS_DIR/$subdir/" \;
+            find "$extract_dir" -name "adb*" -type f -exec cp {} "$TOOLS_DIR/$subdir/" \;
+            # Copy required shared libraries
+            find "$extract_dir" \( -name "*.dll" -o -name "*.so" -o -name "*.dylib" \) -type f -exec cp {} "$TOOLS_DIR/$subdir/" \;
+            chmod +x "$TOOLS_DIR/$subdir/"* 2>/dev/null
+            rm -rf "$extract_dir" "$zip_path"
+            log_success "  ✓ $os_name platform tools ready"
+        else
+            log_error "  ✗ $os_name platform tools download failed"
+        fi
+    }
+
+    _download_platform_tools "windows" \
+        "https://dl.google.com/android/repository/platform-tools-latest-windows.zip" "windows"
+    _download_platform_tools "linux" \
+        "https://dl.google.com/android/repository/platform-tools-latest-linux.zip" "linux"
+    _download_platform_tools "macos" \
+        "https://dl.google.com/android/repository/platform-tools-latest-darwin.zip" "macos"
+
+    # ── 6d. GENERATE FLASHING SCRIPTS ────────────────────────
+    log_step "📝 Generating flashing scripts..."
+    tg_progress "📝 **Generating flashing scripts...**"
+
+    # Collect firmware image flash commands from manifest
+    FW_FLASH_LINES_BAT=""
+    FW_FLASH_LINES_SH=""
+    while IFS=' ' read -r img_name img_cat img_target img_sz; do
+        [ "$img_cat" != "firmware" ] && continue
+        # Skip super chunks — handled separately
+        [ "$img_name" == "super" ] && continue
+        FW_FLASH_LINES_BAT="${FW_FLASH_LINES_BAT}
+echo   %%PB%%  Flashing ${img_name}...
+%%fastboot%% flash ${img_target} images\\${img_name}.img || goto :error"
+        FW_FLASH_LINES_SH="${FW_FLASH_LINES_SH}
+echo \"   ⚡  Flashing ${img_name}...\"
+\$FASTBOOT flash ${img_target} images/${img_name}.img || exit_error \"Failed to flash ${img_name}\""
+    done < "$MANIFEST_FILE"
+
+    # Collect super chunk flash commands
+    SUPER_FLASH_BAT=""
+    SUPER_FLASH_SH=""
+    for schunk in "$PACK_DIR"/images/super.img.*; do
+        [ ! -f "$schunk" ] && continue
+        sname=$(basename "$schunk")
+        SUPER_FLASH_BAT="${SUPER_FLASH_BAT}
+echo   %%PB%%  Flashing ${sname}...
+%%fastboot%% flash super images\\${sname} || goto :error"
+        SUPER_FLASH_SH="${SUPER_FLASH_SH}
+echo \"   ⚡  Flashing ${sname}...\"
+\$FASTBOOT flash super images/${sname} || exit_error \"Failed to flash ${sname}\""
+    done
+
+    # ═══════════════════════════════════════════════════════════
+    # WINDOWS SCRIPTS
+    # ═══════════════════════════════════════════════════════════
+
+    # --- Windows Clean Flash ---
+    cat > "$PACK_DIR/windows_clean_flash.bat" << 'WINCLEAN_EOF'
+@echo off
+setlocal enabledelayedexpansion
+cd /d %~dp0
+title nexdroid.build // Clean Flash
+color 0B
+
+echo.
+echo  ╔══════════════════════════════════════════════════════════════╗
+echo  ║                                                              ║
+echo  ║     ███╗   ██╗███████╗██╗  ██╗██████╗ ██████╗  ██████╗ ██╗██████╗  ║
+echo  ║     ████╗  ██║██╔════╝╚██╗██╔╝██╔══██╗██╔══██╗██╔═══██╗██║██╔══██╗ ║
+echo  ║     ██╔██╗ ██║█████╗   ╚███╔╝ ██║  ██║██████╔╝██║   ██║██║██║  ██║ ║
+echo  ║     ██║╚██╗██║██╔══╝   ██╔██╗ ██║  ██║██╔══██╗██║   ██║██║██║  ██║ ║
+echo  ║     ██║ ╚████║███████╗██╔╝ ██╗██████╔╝██║  ██║╚██████╔╝██║██████╔╝ ║
+echo  ║     ╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚═╝╚═════╝  ║
+echo  ║                                                              ║
+echo  ║  ─────────────────── nexdroid.build ───────────────────────  ║
+echo  ║                     CLEAN FLASH MODE                         ║
+echo  ║  ────────────────────────────────────────────────────────── ║
+echo  ╚══════════════════════════════════════════════════════════════╝
+echo.
+
+set PB=^>^>
+set fastboot=bin\windows\fastboot.exe
+if not exist %fastboot% (
+    echo  [ERROR] %fastboot% not found!
+    echo  Make sure the bin folder is intact.
+    pause
+    exit /B 1
+)
+
+echo  [*] Waiting for device in fastboot mode...
+%fastboot% devices 2>nul | findstr /r "." >nul
+if errorlevel 1 (
+    echo  [!] No device found. Please connect your device in fastboot mode.
+    pause
+    exit /B 1
+)
+
+set device=
+for /f "tokens=2" %%A in ('%fastboot% getvar product 2^>^&1 ^| findstr "\<product:"') do set device=%%A
+if "%device%" equ "" (
+    echo  [!] Could not detect device codename.
+    pause
+    exit /B 1
+)
+echo  [*] Device detected: %device%
+
+WINCLEAN_EOF
+
+    # Inject device check
+    echo "if \"%device%\" neq \"$DEVICE_CODE\" (" >> "$PACK_DIR/windows_clean_flash.bat"
+    cat >> "$PACK_DIR/windows_clean_flash.bat" << WINCLEAN2_EOF
+    echo  [!] Incompatible device! Expected: $DEVICE_CODE
+    pause
+    exit /B 1
+)
+
+echo.
+echo  ╔══════════════════════════════════════════════════════════════╗
+echo  ║  WARNING: CLEAN FLASH will erase ALL data on your device!    ║
+echo  ║  This includes apps, settings, and internal storage.         ║
+echo  ║  Make sure you have a backup before continuing.              ║
+echo  ╚══════════════════════════════════════════════════════════════╝
+echo.
+set /p choice=  Do you want to continue? [y/N] 
+if /i "%choice%" neq "y" exit /B 0
+
+echo.
+echo  ══════════════════════════════════════════════════════════════
+echo   nexdroid.build // Flashing in progress — DO NOT DISCONNECT
+echo  ══════════════════════════════════════════════════════════════
+echo.
+
+%fastboot% set_active a
+echo   %PB%  Slot A activated
+$FW_FLASH_LINES_BAT
+$SUPER_FLASH_BAT
+
+echo.
+echo   %PB%  Erasing metadata...
+%fastboot% erase metadata
+echo   %PB%  Erasing userdata...
+%fastboot% erase userdata
+
+echo.
+echo  ══════════════════════════════════════════════════════════════
+echo   nexdroid.build // Flash complete — rebooting device...
+echo  ══════════════════════════════════════════════════════════════
+%fastboot% reboot
+echo.
+echo   [DONE] Your device will now reboot. First boot may take a while.
+pause
+exit /B 0
+
+:error
+echo.
+echo  [ERROR] Flashing failed! Please check the error above.
+pause
+exit /B 1
+WINCLEAN2_EOF
+    log_success "✓ windows_clean_flash.bat"
+
+    # --- Windows Dirty Flash ---
+    cat > "$PACK_DIR/windows_dirty_flash_upgrade.bat" << 'WINDIRTY_EOF'
+@echo off
+setlocal enabledelayedexpansion
+cd /d %~dp0
+title nexdroid.build // Dirty Flash Upgrade
+color 0A
+
+echo.
+echo  ╔══════════════════════════════════════════════════════════════╗
+echo  ║                                                              ║
+echo  ║     ███╗   ██╗███████╗██╗  ██╗██████╗ ██████╗  ██████╗ ██╗██████╗  ║
+echo  ║     ████╗  ██║██╔════╝╚██╗██╔╝██╔══██╗██╔══██╗██╔═══██╗██║██╔══██╗ ║
+echo  ║     ██╔██╗ ██║█████╗   ╚███╔╝ ██║  ██║██████╔╝██║   ██║██║██║  ██║ ║
+echo  ║     ██║╚██╗██║██╔══╝   ██╔██╗ ██║  ██║██╔══██╗██║   ██║██║██║  ██║ ║
+echo  ║     ██║ ╚████║███████╗██╔╝ ██╗██████╔╝██║  ██║╚██████╔╝██║██████╔╝ ║
+echo  ║     ╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚═╝╚═════╝  ║
+echo  ║                                                              ║
+echo  ║  ─────────────────── nexdroid.build ───────────────────────  ║
+echo  ║                  DIRTY FLASH / UPGRADE MODE                  ║
+echo  ║  ────────────────────────────────────────────────────────── ║
+echo  ╚══════════════════════════════════════════════════════════════╝
+echo.
+
+set PB=^>^>
+set fastboot=bin\windows\fastboot.exe
+if not exist %fastboot% (
+    echo  [ERROR] %fastboot% not found!
+    pause
+    exit /B 1
+)
+
+echo  [*] Waiting for device in fastboot mode...
+%fastboot% devices 2>nul | findstr /r "." >nul
+if errorlevel 1 (
+    echo  [!] No device found. Please connect your device in fastboot mode.
+    pause
+    exit /B 1
+)
+
+set device=
+for /f "tokens=2" %%A in ('%fastboot% getvar product 2^>^&1 ^| findstr "\<product:"') do set device=%%A
+if "%device%" equ "" (
+    echo  [!] Could not detect device codename.
+    pause
+    exit /B 1
+)
+echo  [*] Device detected: %device%
+
+WINDIRTY_EOF
+
+    echo "if \"%device%\" neq \"$DEVICE_CODE\" (" >> "$PACK_DIR/windows_dirty_flash_upgrade.bat"
+    cat >> "$PACK_DIR/windows_dirty_flash_upgrade.bat" << WINDIRTY2_EOF
+    echo  [!] Incompatible device! Expected: $DEVICE_CODE
+    pause
+    exit /B 1
+)
+
+echo.
+echo  ╔══════════════════════════════════════════════════════════════╗
+echo  ║  DIRTY FLASH: Your data, apps, and settings will be kept.    ║
+echo  ║  Use this when upgrading from a previous nexdroid build.     ║
+echo  ╚══════════════════════════════════════════════════════════════╝
+echo.
+set /p choice=  Do you want to continue? [y/N] 
+if /i "%choice%" neq "y" exit /B 0
+
+echo.
+echo  ══════════════════════════════════════════════════════════════
+echo   nexdroid.build // Flashing in progress — DO NOT DISCONNECT
+echo  ══════════════════════════════════════════════════════════════
+echo.
+
+%fastboot% set_active a
+echo   %PB%  Slot A activated
+$FW_FLASH_LINES_BAT
+$SUPER_FLASH_BAT
+
+echo.
+echo  ══════════════════════════════════════════════════════════════
+echo   nexdroid.build // Flash complete — rebooting device...
+echo  ══════════════════════════════════════════════════════════════
+%fastboot% reboot
+echo.
+echo   [DONE] Your device will now reboot. First boot may take a while.
+pause
+exit /B 0
+
+:error
+echo.
+echo  [ERROR] Flashing failed! Please check the error above.
+pause
+exit /B 1
+WINDIRTY2_EOF
+    log_success "✓ windows_dirty_flash_upgrade.bat"
+
+    # ═══════════════════════════════════════════════════════════
+    # LINUX SCRIPTS
+    # ═══════════════════════════════════════════════════════════
+
+    _generate_unix_script() {
+        local filepath="$1" mode_label="$2" is_clean="$3" os_label="$4" fb_path="$5"
+
+        cat > "$filepath" << 'UNIX_HEADER'
+#!/bin/bash
+# ═══════════════════════════════════════════════════════════
+#  nexdroid.build — Fastboot Flasher
+# ═══════════════════════════════════════════════════════════
+set -e
+
+cd "$(dirname "$0")"
+
+# ── Colors ──
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+banner() {
+    echo -e "${CYAN}"
+    echo "  ╔══════════════════════════════════════════════════════════╗"
+    echo "  ║                                                          ║"
+    echo "  ║   ███╗   ██╗███████╗██╗  ██╗██████╗ ██████╗  ██████╗    ║"
+    echo "  ║   ████╗  ██║██╔════╝╚██╗██╔╝██╔══██╗██╔══██╗██╔═══██╗   ║"
+    echo "  ║   ██╔██╗ ██║█████╗   ╚███╔╝ ██║  ██║██████╔╝██║   ██║   ║"
+    echo "  ║   ██║╚██╗██║██╔══╝   ██╔██╗ ██║  ██║██╔══██╗██║   ██║   ║"
+    echo "  ║   ██║ ╚████║███████╗██╔╝ ██╗██████╔╝██║  ██║╚██████╔╝   ║"
+    echo "  ║   ╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝╚═════╝ ╚═╝  ╚═╝ ╚═════╝    ║"
+    echo "  ║                                                          ║"
+    echo "  ║  ───────────────── nexdroid.build ─────────────────────  ║"
+UNIX_HEADER
+
+        if [ "$is_clean" == "1" ]; then
+            echo '    echo "  ║                   CLEAN FLASH MODE                      ║"' >> "$filepath"
+        else
+            echo '    echo "  ║               DIRTY FLASH / UPGRADE MODE                ║"' >> "$filepath"
+        fi
+
+        cat >> "$filepath" << 'UNIX_HEADER2'
+    echo "  ║  ────────────────────────────────────────────────────  ║"
+    echo "  ╚══════════════════════════════════════════════════════════╝"
+    echo -e "${NC}"
+}
+
+exit_error() {
+    echo -e "${RED}  [ERROR] $1${NC}"
+    exit 1
+}
+
+banner
+UNIX_HEADER2
+
+        # Fastboot path and device detection
+        cat >> "$filepath" << UNIX_DETECT
+FASTBOOT="$fb_path"
+if [ ! -f "\$FASTBOOT" ]; then
+    # Fallback to system fastboot
+    FASTBOOT=\$(which fastboot 2>/dev/null || true)
+    [ -z "\$FASTBOOT" ] && exit_error "fastboot not found! Make sure the bin folder is intact."
+fi
+chmod +x "\$FASTBOOT" 2>/dev/null
+
+echo -e "\${CYAN}  [*] Waiting for device in fastboot mode...\${NC}"
+if ! \$FASTBOOT devices 2>/dev/null | grep -q "fastboot"; then
+    exit_error "No device found. Please connect your device in fastboot mode."
+fi
+
+DEVICE=\$(\$FASTBOOT getvar product 2>&1 | grep "product:" | awk '{print \$2}')
+[ -z "\$DEVICE" ] && exit_error "Could not detect device codename."
+echo -e "\${GREEN}  [*] Device detected: \${BOLD}\$DEVICE\${NC}"
+
+if [ "\$DEVICE" != "$DEVICE_CODE" ]; then
+    exit_error "Incompatible device! Expected: $DEVICE_CODE, Got: \$DEVICE"
+fi
+
+UNIX_DETECT
+
+        # Mode-specific warning
+        if [ "$is_clean" == "1" ]; then
+            cat >> "$filepath" << 'UNIX_WARN_CLEAN'
+echo ""
+echo -e "${YELLOW}  ╔══════════════════════════════════════════════════════════╗${NC}"
+echo -e "${YELLOW}  ║  WARNING: CLEAN FLASH will erase ALL data!               ║${NC}"
+echo -e "${YELLOW}  ║  This includes apps, settings, and internal storage.      ║${NC}"
+echo -e "${YELLOW}  ╚══════════════════════════════════════════════════════════╝${NC}"
+echo ""
+read -p "  Do you want to continue? [y/N] " choice
+[[ ! "$choice" =~ ^[Yy]$ ]] && exit 0
+UNIX_WARN_CLEAN
+        else
+            cat >> "$filepath" << 'UNIX_WARN_DIRTY'
+echo ""
+echo -e "${GREEN}  ╔══════════════════════════════════════════════════════════╗${NC}"
+echo -e "${GREEN}  ║  DIRTY FLASH: Your data, apps, and settings will be kept.║${NC}"
+echo -e "${GREEN}  ║  Use this when upgrading from a previous nexdroid build.  ║${NC}"
+echo -e "${GREEN}  ╚══════════════════════════════════════════════════════════╝${NC}"
+echo ""
+read -p "  Do you want to continue? [y/N] " choice
+[[ ! "$choice" =~ ^[Yy]$ ]] && exit 0
+UNIX_WARN_DIRTY
+        fi
+
+        # Flashing body
+        cat >> "$filepath" << 'UNIX_FLASH_START'
+echo ""
+echo -e "${MAGENTA}  ══════════════════════════════════════════════════════════${NC}"
+echo -e "${MAGENTA}   nexdroid.build // Flashing — DO NOT DISCONNECT${NC}"
+echo -e "${MAGENTA}  ══════════════════════════════════════════════════════════${NC}"
+echo ""
+
+$FASTBOOT set_active a
+echo -e "${GREEN}   ⚡  Slot A activated${NC}"
+UNIX_FLASH_START
+
+        # Firmware flash lines
+        echo "$FW_FLASH_LINES_SH" >> "$filepath"
+        # Super chunk flash lines
+        echo "$SUPER_FLASH_SH" >> "$filepath"
+
+        # Post-flash
+        if [ "$is_clean" == "1" ]; then
+            cat >> "$filepath" << 'UNIX_CLEAN_POST'
+
+echo ""
+echo -e "${YELLOW}   ⚡  Erasing metadata...${NC}"
+$FASTBOOT erase metadata
+echo -e "${YELLOW}   ⚡  Erasing userdata...${NC}"
+$FASTBOOT erase userdata
+UNIX_CLEAN_POST
+        fi
+
+        cat >> "$filepath" << 'UNIX_FOOTER'
+
+echo ""
+echo -e "${GREEN}  ══════════════════════════════════════════════════════════${NC}"
+echo -e "${GREEN}   nexdroid.build // Flash complete — rebooting device...${NC}"
+echo -e "${GREEN}  ══════════════════════════════════════════════════════════${NC}"
+$FASTBOOT reboot
+echo ""
+echo -e "${GREEN}   [DONE] Your device will now reboot. First boot may take a while.${NC}"
+UNIX_FOOTER
+
+        chmod +x "$filepath"
+    }
+
+    _generate_unix_script "$PACK_DIR/linux_clean_flash.sh" "Clean Flash" "1" "Linux" "bin/linux/fastboot"
+    log_success "✓ linux_clean_flash.sh"
+    _generate_unix_script "$PACK_DIR/linux_dirty_flash_upgrade.sh" "Dirty Flash" "0" "Linux" "bin/linux/fastboot"
+    log_success "✓ linux_dirty_flash_upgrade.sh"
+    _generate_unix_script "$PACK_DIR/macos_clean_flash.sh" "Clean Flash" "1" "macOS" "bin/macos/fastboot"
+    log_success "✓ macos_clean_flash.sh"
+    _generate_unix_script "$PACK_DIR/macos_dirty_flash_upgrade.sh" "Dirty Flash" "0" "macOS" "bin/macos/fastboot"
+    log_success "✓ macos_dirty_flash_upgrade.sh"
+
+    # ── 6e. META-INF (Recovery Flashing) ─────────────────────
+    log_step "📜 Generating META-INF recovery scripts..."
+    tg_progress "📜 **Generating recovery scripts...**"
+    META_GOOGLE="$PACK_DIR/META-INF/com/google/android"
+    META_ANDROID="$PACK_DIR/META-INF/com/android"
+    mkdir -p "$META_GOOGLE" "$META_ANDROID"
+
+    # update-binary (shell-based EDIFY replacement)
+    cat > "$META_GOOGLE/update-binary" << 'UPDATE_BINARY_EOF'
+#!/sbin/sh
+# nexdroid.build — Recovery Update Binary
+# Shell-based OTA updater for TWRP/OrangeFox/SHRP
+
+OUTFD="/proc/self/fd/$2"
+ZIPFILE="$3"
+
+ui_print() {
+    echo -e "ui_print $1\nui_print" >> "$OUTFD"
+}
+
+set_progress() {
+    echo "set_progress $1" >> "$OUTFD"
+}
+
+package_extract_file() {
+    unzip -o -q "$ZIPFILE" "$1" -d "$(dirname "$2")" 2>/dev/null
+    local extracted="$(dirname "$2")/$(basename "$1")"
+    if [ "$extracted" != "$2" ]; then
+        mv "$extracted" "$2" 2>/dev/null
+    fi
+}
+
+abort() {
+    ui_print "$1"
+    exit 1
+}
+
+# ── Banner ──
+ui_print "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+ui_print "  nexdroid.build — Hybrid ROM Installer"
+ui_print "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+ui_print ""
+set_progress 0.0
+
+# ── Extract images to tmp ──
+TMP_DIR="/tmp/nexdroid_install"
+rm -rf "$TMP_DIR"
+mkdir -p "$TMP_DIR"
+
+ui_print "  Extracting images from zip..."
+set_progress 0.1
+unzip -o -q "$ZIPFILE" "images/*" -d "$TMP_DIR" 2>/dev/null || abort "Failed to extract images!"
+
+IMAGES_PATH="$TMP_DIR/images"
+[ ! -d "$IMAGES_PATH" ] && abort "images/ directory not found in zip!"
+
+TOTAL=$(ls "$IMAGES_PATH"/*.img 2>/dev/null | wc -l)
+[ "$TOTAL" -eq 0 ] && abort "No .img files found!"
+
+ui_print "  Found $TOTAL image(s) to flash"
+ui_print ""
+
+# ── Flash firmware images ──
+CURRENT=0
+for img in "$IMAGES_PATH"/*.img; do
+    [ ! -f "$img" ] && continue
+    CURRENT=$((CURRENT + 1))
+    IMGNAME=$(basename "$img" .img)
+    PROGRESS=$(echo "scale=2; 0.1 + ($CURRENT / $TOTAL) * 0.8" | bc 2>/dev/null || echo "0.5")
+    set_progress "$PROGRESS"
+
+    # Determine target partition
+    case "$IMGNAME" in
+        super.img.*)
+            # Super chunks → flash to super partition
+            ui_print "  [$CURRENT/$TOTAL] Flashing $IMGNAME → /dev/block/by-name/super"
+            dd if="$img" of="/dev/block/by-name/super" bs=4096 2>/dev/null || \
+                ui_print "  [WARN] Failed to flash $IMGNAME (non-critical)"
+            ;;
+        boot|dtbo|vbmeta|vbmeta_system|vendor_boot)
+            # Critical boot chain — flash to _a slot
+            SLOT="_a"
+            ui_print "  [$CURRENT/$TOTAL] Flashing $IMGNAME → /dev/block/by-name/${IMGNAME}${SLOT}"
+            dd if="$img" of="/dev/block/by-name/${IMGNAME}${SLOT}" bs=4096 2>/dev/null || \
+                ui_print "  [WARN] Failed to flash $IMGNAME"
+            ;;
+        system|system_ext|product|vendor|odm|mi_ext)
+            # Logical partitions inside super — skip in recovery (super chunks handle this)
+            ui_print "  [$CURRENT/$TOTAL] Skipping $IMGNAME (inside super)"
+            ;;
+        cust)
+            # No A/B slot
+            ui_print "  [$CURRENT/$TOTAL] Flashing $IMGNAME → /dev/block/by-name/$IMGNAME"
+            dd if="$img" of="/dev/block/by-name/$IMGNAME" bs=4096 2>/dev/null || \
+                ui_print "  [WARN] Failed to flash $IMGNAME"
+            ;;
+        *)
+            # All other firmware — flash to _a slot
+            SLOT="_a"
+            ui_print "  [$CURRENT/$TOTAL] Flashing $IMGNAME → /dev/block/by-name/${IMGNAME}${SLOT}"
+            dd if="$img" of="/dev/block/by-name/${IMGNAME}${SLOT}" bs=4096 2>/dev/null || \
+                ui_print "  [WARN] Failed to flash $IMGNAME"
+            ;;
+    esac
 done
-log_info "Total super partitions: $SUPER_COUNT"
 
-log_info "Organizing firmware images..."
-IMAGES_COUNT=$(find "$IMAGES_DIR" -maxdepth 1 -type f -name "*.img" -exec mv {} "$PACK_DIR/images/" \; -print | wc -l)
-log_success "✓ Moved $IMAGES_COUNT firmware images"
+# ── Flash super chunks (named super.img.X instead of *.img) ──
+for schunk in "$IMAGES_PATH"/super.img.*; do
+    [ ! -f "$schunk" ] && continue
+    SNAME=$(basename "$schunk")
+    ui_print "  Flashing $SNAME → /dev/block/by-name/super"
+    dd if="$schunk" of="/dev/block/by-name/super" bs=4096 seek=$((${SNAME##*.} * 131072)) 2>/dev/null || \
+        ui_print "  [WARN] Failed to flash $SNAME"
+done
 
-log_info "Creating flash script..."
-cat <<'EOF' > "$PACK_DIR/flash_rom.bat"
+# ── Cleanup ──
+set_progress 0.95
+rm -rf "$TMP_DIR"
+
+ui_print ""
+ui_print "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+ui_print "  nexdroid.build — Installation Complete!"
+ui_print "  Reboot your device to start."
+ui_print "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+set_progress 1.0
+exit 0
+UPDATE_BINARY_EOF
+    chmod +x "$META_GOOGLE/update-binary"
+    log_success "✓ META-INF/com/google/android/update-binary"
+
+    # updater-script (must exist, even if minimal)
+    echo '# nexdroid.build — Dummy updater-script (update-binary handles everything)' \
+        > "$META_GOOGLE/updater-script"
+    log_success "✓ META-INF/com/google/android/updater-script"
+
+    # metadata
+    BUILD_TIMESTAMP=$(date +%s)
+    cat > "$META_ANDROID/metadata" << META_EOF
+ota-type=BLOCK
+post-build=${DEVICE_CODE}/${OS_VER}/${ANDROID_VER}
+post-build-incremental=${OS_VER}
+post-sdk-level=${ANDROID_VER%%.*}
+post-timestamp=${BUILD_TIMESTAMP}
+pre-device=${DEVICE_CODE}
+META_EOF
+    log_success "✓ META-INF/com/android/metadata"
+
+    # metadata.pb (minimal valid protobuf — field 1: type=0 (BLOCK))
+    printf '\x08\x00' > "$META_ANDROID/metadata.pb"
+    log_success "✓ META-INF/com/android/metadata.pb"
+
+    log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    log_success "✅ HYBRID ROM BUILD COMPLETE"
+    log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+else
+    # ─────────────────────────────────────────────────────────
+    #  MOD ONLY BUILD — Same as original behavior
+    # ─────────────────────────────────────────────────────────
+    mkdir -p "$PACK_DIR/super" "$PACK_DIR/images"
+
+    log_info "Organizing super partitions..."
+    SUPER_TARGETS="system system_ext product mi_ext vendor odm system_dlkm vendor_dlkm"
+    SUPER_COUNT=0
+    for img in $SUPER_TARGETS; do
+        if [ -f "$SUPER_DIR/${img}.img" ]; then
+            mv "$SUPER_DIR/${img}.img" "$PACK_DIR/super/"
+            SUPER_COUNT=$((SUPER_COUNT + 1))
+            log_success "✓ Added to package: ${img}.img"
+        elif [ -f "$IMAGES_DIR/${img}.img" ]; then
+            mv "$IMAGES_DIR/${img}.img" "$PACK_DIR/super/"
+            SUPER_COUNT=$((SUPER_COUNT + 1))
+            log_success "✓ Added to package: ${img}.img"
+        fi
+    done
+    log_info "Total super partitions: $SUPER_COUNT"
+
+    log_info "Organizing firmware images..."
+    IMAGES_COUNT=$(find "$IMAGES_DIR" -maxdepth 1 -type f -name "*.img" -exec mv {} "$PACK_DIR/images/" \; -print | wc -l)
+    log_success "✓ Moved $IMAGES_COUNT firmware images"
+
+    log_info "Creating flash script..."
+    cat <<'EOF' > "$PACK_DIR/flash_rom.bat"
 @echo off
 echo ========================================
 echo      NEXDROID FLASHER
@@ -3016,11 +3810,17 @@ fastboot erase userdata
 fastboot reboot
 pause
 EOF
-log_success "✓ Created flash_rom.bat"
+    log_success "✓ Created flash_rom.bat"
+fi
 
+# ── COMPRESS & UPLOAD ────────────────────────────────────────
 log_step "🗜️  Compressing package..."
 cd "$PACK_DIR"
-SUPER_ZIP="ota-nexdroid-${OS_VER}_${DEVICE_CODE}_${ANDROID_VER}.zip"
+if [ "$BUILD_MODE" == "hybrid" ]; then
+    SUPER_ZIP="nexdroid.build-${OS_VER}_${DEVICE_CODE}_${ANDROID_VER}_hybrid.zip"
+else
+    SUPER_ZIP="ota-nexdroid-${OS_VER}_${DEVICE_CODE}_${ANDROID_VER}.zip"
+fi
 log_info "Target: $SUPER_ZIP"
 
 START_TIME=$(date +%s)
@@ -3085,8 +3885,8 @@ if [ ! -z "$TELEGRAM_TOKEN" ] && [ ! -z "$CHAT_ID" ]; then
     # We strip special characters from MSG_TEXT for safety if needed, but jq handles most.
     # We use a simplified text for the JSON to ensure it doesn't break.
     
-    SAFE_TEXT="🔥 NexDroid Build Compiled
-• • • • • • • • • •
+    SAFE_TEXT="NexDroid Build Compiled
+--------------------------
 \`📣 Info:\`
 📱 Device  : $DEVICE_CODE
 🏷️ Version : $OS_VER
