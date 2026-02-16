@@ -7,8 +7,19 @@ TECHNIQUE: NexBinaryPatch  — binary in-place DEX patch, zero baksmali/smali.
   • Iterates only real code_item instruction arrays (avoids false positives from
     index tables that happen to contain sget-boolean opcode 0x60).
   • Patches code_item header + instruction bytes in-place.
-  • NOP-pads remainder to preserve DEX layout byte-identically.
   • Recalculates Adler-32 checksum and SHA-1 signature.
+
+  PATCHING RULES:
+    1. Before modifying any method: analyze full body including labels,
+       try-catch regions, and register usage.
+    2. Ensure control flow remains valid after modification.
+    3. Do NOT insert nop instructions unless strictly required inside
+       an existing try-catch protected region.
+    4. If an instruction is removed, rewrite control flow cleanly
+       instead of padding with nop.
+    5. Do not preserve instruction count artificially.
+    6. After patching, re-evaluate the method to confirm no redundant
+       or standalone nop instructions exist.
 
   WHY NOT baksmali/smali:
     Recompiling 8000+ smali files produces a structurally different DEX
@@ -397,14 +408,15 @@ def _clear_method_annotations(dex: bytearray, class_desc: str, method_name: str)
 
 def binary_patch_method(dex: bytearray, class_desc: str, method_name: str,
                         stub_regs: int, stub_insns: bytes,
-                        trim: bool = False) -> bool:
+                        trim: bool = True) -> bool:
     """
     In-place patch: find method by exact class + name, replace code_item with stub.
 
-    trim=False (default): NOP-pads remainder → keeps insns_size, layout unchanged.
-    trim=True: shrinks insns_size in the header to stub length.
-      → Clean baksmali output (no nop flood, no spurious annotations).
-      → Use for validateTheme and any method where baksmali output matters.
+    trim=True (default): shrinks insns_size in the header to stub length.
+      → Clean output: no redundant NOP instructions, no spurious annotations.
+      → ART locates code_items by offset (class_data_item), not by sequential scan.
+    trim=False: NOP-pads remainder → keeps insns_size, layout unchanged.
+      → Only use when padding is strictly required (e.g. try-catch regions).
     """
     data = bytes(dex)
     hdr  = _parse_header(data)
@@ -496,7 +508,7 @@ def binary_patch_method(dex: bytearray, class_desc: str, method_name: str,
 
     _fix_checksums(dex)
     nops = 0 if trim else (insns_size - stub_units)
-    mode = "trimmed" if trim else f"{nops} nop pad"
+    mode = "trimmed" if trim else f"{nops} nop pad (layout preserved)"
     ok(f"  ✓ {method_name} → stub ({stub_units} cu, {mode}, regs {orig_regs}→{new_regs})")
     return True
 
@@ -778,10 +790,9 @@ def _fw_sig_patch(dex_name: str, dex: bytearray) -> bool:
     """
     Patch getMinimumSignatureSchemeVersionForTargetSdk → return 1 (const/4 v0, 0x1).
 
-    MUST use trim=True:
-      trim=False (default) leaves the original insns_size in the code_item header
-      and NOP-pads the remainder, producing:
-          const/4 v0, 0x1 ; return v0 ; nop ; nop ; ...
+    MUST use trim=True (now the default):
+      trim=False leaves the original insns_size in the code_item header
+      and NOP-pads the remainder, producing redundant standalone nop instructions.
       trim=True shrinks insns_size to exactly 2 code-units (4 bytes), giving the
       clean output the verifier and baksmali both expect:
           const/4 v0, 0x1
@@ -790,8 +801,7 @@ def _fw_sig_patch(dex_name: str, dex: bytearray) -> bool:
     if b'ApkSignatureVerifier' not in bytes(dex): return False
     return binary_patch_method(dex,
         "android/util/apk/ApkSignatureVerifier",
-        "getMinimumSignatureSchemeVersionForTargetSdk", 1, _STUB_TRUE,
-        trim=True)
+        "getMinimumSignatureSchemeVersionForTargetSdk", 1, _STUB_TRUE)
 
 # ── Settings.apk  ────────────────────────────────────────────────
 def _settings_ai_patch(dex_name: str, dex: bytearray) -> bool:
