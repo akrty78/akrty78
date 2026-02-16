@@ -44,7 +44,7 @@ jobs:
         run: |
           # The script handles the build, upload, AND success notification
           # We pipe output to both console (tee) and file for logging
-          bash mod.sh "${{ github.event.client_payload.rom_url }}" "${{ github.event.client_payload.mods_selected }}" 2>&1 | tee build.log
+          bash mod.sh "${{ github.event.client_payload.rom_url }}" "${{ github.event.client_payload.mods_selected }}" "${{ github.event.client_payload.build_mode }}" 2>&1 | tee build.log
 
       # --- ERROR HANDLING ---
       # Only runs if the previous step failed
