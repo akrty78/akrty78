@@ -1123,12 +1123,12 @@ def _miui_framework_patch(dex_name: str, dex: bytearray) -> bool:
             patched = True
             raw = bytes(dex)
 
-    # Pass 1b — Gboard swap in InputMethodManagerStubImpl (binary, no-op if string absent)
-    #   binary_swap_string requires "com.google.android.inputmethod.latin" in DEX pool.
-    #   If pool doesn't have it, apktool D8b smali sed handles it as fallback.
+    # Pass 1b — Gboard swap in InputMethodServiceInjector (binary, no-op if string absent)
+    #   Replaces "com.baidu.input_mi" with "com.google.android.inputmethod.latin"
+    #   in the InputMethodServiceInjector class.
     if _BAIDU_IME.encode() in raw:
         n = binary_swap_string(dex, _BAIDU_IME, _GBOARD_IME,
-                               only_class='InputMethodManagerStubImpl')
+                               only_class='InputMethodServiceInjector')
         if n > 0:
             patched = True
             raw = bytes(dex)
