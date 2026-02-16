@@ -6,6 +6,8 @@
 
 set +e 
 
+SCRIPT_START=$(date +%s)
+
 # --- COLOR CODES FOR LOGGING ---
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -54,9 +56,6 @@ _Last Update: $timestamp_"
             -d text="$full_text" >/dev/null
     fi
 }
-
-# --- BUILD TIMER ---
-GLOBAL_START_TIME=$(date +%s)
 
 # --- INPUTS ---
 ROM_URL="$1"
@@ -4009,59 +4008,94 @@ fi
 # =========================================================
 #  7. TELEGRAM NOTIFICATION
 # =========================================================
+# =========================================================
+#  7. TELEGRAM NOTIFICATION
+# =========================================================
 if [ ! -z "$TELEGRAM_TOKEN" ] && [ ! -z "$CHAT_ID" ]; then
     log_step "📣 Sending Telegram notification..."
     tg_progress "✅ **Build Complete! Sending report...**"
-    
-    BUILD_DATE=$(date +"%d %b %Y, %H:%M")
-    TOTAL_BUILD_TIME=$(( $(date +%s) - GLOBAL_START_TIME ))
-    BUILD_MINS=$((TOTAL_BUILD_TIME / 60))
-    BUILD_SECS=$((TOTAL_BUILD_TIME % 60))
     
     # Delete the progress message so the final report is fresh
     curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/deleteMessage" \
         -d chat_id="$CHAT_ID" \
         -d message_id="$TG_MSG_ID" >/dev/null
 
-    # Determine build mode label
+    # ── Region detection from OS version suffix ──
+    # e.g. WPCCNXM → CN = China, WPCINXM → IN = India
+    OS_SUFFIX=$(echo "$OS_VER" | grep -oE '[A-Z]+$' || echo "")
+    REGION_CODE=$(echo "$OS_SUFFIX" | sed -E 's/^.{3}([A-Z]{2}).*/\1/' || echo "")
+    case "$REGION_CODE" in
+        CN) REGION_LABEL="CN (China)" ;;
+        IN) REGION_LABEL="IN (India)" ;;
+        GL) REGION_LABEL="GL (Global)" ;;
+        EU) REGION_LABEL="EU (Europe)" ;;
+        RU) REGION_LABEL="RU (Russia)" ;;
+        ID) REGION_LABEL="ID (Indonesia)" ;;
+        TW) REGION_LABEL="TW (Taiwan)" ;;
+        JP) REGION_LABEL="JP (Japan)" ;;
+        KR) REGION_LABEL="KR (Korea)" ;;
+        TR) REGION_LABEL="TR (Turkey)" ;;
+        TH) REGION_LABEL="TH (Thailand)" ;;
+        MI) REGION_LABEL="MI (MIUI Global)" ;;
+        *)  REGION_LABEL="$REGION_CODE" ;;
+    esac
+
+    # ── Compile time ──
+    SCRIPT_END=$(date +%s)
+    COMPILE_SECS=$((SCRIPT_END - SCRIPT_START))
+    COMPILE_MINS=$((COMPILE_SECS / 60))
+    COMPILE_REM=$((COMPILE_SECS % 60))
+    COMPILE_TIME=$(printf "%02dm %02ds" "$COMPILE_MINS" "$COMPILE_REM")
+    BUILD_DATE=$(date +"%H:%M")
+
+    # ── Build type label ──
     if [ "$BUILD_MODE" == "hybrid" ]; then
-        MODE_LABEL="Hybrid ROM"
+        BUILD_TYPE_LABEL="Hybrid"
     else
-        MODE_LABEL="Mod Pack"
+        BUILD_TYPE_LABEL="Mod Pack"
     fi
 
-    # Format mods list — one per line with bullet
-    MODS_FORMATTED=""
-    IFS=',' read -ra MODS_ARR <<< "$MODS_SELECTED"
-    for mod in "${MODS_ARR[@]}"; do
-        mod_trimmed=$(echo "$mod" | xargs)
-        [ -n "$mod_trimmed" ] && MODS_FORMATTED="${MODS_FORMATTED}  ▸ ${mod_trimmed}
-"
-    done
+    # ── Mods list (one per line with dash prefix) ──
+    MODS_LIST=""
+    if [ ! -z "$MODS_SELECTED" ] && [ "$MODS_SELECTED" != "none" ]; then
+        MODS_LIST=$(echo "$MODS_SELECTED" | tr ',' '\n' | sed 's/^/- /')
+    else
+        MODS_LIST="- None"
+    fi
 
-    SAFE_TEXT="<b>✦ nexdroid.build</b>
+    # ── Use REQUESTER_CHAT_ID if available, else fallback to CHAT_ID ──
+    NOTIFY_CHAT="${REQUESTER_CHAT_ID:-$CHAT_ID}"
 
-<code>Device    </code>  <b>$DEVICE_CODE</b>
-<code>Version   </code>  $OS_VER
-<code>Android   </code>  $ANDROID_VER
-<code>Type      </code>  $MODE_LABEL
+    SAFE_TEXT="✦ *nexdroid.build*
 
-<b>Applied Mods</b>
-${MODS_FORMATTED}
-<code>Size      </code>  $ZIP_SIZE
-<code>Built in  </code>  ${BUILD_MINS}m ${BUILD_SECS}s
-<code>Date      </code>  $BUILD_DATE
+\`\`\`
+Compiled Build Info
+Device: $DEVICE_CODE
+Android: $ANDROID_VER
+OS: $OS_VER
+Region: $REGION_LABEL
+\`\`\`
 
-<i>⬇️ Tap below to download</i>"
+*Build Type:*
+—  $BUILD_TYPE_LABEL
+
+*Mods / Features Applied:*
+\`\`\`
+$MODS_LIST
+\`\`\`
+
+Total Size : \`$ZIP_SIZE\`
+Compiled Time: \`$COMPILE_TIME\`
+Built at: \`$BUILD_DATE\`"
 
     JSON_PAYLOAD=$(jq -n \
-        --arg chat_id "$CHAT_ID" \
+        --arg chat_id "$NOTIFY_CHAT" \
         --arg text "$SAFE_TEXT" \
         --arg url "$LINK_ZIP" \
-        --arg btn "⬇️  Download $MODE_LABEL" \
+        --arg btn "⬇️  Download" \
         '{
             chat_id: $chat_id,
-            parse_mode: "HTML",
+            parse_mode: "Markdown",
             text: $text,
             disable_web_page_preview: true,
             reply_markup: {
@@ -4077,13 +4111,13 @@ ${MODS_FORMATTED}
         -d "$JSON_PAYLOAD")
     
     if [ "$HTTP_CODE" -eq 200 ]; then
-        log_success "✓ Telegram notification sent"
+        log_success "✓ Telegram notification sent to $NOTIFY_CHAT"
     else
         log_warning "Telegram notification failed (HTTP $HTTP_CODE), output:"
         cat response.json
         log_warning "Trying fallback..."
         curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
-            -d chat_id="$CHAT_ID" \
+            -d chat_id="$NOTIFY_CHAT" \
             -d text="✅ Build Done: $LINK_ZIP" >/dev/null
     fi
 else
