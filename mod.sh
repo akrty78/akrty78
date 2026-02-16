@@ -1874,7 +1874,7 @@ push_multilang() {
     log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
     # Resolve latest asset URL for the Multilang tag via GitHub API
-    local api_url="https://api.github.com/repos/nexdroidwx/HyperOS-Modder/releases/tags/Multilang"
+    local api_url="https://github.com/nexdroidwx/nexdroid.build_mods/releases/tag/Multi-lang"
     local asset_url
     asset_url=$(curl -sSf -H "Authorization: token ${GITHUB_TOKEN}" "$api_url" \
         | python3 -c "
