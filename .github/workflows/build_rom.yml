@@ -42,6 +42,7 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REQUESTER_CHAT_ID: ${{ github.event.client_payload.chat_id }}
         run: |
           # The script handles the build, upload, AND success notification
           # We pipe output to both console (tee) and file for logging
