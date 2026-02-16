@@ -1646,55 +1646,30 @@ def _qsb_debloat_patch(dex_name: str, dex: bytearray) -> bool:
     patched = False
     raw = bytes(dex)
 
-    # Pass 1: Search engine default
-    if b'baidu' in raw:
-        if b'google' in raw:
-            n = binary_swap_string(dex, 'baidu', 'google',
-                                  only_class='searchengine')
-            if n > 0:
-                patched = True
-                raw = bytes(dex)
-                ok(f"  Pass 1: {n} x 'baidu' -> 'google' (index swap)")
-        if not patched and b'searchengine' in raw:
-            n = binary_replace_string_data(dex, 'baidu', '')
-            if n > 0:
-                patched = True
-                raw = bytes(dex)
-                ok("  Pass 1: 'baidu' string data cleared")
-
-    # Pass 2: Homepage ads
+    # Pass 1: Homepage ads
     if b'HomepageAdData' in raw and b'getShowAdMark' in raw:
         if binary_patch_method(dex,
                 'com/android/quicksearchbox/bean/HomepageAdData',
                 'getShowAdMark', stub_regs=1, stub_insns=_STUB_FALSE):
             patched = True
             raw = bytes(dex)
-            ok("  Pass 2: HomepageAdData.getShowAdMark() -> return false")
+            ok("  Pass 1: HomepageAdData.getShowAdMark() -> return false")
 
-    # Pass 3: Landing page ads
-    if b'LandingPageService' in raw and b'onTransact' in raw:
-        if binary_patch_method(dex,
-                'com/miui/systemAdSolution/landingPage/LandingPageService',
-                'onTransact', stub_regs=1, stub_insns=_STUB_TRUE):
-            patched = True
-            raw = bytes(dex)
-            ok("  Pass 3: LandingPageService.onTransact() -> return true")
-
-    # Pass 4: App suggestions
+    # Pass 2: App suggestions
     if b'/qsb/getAppSuggest' in raw:
         n = binary_replace_string_data(dex, '/qsb/getAppSuggest', '/qsb/_disabled_')
         if n > 0:
             patched = True
             raw = bytes(dex)
-            ok("  Pass 4: getAppSuggest endpoint broken")
+            ok("  Pass 2: getAppSuggest endpoint broken")
 
-    # Pass 5: Hotword ads
+    # Pass 3: Hotword ads
     if b'hotWord.adModelInfo' in raw:
         n = binary_replace_string_data(dex, 'hotWord.adModelInfo', 'hotWord.adModelNone')
         if n > 0:
             patched = True
             raw = bytes(dex)
-            ok("  Pass 5: hotWord ad model key renamed")
+            ok("  Pass 3: hotWord ad model key renamed")
 
     return patched
 
