@@ -1875,7 +1875,7 @@ push_multilang() {
     log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
     # Resolve latest asset URL for the Multilang tag via GitHub API
-    local api_url="https://github.com/nexdroidwx/nexdroid.build_mods/releases/tag/Multi-lang"
+    local api_url="https://api.github.com/repos/nexdroidwx/nexdroid.build_mods/releases/tags/Multi-lang"
     local asset_url
     asset_url=$(curl -sSf -H "Authorization: token ${GITHUB_TOKEN}" "$api_url" \
         | python3 -c "
@@ -3060,12 +3060,25 @@ if [ "$BUILD_MODE" == "hybrid" ]; then
     log_step "🔨 Building super.img..."
     tg_progress "🔨 **Building super.img (lpmake)...**"
 
-    # Ensure lpmake is available
+    # Ensure lpmake is available — download prebuilt binary
     if ! command -v lpmake &>/dev/null; then
-        log_info "Installing lpmake..."
-        sudo apt-get install -y android-sdk-libsparse-utils 2>/dev/null || true
-        pip3 install lptools --break-system-packages -q 2>/dev/null || true
+        log_info "Installing lpmake (prebuilt binary)..."
+        LPMAKE_URL="https://raw.githubusercontent.com/whyshhnuv/lpunpack-lpmake-mirror/Linux-debian/binary/lpmake"
+        if curl -fsSL --retry 3 --connect-timeout 30 -o "$BIN_DIR/lpmake" "$LPMAKE_URL"; then
+            chmod +x "$BIN_DIR/lpmake"
+            sudo cp "$BIN_DIR/lpmake" /usr/local/bin/lpmake
+            log_success "✓ lpmake installed to /usr/local/bin/"
+        else
+            log_error "✗ Failed to download lpmake binary"
+            exit 1
+        fi
     fi
+    # Verify lpmake works
+    if ! lpmake --help &>/dev/null; then
+        log_error "✗ lpmake is not functional"
+        exit 1
+    fi
+    log_success "✓ lpmake ready"
 
     SUPER_BUILD_DIR="$TEMP_DIR/super_build"
     mkdir -p "$SUPER_BUILD_DIR"
@@ -3121,7 +3134,8 @@ if [ "$BUILD_MODE" == "hybrid" ]; then
     SUPER_RAW="$SUPER_BUILD_DIR/super.img"
 
     START_TIME=$(date +%s)
-    if lpmake \
+    LPMAKE_LOG="$TEMP_DIR/lpmake.log"
+    lpmake \
         --metadata-size $METADATA_SIZE \
         --metadata-slots 2 \
         --device "super:${DEVICE_SIZE}" \
@@ -3130,17 +3144,24 @@ if [ "$BUILD_MODE" == "hybrid" ]; then
         $LPMAKE_PARTS \
         $LPMAKE_IMAGES \
         --sparse \
-        --output "$SUPER_RAW" 2>&1 | while IFS= read -r line; do
-            log_info "  lpmake: $line"
-        done; then
-        END_TIME=$(date +%s)
-        BUILD_TIME=$((END_TIME - START_TIME))
-        SUPER_SIZE=$(du -h "$SUPER_RAW" | cut -f1)
-        log_success "✓ super.img built (${SUPER_SIZE}) in ${BUILD_TIME}s"
-    else
-        log_error "✗ lpmake failed!"
+        --output "$SUPER_RAW" > "$LPMAKE_LOG" 2>&1
+    LPMAKE_RC=$?
+
+    # Show lpmake output
+    while IFS= read -r line; do
+        log_info "  lpmake: $line"
+    done < "$LPMAKE_LOG"
+
+    if [ $LPMAKE_RC -ne 0 ] || [ ! -f "$SUPER_RAW" ]; then
+        log_error "✗ lpmake failed! (exit code: $LPMAKE_RC)"
+        [ -f "$LPMAKE_LOG" ] && tail -5 "$LPMAKE_LOG" | while IFS= read -r l; do log_error "  $l"; done
         exit 1
     fi
+
+    END_TIME=$(date +%s)
+    BUILD_TIME=$((END_TIME - START_TIME))
+    SUPER_SIZE=$(du -h "$SUPER_RAW" | cut -f1)
+    log_success "✓ super.img built (${SUPER_SIZE}) in ${BUILD_TIME}s"
 
     # Split sparse super.img into ~500MB chunks
     log_info "Splitting super.img into chunks..."
