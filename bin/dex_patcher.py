@@ -26,7 +26,6 @@ Commands:
   systemui-volte      MiuiSystemUI.apk     → IS_INTERNATIONAL_BUILD + QuickShare + WA-notif
   miui-framework      miui-framework.jar   → validateTheme = void  +  IS_GLOBAL_BUILD = 1
   settings-region     Settings.apk         → IS_GLOBAL_BUILD = 1 (locale classes)
-  qsb-debloat         QuickSearchBox.apk   → ads off + Google default engine
 """
 
 import sys, os, re, struct, hashlib, zlib, shutil, zipfile, subprocess, tempfile, traceback
@@ -46,8 +45,6 @@ def err(m):   _p("ERROR",   m)
 _STUB_TRUE = bytes([0x12, 0x10, 0x0F, 0x00])
 # return-void                    (format 10x = 1 code-unit = 2 bytes)
 _STUB_VOID = bytes([0x0E, 0x00])
-# const/4 v0, 0x0 ; return v0   (format 11n + 11x = 2 code-units = 4 bytes)
-_STUB_FALSE = bytes([0x12, 0x00, 0x0F, 0x00])
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -171,24 +168,21 @@ def _iter_code_items(data: bytes, hdr: dict):
                 break
 
         midx = 0
-        for phase in range(2):
-            count = dm if phase == 0 else vm
-            if phase == 1: midx = 0   # DEX spec: virtual method list restarts absolute
-            for _ in range(count):
-                try:
-                    d, pos   = _uleb128(data, pos); midx += d
-                    _,  pos  = _uleb128(data, pos)          # access_flags
-                    code_off, pos = _uleb128(data, pos)
-                except Exception: break
-                if code_off == 0: continue
-                try:
-                    mid_base  = hdr['method_ids_off'] + midx * 8
-                    name_sidx = struct.unpack_from('<I', data, mid_base + 4)[0]
-                    mname     = _get_str(data, hdr, name_sidx)
-                    insns_size = struct.unpack_from('<I', data, code_off + 12)[0]
-                    yield code_off + 16, insns_size * 2, type_str, mname
-                except Exception:
-                    continue
+        for _ in range(dm + vm):
+            try:
+                d, pos   = _uleb128(data, pos); midx += d
+                _,  pos  = _uleb128(data, pos)          # access_flags
+                code_off, pos = _uleb128(data, pos)
+            except Exception: break
+            if code_off == 0: continue
+            try:
+                mid_base  = hdr['method_ids_off'] + midx * 8
+                name_sidx = struct.unpack_from('<I', data, mid_base + 4)[0]
+                mname     = _get_str(data, hdr, name_sidx)
+                insns_size = struct.unpack_from('<I', data, code_off + 12)[0]
+                yield code_off + 16, insns_size * 2, type_str, mname
+            except Exception:
+                continue
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -446,22 +440,18 @@ def binary_patch_method(dex: bytearray, class_desc: str, method_name: str,
 
     code_off = None
     midx = 0
-    for phase in range(2):
-        count = dm if phase == 0 else vm
-        if phase == 1: midx = 0   # DEX spec: virtual method list restarts absolute
-        for _ in range(count):
-            d, pos = _uleb128(data, pos); midx += d
-            _, pos = _uleb128(data, pos)
-            c_off, pos = _uleb128(data, pos)
-            if c_off == 0: continue
-            try:
-                mid_base  = hdr['method_ids_off'] + midx * 8
-                name_sidx = struct.unpack_from('<I', data, mid_base + 4)[0]
-                if _get_str(data, hdr, name_sidx) == method_name:
-                    code_off = c_off; break
-            except Exception:
-                continue
-        if code_off is not None: break
+    for _ in range(dm + vm):
+        d, pos = _uleb128(data, pos); midx += d
+        _, pos = _uleb128(data, pos)
+        c_off, pos = _uleb128(data, pos)
+        if c_off == 0: continue
+        try:
+            mid_base  = hdr['method_ids_off'] + midx * 8
+            name_sidx = struct.unpack_from('<I', data, mid_base + 4)[0]
+            if _get_str(data, hdr, name_sidx) == method_name:
+                code_off = c_off; break
+        except Exception:
+            continue
 
     if code_off is None:
         warn(f"  Method {method_name} not found"); return False
@@ -663,54 +653,6 @@ def _find_string_idx(data: bytes, hdr: dict, target: str) -> Optional[int]:
         if s < target:  lo = mid + 1
         else:           hi = mid - 1
     return None
-
-def binary_replace_string_data(dex: bytearray, old_str: str, new_str: str) -> int:
-    """
-    In-place replacement of string DATA bytes in the DEX string pool.
-    Unlike binary_swap_string (which swaps const-string references and requires
-    both strings in the pool), this modifies the actual MUTF-8 bytes.
-    Replacement must be ≤ same byte length as original.
-    Returns count of replacements (0 or 1, since each string appears once).
-    """
-    data = bytes(dex)
-    hdr  = _parse_header(data)
-    if not hdr: return 0
-
-    old_bytes = old_str.encode('utf-8')
-    new_bytes = new_str.encode('utf-8')
-
-    if len(new_bytes) > len(old_bytes):
-        warn(f"  Replacement '{new_str}' ({len(new_bytes)}B) longer than "
-             f"'{old_str}' ({len(old_bytes)}B) — cannot patch in-place")
-        return 0
-
-    # Find old_str in the string pool
-    idx = _find_string_idx(data, hdr, old_str)
-    if idx is None:
-        warn(f"  String '{old_str}' not in DEX pool — skip")
-        return 0
-
-    # Locate string data: string_ids[idx] → offset → skip ULEB128 length → MUTF-8
-    str_data_off = struct.unpack_from('<I', data, hdr['string_ids_off'] + idx * 4)[0]
-    _, content_off = _uleb128(data, str_data_off)
-
-    # Overwrite MUTF-8 bytes in-place
-    for i, b in enumerate(new_bytes):
-        dex[content_off + i] = b
-    # If new is shorter, null-terminate and NOP-pad the rest
-    for i in range(len(new_bytes), len(old_bytes)):
-        dex[content_off + i] = 0x00
-
-    # Update ULEB128 length header if lengths differ
-    if len(new_str) != len(old_str):
-        # MUTF-8 length = number of chars (for ASCII, same as byte count)
-        # We only handle the simple case where length fits in 1 ULEB128 byte
-        if len(new_str) < 128:
-            dex[str_data_off] = len(new_str)
-
-    _fix_checksums(dex)
-    ok(f"  ✓ String data '{old_str}' → '{new_str}' patched in-place")
-    return 1
 
 def binary_swap_string(dex: bytearray, old_str: str, new_str: str,
                        only_class: str = None) -> int:
@@ -1312,71 +1254,19 @@ def _miuifreqphrase_patch(dex_name: str, dex: bytearray) -> bool:
     return n > 0
 
 
-# ── MIUIQuickSearchBox.apk — ad/recommendation removal ───────────
-def _qsb_debloat_patch(dex_name: str, dex: bytearray) -> bool:
-    """
-    MIUIQuickSearchBox debloat — 3-pass binary patch:
-
-    Pass 1: Stub HomepageAdData.getShowAdMark() → return false (suppress ad banners).
-    Pass 2: Redirect /qsb/getAppSuggest API endpoint to dead path.
-    Pass 3: Break hotword ad JSON key so ad model info is never parsed.
-
-    NOTE: Search engine default is left as-is (binary_replace_string_data on
-    "baidu" nukes the entire string pool entry, crashing the app).
-    LandingPageService is already stubbed in the APK — no patch needed.
-
-    All patches are binary in-place — no smali recompilation, ART dexopt safe.
-    """
-    patched = False
-    raw = bytes(dex)
-
-    # ── Pass 1: Homepage ads — getShowAdMark() → return false ────────
-    if b'HomepageAdData' in raw and b'getShowAdMark' in raw:
-        if binary_patch_method(dex,
-                'com/android/quicksearchbox/bean/HomepageAdData',
-                'getShowAdMark', stub_regs=1, stub_insns=_STUB_FALSE):
-            patched = True
-            raw = bytes(dex)
-            ok("  Pass 1: HomepageAdData.getShowAdMark() -> return false")
-
-    # ── Pass 2: App suggestions — break API endpoint string ──────────
-    #   In-place replace "/qsb/getAppSuggest" (18 chars) → pad with nulls
-    if b'/qsb/getAppSuggest' in raw:
-        n = binary_replace_string_data(dex, '/qsb/getAppSuggest', '/qsb/_disabled_')
-        if n > 0:
-            patched = True
-            raw = bytes(dex)
-            ok("  Pass 2: getAppSuggest endpoint broken")
-
-    # ── Pass 3: Hotword ads — break ad model JSON key ────────────────
-    #   In-place replace "hotWord.adModelInfo" (19 chars)
-    if b'hotWord.adModelInfo' in raw:
-        n = binary_replace_string_data(dex, 'hotWord.adModelInfo', 'hotWord.adModelNone')
-        if n > 0:
-            patched = True
-            raw = bytes(dex)
-            ok("  Pass 3: hotWord ad model key renamed")
-
-    return patched
-
-
 # ════════════════════════════════════════════════════════════════════
 #  COMMAND TABLE  +  ENTRY POINT
 # ════════════════════════════════════════════════════════════════════
 
 PROFILES = {
-    "framework-sig":     _fw_sig_patch,
     "settings-ai":       _settings_ai_patch,
     "settings-region":   _settings_region_patch,   # exact 3 classes only
     "voice-recorder-ai": _recorder_ai_patch,        # AiDeviceUtil::isAiSupportedDevice
-    "services-jar":      _services_jar_patch,
     "provision-gms":     _provision_gms_patch,    # Utils::setGmsAppEnabledStateForCn only
     "miui-service":      _miui_service_patch,    # global IS_INTERNATIONAL_BUILD sweep
     "systemui-volte":    _systemui_all_patch,       # VoLTE + QuickShare(const/4) + WA-notif
     "miui-framework":    _miui_framework_patch,     # validateTheme(trim) + IS_GLOBAL_BUILD
     "incallui-ai":       _incallui_patch,           # RecorderUtils::isAiRecordEnable
-    "miuifreqphrase":    _miuifreqphrase_patch,     # Baidu→Gboard binary string swap
-    "qsb-debloat":       _qsb_debloat_patch,        # QSB ads/recommendations + Google default
 }
 
 def main():
