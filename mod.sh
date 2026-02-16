@@ -1864,9 +1864,9 @@ inject_security_mod() {
 
 # ── Mod 4: Multi-Language Overlays ───────────────────────────
 push_multilang() {
-    # Downloads the latest ZIP from the Multilang release tag, extracts it,
-    # and installs ALL .apk files found under any overlay/ directory strictly
-    # into product/overlay/ (no other partition).
+    # Downloads the multilang ZIP from the same private repo's Multilang tag,
+    # extracts it, and installs ALL .apk files found under any overlay/ directory
+    # strictly into product/overlay/ (no other partition).
     local dump_dir="$1"   # must be the product dump dir
     local overlay_dst="$dump_dir/overlay"
 
@@ -1874,31 +1874,24 @@ push_multilang() {
     log_step "🌐 MULTI-LANGUAGE OVERLAY PUSH"
     log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-    # Resolve latest asset URL for the Multilang tag via GitHub API
-    local api_url="https://api.github.com/repos/nexdroidwx/nexdroid.build_mods/releases/tags/Multi-lang"
+    # Resolve asset URL from the same private repo (HyperOS-Modder) via GitHub API
+    local api_url="https://api.github.com/repos/nexdroidwx/HyperOS-Modder/releases/tags/Multilang"
     local asset_url
-    asset_url=$(curl -sSf -H "Authorization: token ${GITHUB_TOKEN}" "$api_url" \
-        | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-assets = data.get('assets', [])
-# prefer the first .zip asset
-for a in assets:
-    if a.get('name','').endswith('.zip'):
-        print(a['browser_download_url'])
-        break
-" 2>/dev/null)
+    asset_url=$(curl -sSf -H "Authorization: token ${GITHUB_TOKEN}" \
+        -H "Accept: application/vnd.github.v3+json" "$api_url" \
+        | jq -r '.assets[] | select(.name | endswith(".zip")) | .url' | head -n 1)
 
-    if [ -z "$asset_url" ]; then
+    if [ -z "$asset_url" ] || [ "$asset_url" == "null" ]; then
         log_error "[multilang] Could not resolve Multilang release asset — skipping"
         return 1
     fi
-    log_info "[multilang] Asset: $asset_url"
+    log_info "[multilang] Asset API URL: $asset_url"
 
-    # Download
+    # Download (use asset API URL with Accept header for private repo binary download)
     local ml_work="$TEMP_DIR/multilang"
     rm -rf "$ml_work" && mkdir -p "$ml_work"
     curl -sSfL -H "Authorization: token ${GITHUB_TOKEN}" \
+        -H "Accept: application/octet-stream" \
         -o "$ml_work/multilang.zip" "$asset_url"
     if [ $? -ne 0 ] || [ ! -s "$ml_work/multilang.zip" ]; then
         log_error "[multilang] Download failed — skipping"
@@ -1932,6 +1925,93 @@ for a in assets:
 
     log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     log_success "✅ Multi-Language: $pushed overlay APK(s) → product/overlay/"
+    log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    return 0
+}
+
+# ── Mod 5: Personal Assistant (com.miui.personalassistant) ───
+push_personal_assistant() {
+    local dump_dir="$1"   # must be the product dump dir
+
+    log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    log_step "📱 PERSONAL ASSISTANT APK PUSH"
+    log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    # Detect existing folder in product/priv-app that contains com.miui.personalassistant
+    local existing_dir=""
+    local existing_apk_name=""
+    for dir in "$dump_dir"/priv-app/*/; do
+        [ ! -d "$dir" ] && continue
+        local apk_file
+        apk_file=$(find "$dir" -maxdepth 1 -name "*.apk" -type f | head -n 1)
+        if [ -n "$apk_file" ]; then
+            # Check if APK package name matches com.miui.personalassistant
+            if unzip -p "$apk_file" AndroidManifest.xml 2>/dev/null | \
+               strings | grep -q "com.miui.personalassistant"; then
+                existing_dir="$dir"
+                existing_apk_name=$(basename "$apk_file")
+                break
+            fi
+        fi
+    done
+
+    # Fallback: look for known folder names
+    if [ -z "$existing_dir" ]; then
+        for candidate in MIUIPersonalAssistant MIUIPersonalAssistantPhoneOS3 PersonalAssistant; do
+            if [ -d "$dump_dir/priv-app/$candidate" ]; then
+                existing_dir="$dump_dir/priv-app/$candidate/"
+                existing_apk_name=$(find "$existing_dir" -maxdepth 1 -name "*.apk" -type f -printf '%f\n' | head -n 1)
+                break
+            fi
+        done
+    fi
+
+    if [ -z "$existing_dir" ]; then
+        log_warning "[personalassistant] No existing Personal Assistant folder found in priv-app — creating default"
+        existing_dir="$dump_dir/priv-app/MIUIPersonalAssistant/"
+        mkdir -p "$existing_dir"
+        existing_apk_name="MIUIPersonalAssistant.apk"
+    fi
+
+    local folder_name
+    folder_name=$(basename "${existing_dir%/}")
+    log_info "[personalassistant] Target folder: priv-app/$folder_name/"
+    log_info "[personalassistant] Target APK name: $existing_apk_name"
+
+    # Download from the same private repo's Multilang tag
+    local api_url="https://api.github.com/repos/nexdroidwx/HyperOS-Modder/releases/tags/Multilang"
+    local asset_url
+    asset_url=$(curl -sSf -H "Authorization: token ${GITHUB_TOKEN}" \
+        -H "Accept: application/vnd.github.v3+json" "$api_url" \
+        | jq -r '.assets[] | select(.name | test("[Pp]ersonal[Aa]ssistant")) | .url' | head -n 1)
+
+    if [ -z "$asset_url" ] || [ "$asset_url" == "null" ]; then
+        log_error "[personalassistant] Could not find Personal Assistant APK in release — skipping"
+        return 1
+    fi
+    log_info "[personalassistant] Asset API URL: $asset_url"
+
+    # Download the APK (private repo → use asset API with octet-stream)
+    local pa_work="$TEMP_DIR/personalassistant"
+    rm -rf "$pa_work" && mkdir -p "$pa_work"
+    curl -sSfL -H "Authorization: token ${GITHUB_TOKEN}" \
+        -H "Accept: application/octet-stream" \
+        -o "$pa_work/personalassistant.apk" "$asset_url"
+    if [ $? -ne 0 ] || [ ! -s "$pa_work/personalassistant.apk" ]; then
+        log_error "[personalassistant] Download failed — skipping"
+        return 1
+    fi
+
+    # Rename to match existing APK name and push to priv-app
+    mkdir -p "$existing_dir"
+    cp -f "$pa_work/personalassistant.apk" "${existing_dir}${existing_apk_name}"
+    chmod 0644 "${existing_dir}${existing_apk_name}"
+    log_success "[personalassistant] ✓ ${existing_apk_name} → priv-app/$folder_name/"
+
+    rm -rf "$pa_work"
+
+    log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    log_success "✅ Personal Assistant APK pushed successfully"
     log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     return 0
 }
@@ -2361,6 +2441,10 @@ for part in $LOGICALS; do
             fi
             if [[ ",$MODS_SELECTED," == *",multilang,"* ]]; then
                 push_multilang "$DUMP_DIR"
+            fi
+            # Personal Assistant APK — always push when multilang is selected
+            if [[ ",$MODS_SELECTED," == *",multilang,"* ]]; then
+                push_personal_assistant "$DUMP_DIR"
             fi
 
             log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -3025,7 +3109,7 @@ CUSTKEYS
         # I. REPACK
         log_info "📦 Repacking ${part} partition..."
         START_TIME=$(date +%s)
-        sudo mkfs.erofs -zlz4 "$SUPER_DIR/${part}.img" "$DUMP_DIR" 2>&1 | grep -E "Build.*completed|ERROR"
+        sudo mkfs.erofs -zlz4hc,7 "$SUPER_DIR/${part}.img" "$DUMP_DIR" 2>&1 | grep -E "Build.*completed|ERROR"
         END_TIME=$(date +%s)
         REPACK_TIME=$((END_TIME - START_TIME))
         
@@ -3167,28 +3251,10 @@ if [ "$BUILD_MODE" == "hybrid" ]; then
     SUPER_SIZE=$(du -h "$SUPER_RAW" | cut -f1)
     log_success "✓ super.img built (${SUPER_SIZE}) in ${BUILD_TIME}s"
 
-    # Split sparse super.img into ~500MB chunks
-    log_info "Splitting super.img into chunks..."
-    cd "$SUPER_BUILD_DIR"
-    split -b 500M -d "$SUPER_RAW" super.img.
-    rm -f "$SUPER_RAW"
-
-    # Rename chunks: super.img.00 → super.img.0, etc.
-    CHUNK_COUNT=0
-    for chunk in super.img.*; do
-        [ ! -f "$chunk" ] && continue
-        # strip leading zeros from suffix
-        suffix="${chunk#super.img.}"
-        new_suffix=$((10#$suffix))
-        if [ "$suffix" != "$new_suffix" ]; then
-            mv "$chunk" "super.img.${new_suffix}"
-        fi
-        chunk_size=$(du -h "super.img.${new_suffix}" | cut -f1)
-        log_success "  ✓ super.img.${new_suffix} (${chunk_size})"
-        mv "super.img.${new_suffix}" "$PACK_DIR/images/"
-        CHUNK_COUNT=$((CHUNK_COUNT + 1))
-    done
-    log_success "✓ Split into $CHUNK_COUNT chunks → images/"
+    # Move raw super.img to images directory (no chunking)
+    log_info "Moving super.img to package..."
+    mv "$SUPER_RAW" "$PACK_DIR/images/super.img"
+    log_success "✓ super.img → images/super.img"
 
     cd "$GITHUB_WORKSPACE"
     rm -rf "$SUPER_BUILD_DIR"
@@ -3258,19 +3324,13 @@ echo \"   ⚡  Flashing ${img_name}...\"
 \$FASTBOOT flash ${img_target} images/${img_name}.img || exit_error \"Failed to flash ${img_name}\""
     done < "$MANIFEST_FILE"
 
-    # Collect super chunk flash commands
-    SUPER_FLASH_BAT=""
-    SUPER_FLASH_SH=""
-    for schunk in "$PACK_DIR"/images/super.img.*; do
-        [ ! -f "$schunk" ] && continue
-        sname=$(basename "$schunk")
-        SUPER_FLASH_BAT="${SUPER_FLASH_BAT}
-echo   %%PB%%  Flashing ${sname}...
-%%fastboot%% flash super images\\${sname} || goto :error"
-        SUPER_FLASH_SH="${SUPER_FLASH_SH}
-echo \"   ⚡  Flashing ${sname}...\"
-\$FASTBOOT flash super images/${sname} || exit_error \"Failed to flash ${sname}\""
-    done
+    # Single super.img flash command (no chunks)
+    SUPER_FLASH_BAT="
+echo   %%PB%%  Flashing super.img...
+%%fastboot%% flash super images\\super.img || goto :error"
+    SUPER_FLASH_SH="
+echo \"   ⚡  Flashing super.img...\"
+\$FASTBOOT flash super images/super.img || exit_error \"Failed to flash super.img\""
 
     # ═══════════════════════════════════════════════════════════
     # WINDOWS SCRIPTS
@@ -3645,133 +3705,77 @@ UNIX_FOOTER
     META_ANDROID="$PACK_DIR/META-INF/com/android"
     mkdir -p "$META_GOOGLE" "$META_ANDROID"
 
-    # update-binary (shell-based EDIFY replacement)
-    cat > "$META_GOOGLE/update-binary" << 'UPDATE_BINARY_EOF'
+    # update-binary (real EDIFY binary from xiaomi.eu reference)
+    if [ -f "$GITHUB_WORKSPACE/update-binary" ]; then
+        cp "$GITHUB_WORKSPACE/update-binary" "$META_GOOGLE/update-binary"
+        chmod +x "$META_GOOGLE/update-binary"
+        log_success "✓ META-INF/com/google/android/update-binary (real binary)"
+    else
+        log_warning "update-binary not found in repo root — using fallback"
+        # Fallback: minimal shell stub
+        cat > "$META_GOOGLE/update-binary" << 'UPDATE_BINARY_FALLBACK_EOF'
 #!/sbin/sh
-# nexdroid.build — Recovery Update Binary
-# Shell-based OTA updater for TWRP/OrangeFox/SHRP
-
 OUTFD="/proc/self/fd/$2"
 ZIPFILE="$3"
-
-ui_print() {
-    echo -e "ui_print $1\nui_print" >> "$OUTFD"
-}
-
-set_progress() {
-    echo "set_progress $1" >> "$OUTFD"
-}
-
-package_extract_file() {
-    unzip -o -q "$ZIPFILE" "$1" -d "$(dirname "$2")" 2>/dev/null
-    local extracted="$(dirname "$2")/$(basename "$1")"
-    if [ "$extracted" != "$2" ]; then
-        mv "$extracted" "$2" 2>/dev/null
+echo "ui_print nexdroid.build — No EDIFY binary found. Flash via fastboot instead." > "$OUTFD"
+exit 1
+UPDATE_BINARY_FALLBACK_EOF
+        chmod +x "$META_GOOGLE/update-binary"
+        log_success "✓ META-INF/com/google/android/update-binary (fallback stub)"
     fi
-}
 
-abort() {
-    ui_print "$1"
-    exit 1
-}
+    # updater-script (dynamic EDIFY — xiaomi.eu style)
+    {
+        echo "ui_print(\"Your device: \" + getprop(\"ro.product.device\"));"
+        echo "getprop(\"ro.product.device\") == \"${DEVICE_CODE}\" || abort(\"Compatible devices: ${DEVICE_CODE}\");"
+        echo ""
 
-# ── Banner ──
-ui_print "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-ui_print "  nexdroid.build — Hybrid ROM Installer"
-ui_print "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-ui_print ""
-set_progress 0.0
+        # Firmware images — flash to both _a and _b slots
+        echo "show_progress(0.200000, 0);"
+        echo "ui_print(\"Flashing firmware partitions...\");"
+        while IFS=' ' read -r img_name img_cat img_target img_sz; do
+            [ "$img_cat" != "firmware" ] && continue
+            [ "$img_name" == "super" ] && continue
+            # Determine slot handling
+            case "$img_name" in
+                cust|persist|userdata|metadata)
+                    # No A/B slot
+                    echo "package_extract_file(\"images/${img_name}.img\", \"/dev/block/bootdevice/by-name/${img_name}\");"
+                    ;;
+                *)
+                    # Flash to both slots
+                    echo "package_extract_file(\"images/${img_name}.img\", \"/dev/block/bootdevice/by-name/${img_name}_a\");"
+                    echo "package_extract_file(\"images/${img_name}.img\", \"/dev/block/bootdevice/by-name/${img_name}_b\");"
+                    ;;
+            esac
+        done < "$MANIFEST_FILE"
+        echo "set_progress(1.000000);"
+        echo ""
 
-# ── Extract images to tmp ──
-TMP_DIR="/tmp/nexdroid_install"
-rm -rf "$TMP_DIR"
-mkdir -p "$TMP_DIR"
+        # Boot partitions
+        echo "show_progress(0.100000, 0);"
+        echo "ui_print(\"Flashing boot partitions...\");"
+        for bp in boot vendor_boot dtbo; do
+            if [ -f "$PACK_DIR/images/${bp}.img" ]; then
+                echo "package_extract_file(\"images/${bp}.img\", \"/dev/block/bootdevice/by-name/${bp}_a\");"
+                echo "package_extract_file(\"images/${bp}.img\", \"/dev/block/bootdevice/by-name/${bp}_b\");"
+            fi
+        done
+        echo "set_progress(1.000000);"
+        echo ""
 
-ui_print "  Extracting images from zip..."
-set_progress 0.1
-unzip -o -q "$ZIPFILE" "images/*" -d "$TMP_DIR" 2>/dev/null || abort "Failed to extract images!"
+        # Super partition (sparse image → use package_unsparse_file)
+        echo "show_progress(0.600000, 0);"
+        echo "ui_print(\"Flashing super partition...\");"
+        echo "package_unsparse_file(\"images/super.img\", \"/dev/block/bootdevice/by-name/super\");"
+        echo "set_progress(1.000000);"
+        echo ""
 
-IMAGES_PATH="$TMP_DIR/images"
-[ ! -d "$IMAGES_PATH" ] && abort "images/ directory not found in zip!"
-
-TOTAL=$(ls "$IMAGES_PATH"/*.img 2>/dev/null | wc -l)
-[ "$TOTAL" -eq 0 ] && abort "No .img files found!"
-
-ui_print "  Found $TOTAL image(s) to flash"
-ui_print ""
-
-# ── Flash firmware images ──
-CURRENT=0
-for img in "$IMAGES_PATH"/*.img; do
-    [ ! -f "$img" ] && continue
-    CURRENT=$((CURRENT + 1))
-    IMGNAME=$(basename "$img" .img)
-    PROGRESS=$(echo "scale=2; 0.1 + ($CURRENT / $TOTAL) * 0.8" | bc 2>/dev/null || echo "0.5")
-    set_progress "$PROGRESS"
-
-    # Determine target partition
-    case "$IMGNAME" in
-        super.img.*)
-            # Super chunks → flash to super partition
-            ui_print "  [$CURRENT/$TOTAL] Flashing $IMGNAME → /dev/block/by-name/super"
-            dd if="$img" of="/dev/block/by-name/super" bs=4096 2>/dev/null || \
-                ui_print "  [WARN] Failed to flash $IMGNAME (non-critical)"
-            ;;
-        boot|dtbo|vbmeta|vbmeta_system|vendor_boot)
-            # Critical boot chain — flash to _a slot
-            SLOT="_a"
-            ui_print "  [$CURRENT/$TOTAL] Flashing $IMGNAME → /dev/block/by-name/${IMGNAME}${SLOT}"
-            dd if="$img" of="/dev/block/by-name/${IMGNAME}${SLOT}" bs=4096 2>/dev/null || \
-                ui_print "  [WARN] Failed to flash $IMGNAME"
-            ;;
-        system|system_ext|product|vendor|odm|mi_ext)
-            # Logical partitions inside super — skip in recovery (super chunks handle this)
-            ui_print "  [$CURRENT/$TOTAL] Skipping $IMGNAME (inside super)"
-            ;;
-        cust)
-            # No A/B slot
-            ui_print "  [$CURRENT/$TOTAL] Flashing $IMGNAME → /dev/block/by-name/$IMGNAME"
-            dd if="$img" of="/dev/block/by-name/$IMGNAME" bs=4096 2>/dev/null || \
-                ui_print "  [WARN] Failed to flash $IMGNAME"
-            ;;
-        *)
-            # All other firmware — flash to _a slot
-            SLOT="_a"
-            ui_print "  [$CURRENT/$TOTAL] Flashing $IMGNAME → /dev/block/by-name/${IMGNAME}${SLOT}"
-            dd if="$img" of="/dev/block/by-name/${IMGNAME}${SLOT}" bs=4096 2>/dev/null || \
-                ui_print "  [WARN] Failed to flash $IMGNAME"
-            ;;
-    esac
-done
-
-# ── Flash super chunks (named super.img.X instead of *.img) ──
-for schunk in "$IMAGES_PATH"/super.img.*; do
-    [ ! -f "$schunk" ] && continue
-    SNAME=$(basename "$schunk")
-    ui_print "  Flashing $SNAME → /dev/block/by-name/super"
-    dd if="$schunk" of="/dev/block/by-name/super" bs=4096 seek=$((${SNAME##*.} * 131072)) 2>/dev/null || \
-        ui_print "  [WARN] Failed to flash $SNAME"
-done
-
-# ── Cleanup ──
-set_progress 0.95
-rm -rf "$TMP_DIR"
-
-ui_print ""
-ui_print "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-ui_print "  nexdroid.build — Installation Complete!"
-ui_print "  Reboot your device to start."
-ui_print "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-set_progress 1.0
-exit 0
-UPDATE_BINARY_EOF
-    chmod +x "$META_GOOGLE/update-binary"
-    log_success "✓ META-INF/com/google/android/update-binary"
-
-    # updater-script (must exist, even if minimal)
-    echo '# nexdroid.build — Dummy updater-script (update-binary handles everything)' \
-        > "$META_GOOGLE/updater-script"
-    log_success "✓ META-INF/com/google/android/updater-script"
+        # Set active slot and cleanup
+        echo "run_program(\"/system/bin/bootctl\", \"set-active-boot-slot\", \"0\");"
+        echo "run_program(\"/sbin/sh\", \"-c\", \"rm -f /data/cache/command\");"
+    } > "$META_GOOGLE/updater-script"
+    log_success "✓ META-INF/com/google/android/updater-script (EDIFY)"
 
     # metadata
     BUILD_TIMESTAMP=$(date +%s)
@@ -3906,36 +3910,44 @@ if [ ! -z "$TELEGRAM_TOKEN" ] && [ ! -z "$CHAT_ID" ]; then
         -d chat_id="$CHAT_ID" \
         -d message_id="$TG_MSG_ID" >/dev/null
 
-    # Safe Construction of JSON Payload using jq
-    # We strip special characters from MSG_TEXT for safety if needed, but jq handles most.
-    # We use a simplified text for the JSON to ensure it doesn't break.
-    
-    SAFE_TEXT="NexDroid Build Compiled
---------------------------
-\`📣 Info:\`
-📱 Device  : $DEVICE_CODE
-🏷️ Version : $OS_VER
-🤖 Android : $ANDROID_VER
-⌛ Built   : $BUILD_DATE
+    # Determine build mode label
+    if [ "$BUILD_MODE" == "hybrid" ]; then
+        MODE_BADGE="⚡ Hybrid ROM"
+    else
+        MODE_BADGE="🔧 Mod Only"
+    fi
 
-\`⚙️ Patches Applied:\`
-📦 Mods: \`$MODS_SELECTED\`
+    SAFE_TEXT="▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰
+✦ *nexdroid.build* ✦
+▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰
 
-⬇️_Click the button below to download._"
+\`━━━━━━━━ DEVICE ━━━━━━━━\`
+📱  *Device*     ┊  \`$DEVICE_CODE\`
+🏷  *Version*   ┊  \`$OS_VER\`
+🤖  *Android*   ┊  \`$ANDROID_VER\`
+🏗  *Mode*       ┊  $MODE_BADGE
+
+\`━━━━━━━━ BUILD ━━━━━━━━━\`
+📦  *Mods*       ┊  \`$MODS_SELECTED\`
+📏  *Size*        ┊  \`$ZIP_SIZE\`
+⏱  *Built*       ┊  \`$BUILD_DATE\`
+
+▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰
+_Tap below to download your build_ ⬇️"
 
     JSON_PAYLOAD=$(jq -n \
         --arg chat_id "$CHAT_ID" \
         --arg text "$SAFE_TEXT" \
         --arg url "$LINK_ZIP" \
-        --arg btn "🔗 Download ROM" \
+        --arg btn "⬇️  Download ROM" \
         '{
             chat_id: $chat_id,
             parse_mode: "Markdown",
             text: $text,
+            disable_web_page_preview: true,
             reply_markup: {
                 inline_keyboard: [
-                    [{text: $btn, url: $url}],
-                    [{text: "☁️ Save to Cloud", url: $url}]
+                    [{text: $btn, url: $url}]
                 ]
             }
         }') 
