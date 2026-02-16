@@ -46,6 +46,10 @@ _STUB_TRUE = bytes([0x12, 0x10, 0x0F, 0x00])
 # return-void                    (format 10x = 1 code-unit = 2 bytes)
 _STUB_VOID = bytes([0x0E, 0x00])
 
+# ── IME package names (used by miui-framework + MIUIFrequentPhrase) ────
+_BAIDU_IME  = "com.baidu.input_mi"
+_GBOARD_IME = "com.google.android.inputmethod.latin"
+
 
 # ════════════════════════════════════════════════════════════════════
 #  ZIPALIGN
@@ -1152,23 +1156,63 @@ def _miui_framework_patch(dex_name: str, dex: bytearray) -> bool:
     return patched
 
 # ── Settings.apk region unlock  ─────────────────────────────────
+
+def _patch_sget_exact_v0(dex: bytearray,
+                         field_class: str, field_name: str,
+                         only_class: str) -> int:
+    """
+    Patch ONLY sget-boolean instructions where the destination register is
+    exactly v0 (register byte == 0x00). All other registers are skipped.
+    This is needed for MiuiSettings where only the `sget-boolean v0, ...`
+    form must be patched — v1, v10 etc. are left untouched.
+    """
+    data = bytes(dex)
+    hdr  = _parse_header(data)
+    if not hdr: return 0
+
+    fids = _find_field_ids(data, hdr, field_class, field_name)
+    if not fids: return 0
+
+    SGET_OPCODES = frozenset([0x60, 0x63, 0x64, 0x65, 0x66])
+    raw   = bytearray(dex)
+    count = 0
+
+    for insns_off, insns_len, type_str, mname in _iter_code_items(data, hdr):
+        if only_class not in type_str: continue
+        i = 0
+        while i < insns_len - 3:
+            op = raw[insns_off + i]
+            if op in SGET_OPCODES:
+                reg      = raw[insns_off + i + 1]
+                field_lo = struct.unpack_from('<H', raw, insns_off + i + 2)[0]
+                if field_lo in fids and reg == 0:   # ← EXACT v0 ONLY
+                    # const/4 v0, 0x1
+                    raw[insns_off + i]     = 0x12
+                    raw[insns_off + i + 1] = 0x10   # (1<<4)|0
+                    raw[insns_off + i + 2] = 0x00
+                    raw[insns_off + i + 3] = 0x00
+                    count += 1
+                i += 4
+            else:
+                i += 2
+
+    if count:
+        _fix_checksums(raw); dex[:] = raw
+        ok(f"  ✓ {field_name} (v0 only): {count} sget → const/4 1 in {only_class}")
+    return count
+
+
 def _settings_region_patch(dex_name: str, dex: bytearray) -> bool:
     """
-    Patch IS_GLOBAL_BUILD → const/4 pX, 0x1 scoped to exactly 3 classes.
-    NO global sweep. NO raw scan. Patching only:
+    Patch IS_GLOBAL_BUILD → const/4 vX, 0x1 scoped to specific classes.
+    NO global sweep. NO raw scan.
 
-      LocaleController      — all methods (no method filter; the sget may be
-                               in a method other than getAvailabilityStatus)
-      LocaleSettingsTree    — all methods
-      OtherPersonalSettings — all methods (has 2 IS_GLOBAL_BUILD lines in onCreate)
-
-    Global sweep was used previously and patched 57 sgets in Settings.apk,
-    flipping region flags in unrelated classes and crashing the app.
-    Class-filtered approach patches only the 3 intended classes.
-
-    The improved _iter_code_items (using _skip_uleb128 instead of break in
-    the field-skip loop) ensures OtherPersonalSettings::onCreate is not
-    silently skipped due to ULEB128 mis-stepping on its instance fields.
+    Targets:
+      LocaleController      — all methods, all registers
+      LocaleSettingsTree    — all methods, all registers
+      OtherPersonalSettings — all methods, all registers
+      MiuiSettings          — ONLY sget-boolean v0 (exact register match)
+      GeminiController      — getAvailabilityStatus() → return 1 (full method stub)
     """
     if b'IS_GLOBAL_BUILD' not in bytes(dex): return False
     n = 0
@@ -1181,6 +1225,35 @@ def _settings_region_patch(dex_name: str, dex: bytearray) -> bool:
     n += binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
                                     only_class='OtherPersonalSettings',
                                     use_const4=True)
+
+    # MiuiSettings — exact v0 register only (do NOT touch v1, v10, etc.)
+    if b'MiuiSettings' in bytes(dex):
+        n += _patch_sget_exact_v0(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
+                                  only_class='MiuiSettings')
+
+    # GeminiController::getAvailabilityStatus() → return 1
+    if b'GeminiController' in bytes(dex):
+        # Scan all class defs for any class ending with /GeminiController;
+        data = bytes(dex)
+        hdr  = _parse_header(data)
+        if hdr:
+            for i in range(hdr['class_defs_size']):
+                base = hdr['class_defs_off'] + i * 32
+                if struct.unpack_from('<I', data, base + 24)[0] == 0: continue
+                cls_idx = struct.unpack_from('<I', data, base)[0]
+                try:
+                    sidx     = struct.unpack_from('<I', data, hdr['type_ids_off'] + cls_idx * 4)[0]
+                    type_str = _get_str(data, hdr, sidx)
+                    if type_str.endswith('/GeminiController;') and type_str.startswith('L'):
+                        cls_path = type_str[1:-1]
+                        if binary_patch_method(dex, cls_path,
+                                'getAvailabilityStatus', 1, _STUB_TRUE):
+                            ok(f"  ✓ GeminiController::getAvailabilityStatus → return 1")
+                            n += 1
+                            break
+                except Exception:
+                    continue
+
     return n > 0
 
 
@@ -1231,8 +1304,7 @@ def _incallui_patch(dex_name: str, dex: bytearray) -> bool:
     return False
 
 # ── MIUIFrequentPhrase.apk — Gboard redirect  ────────────────────
-_BAIDU_IME  = "com.baidu.input_mi"
-_GBOARD_IME = "com.google.android.inputmethod.latin"
+# _BAIDU_IME and _GBOARD_IME moved to top of file (after _STUB_VOID)
 
 def _miuifreqphrase_patch(dex_name: str, dex: bytearray) -> bool:
     """
