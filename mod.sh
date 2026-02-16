@@ -55,6 +55,9 @@ _Last Update: $timestamp_"
     fi
 }
 
+# --- BUILD TIMER ---
+GLOBAL_START_TIME=$(date +%s)
+
 # --- INPUTS ---
 ROM_URL="$1"
 MODS_SELECTED="${2:-}"   # comma-separated: launcher,thememanager,securitycenter
@@ -4006,14 +4009,14 @@ fi
 # =========================================================
 #  7. TELEGRAM NOTIFICATION
 # =========================================================
-# =========================================================
-#  7. TELEGRAM NOTIFICATION
-# =========================================================
 if [ ! -z "$TELEGRAM_TOKEN" ] && [ ! -z "$CHAT_ID" ]; then
     log_step "📣 Sending Telegram notification..."
     tg_progress "✅ **Build Complete! Sending report...**"
     
-    BUILD_DATE=$(date +"%Y-%m-%d %H:%M")
+    BUILD_DATE=$(date +"%d %b %Y, %H:%M")
+    TOTAL_BUILD_TIME=$(( $(date +%s) - GLOBAL_START_TIME ))
+    BUILD_MINS=$((TOTAL_BUILD_TIME / 60))
+    BUILD_SECS=$((TOTAL_BUILD_TIME % 60))
     
     # Delete the progress message so the final report is fresh
     curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/deleteMessage" \
@@ -4022,37 +4025,43 @@ if [ ! -z "$TELEGRAM_TOKEN" ] && [ ! -z "$CHAT_ID" ]; then
 
     # Determine build mode label
     if [ "$BUILD_MODE" == "hybrid" ]; then
-        MODE_BADGE="⚡ Hybrid ROM"
+        MODE_LABEL="Hybrid ROM"
     else
-        MODE_BADGE="🔧 Mod Only"
+        MODE_LABEL="Mod Pack"
     fi
 
-    SAFE_TEXT="▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰
-✦ *nexdroid.build* ✦
-▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰
+    # Format mods list — one per line with bullet
+    MODS_FORMATTED=""
+    IFS=',' read -ra MODS_ARR <<< "$MODS_SELECTED"
+    for mod in "${MODS_ARR[@]}"; do
+        mod_trimmed=$(echo "$mod" | xargs)
+        [ -n "$mod_trimmed" ] && MODS_FORMATTED="${MODS_FORMATTED}  ▸ ${mod_trimmed}
+"
+    done
 
-\`━━━━━━━━ DEVICE ━━━━━━━━\`
-📱  *Device*     ┊  \`$DEVICE_CODE\`
-🏷  *Version*   ┊  \`$OS_VER\`
-🤖  *Android*   ┊  \`$ANDROID_VER\`
-🏗  *Mode*       ┊  $MODE_BADGE
+    SAFE_TEXT="<b>✦ nexdroid.build</b>
 
-\`━━━━━━━━ BUILD ━━━━━━━━━\`
-📦  *Mods*       ┊  \`$MODS_SELECTED\`
-📏  *Size*        ┊  \`$ZIP_SIZE\`
-⏱  *Built*       ┊  \`$BUILD_DATE\`
+<code>Device    </code>  <b>$DEVICE_CODE</b>
+<code>Version   </code>  $OS_VER
+<code>Android   </code>  $ANDROID_VER
+<code>Type      </code>  $MODE_LABEL
 
-▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰
-_Tap below to download your build_ ⬇️"
+<b>Applied Mods</b>
+${MODS_FORMATTED}
+<code>Size      </code>  $ZIP_SIZE
+<code>Built in  </code>  ${BUILD_MINS}m ${BUILD_SECS}s
+<code>Date      </code>  $BUILD_DATE
+
+<i>⬇️ Tap below to download</i>"
 
     JSON_PAYLOAD=$(jq -n \
         --arg chat_id "$CHAT_ID" \
         --arg text "$SAFE_TEXT" \
         --arg url "$LINK_ZIP" \
-        --arg btn "⬇️  Download ROM" \
+        --arg btn "⬇️  Download $MODE_LABEL" \
         '{
             chat_id: $chat_id,
-            parse_mode: "Markdown",
+            parse_mode: "HTML",
             text: $text,
             disable_web_page_preview: true,
             reply_markup: {
