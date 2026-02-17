@@ -216,52 +216,51 @@ mount_odm() {
     local odm_img="$1" mount_point="$2" label="$3"
     mkdir -p "$mount_point"
 
-    # ── Step 1: Detect and convert Android sparse image ──────────────────
-    # Sparse magic bytes: 0xed 0x26 0xff 0x3a (little-endian)
-    local magic
-    magic=$(od -A n -t x1 -N 4 "$odm_img" 2>/dev/null | tr -d ' \\n')
-    if [ "$magic" = "3aff26ed" ] || [ "$magic" = "ed26ff3a" ]; then
-        log_info "$label ODM is a sparse image — converting to raw..."
-        if ! command -v simg2img &>/dev/null; then
-            log_error "simg2img not found — install android-sdk-libsparse-utils"
-            exit 1
-        fi
+    # ── Step 1: Always try simg2img first ────────────────────────────────
+    # payload-dumper-go often outputs Android sparse images which blkid
+    # cannot detect and loop mount cannot handle. simg2img exits non-zero
+    # quickly on non-sparse input so it is safe to call unconditionally.
+    if command -v simg2img &>/dev/null; then
         local raw_img="${odm_img%.img}_raw.img"
-        simg2img "$odm_img" "$raw_img" || {
-            log_error "simg2img conversion failed for $label"
-            exit 1
-        }
-        mv "$raw_img" "$odm_img"
-        log_success "$label sparse → raw conversion complete"
+        if simg2img "$odm_img" "$raw_img" 2>/dev/null; then
+            log_info "$label ODM was sparse — converted to raw"
+            mv "$raw_img" "$odm_img"
+        else
+            rm -f "$raw_img"
+            log_info "$label ODM is not sparse"
+        fi
+    else
+        log_warning "simg2img not found — skipping sparse conversion (may fail if image is sparse)"
     fi
 
     # ── Step 2: Detect filesystem type on raw image ───────────────────────
     local fs_type
     fs_type=$(blkid -s TYPE -o value "$odm_img" 2>/dev/null || echo "unknown")
-    log_info "$label filesystem: $fs_type"
+    log_info "$label filesystem type: $fs_type"
 
-    # ── Step 3: Handle EROFS (read-only compressed) ───────────────────────
+    # ── Step 3: Handle EROFS ──────────────────────────────────────────────
     if [ "$fs_type" = "erofs" ]; then
         log_info "$label ODM is EROFS — extracting to directory..."
         if command -v extract.erofs &>/dev/null; then
-            extract.erofs -i "$odm_img" -x -T 4 -o "$mount_point" 2>/dev/null || \
-            extract.erofs -i "$odm_img" -x -o "$mount_point" 2>/dev/null
+            extract.erofs -i "$odm_img" -x -T 4 -o "$mount_point" 2>/dev/null ||             extract.erofs -i "$odm_img" -x -o "$mount_point" 2>/dev/null
         elif command -v fsck.erofs &>/dev/null; then
             fsck.erofs --extract="$mount_point" "$odm_img" 2>/dev/null
         else
-            log_error "No EROFS extraction tool found (need erofs-utils)"
+            log_error "No EROFS extraction tool found — install erofs-utils"
             exit 1
         fi
         log_success "$label ODM extracted (EROFS → directory)"
 
-    # ── Step 4: Mount ext4 read-write ─────────────────────────────────────
+    # ── Step 4: Mount ext4 ────────────────────────────────────────────────
     else
         log_info "Mounting $label ODM (ext4) read-write..."
         if ! mount -o loop,rw "$odm_img" "$mount_point" 2>/dev/null; then
             log_warning "RW mount failed — attempting filesystem repair..."
             e2fsck -fy "$odm_img" >/dev/null 2>&1 || true
             if ! mount -o loop,rw "$odm_img" "$mount_point" 2>/dev/null; then
-                log_error "Failed to mount $label odm.img after repair"
+                log_error "Failed to mount $label odm.img — image may be corrupt or unsupported format"
+                log_info "Image file info: $(file "$odm_img")"
+                log_info "Image blkid: $(blkid "$odm_img" 2>&1 || true)"
                 exit 1
             fi
         fi
