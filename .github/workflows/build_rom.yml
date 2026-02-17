@@ -1,4 +1,4 @@
-name: NexDroid ROM Factory
+name: NexDroid ROM Compiler
 
 on:
   repository_dispatch:
