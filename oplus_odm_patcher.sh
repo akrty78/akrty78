@@ -865,20 +865,39 @@ log_info "ODM dir size: $(du -sh "$XIAOMI_ODM_DIR" | cut -f1), allocating $(numf
 # Try mkfs.erofs first (most Xiaomi devices use EROFS)
 if command -v mkfs.erofs &>/dev/null; then
     log_info "Repacking with mkfs.erofs..."
+    EROFS_VER=$(mkfs.erofs --version 2>&1 | head -1 || echo "unknown")
+    log_info "mkfs.erofs version: $EROFS_VER"
 
-    EROFS_ARGS="-zlz4hc,9"
+    # Probe which flags are actually supported
+    EROFS_HELP=$(mkfs.erofs --help 2>&1 || true)
+    EROFS_ARGS="-zlz4hc"
 
-    # Use file_contexts if available
-    if [ -f "$XIAOMI_CONTEXTS" ] && [ -s "$XIAOMI_CONTEXTS" ]; then
-        EROFS_ARGS="$EROFS_ARGS --file-contexts=$XIAOMI_CONTEXTS"
-        log_info "Using file_contexts: $XIAOMI_CONTEXTS"
+    # Check for lz4hc compression level support
+    if echo "$EROFS_HELP" | grep -q "lz4hc,"; then
+        EROFS_ARGS="-zlz4hc,9"
     fi
 
-    # Use fs_config if available
-    if [ -f "$XIAOMI_FS_CONFIG" ] && [ -s "$XIAOMI_FS_CONFIG" ]; then
-        EROFS_ARGS="$EROFS_ARGS --fs-config-file=$XIAOMI_FS_CONFIG"
-        log_info "Using fs_config: $XIAOMI_FS_CONFIG"
+    # Only use --file-contexts if the build actually supports it (requires libselinux)
+    if echo "$EROFS_HELP" | grep -q "\-\-file-contexts"; then
+        if [ -f "$XIAOMI_CONTEXTS" ] && [ -s "$XIAOMI_CONTEXTS" ]; then
+            EROFS_ARGS="$EROFS_ARGS --file-contexts=$XIAOMI_CONTEXTS"
+            log_info "Using file_contexts: $XIAOMI_CONTEXTS"
+        fi
+    else
+        log_warning "mkfs.erofs does not support --file-contexts (needs libselinux build)"
     fi
+
+    # Only use --fs-config-file if supported
+    if echo "$EROFS_HELP" | grep -q "\-\-fs-config-file"; then
+        if [ -f "$XIAOMI_FS_CONFIG" ] && [ -s "$XIAOMI_FS_CONFIG" ]; then
+            EROFS_ARGS="$EROFS_ARGS --fs-config-file=$XIAOMI_FS_CONFIG"
+            log_info "Using fs_config: $XIAOMI_FS_CONFIG"
+        fi
+    else
+        log_warning "mkfs.erofs does not support --fs-config-file"
+    fi
+
+    log_info "EROFS args: $EROFS_ARGS"
 
     mkfs.erofs $EROFS_ARGS \
         -T 1230768000 \
@@ -886,17 +905,17 @@ if command -v mkfs.erofs &>/dev/null; then
         "$PATCHED_ODM" \
         "$XIAOMI_ODM_DIR" 2>&1 | tail -5
 
-    if [ -f "$PATCHED_ODM" ] && [ -s "$PATCHED_ODM" ]; then
-        log_success "ODM repacked with EROFS: $(du -h "$PATCHED_ODM" | cut -f1)"
-    else
-        log_error "EROFS repack failed"
-        # mkfs.erofs can fail if the version doesn't support all flags
-        # Try without optional flags
-        log_info "Retrying mkfs.erofs with minimal flags..."
+    if [ ! -f "$PATCHED_ODM" ] || [ ! -s "$PATCHED_ODM" ]; then
+        log_error "EROFS repack failed, retrying with minimal flags..."
+        rm -f "$PATCHED_ODM"
         mkfs.erofs -zlz4hc \
             --mount-point=/odm \
             "$PATCHED_ODM" \
             "$XIAOMI_ODM_DIR" 2>&1 | tail -5
+    fi
+
+    if [ -f "$PATCHED_ODM" ] && [ -s "$PATCHED_ODM" ]; then
+        log_success "ODM repacked with EROFS: $(du -h "$PATCHED_ODM" | cut -f1)"
     fi
 fi
 
@@ -914,33 +933,69 @@ rm -rf "$XIAOMI_PROJECT"
 log_disk
 
 # =========================================================
-#  10. UPLOAD TO PIXELDRAIN
+#  10. UPLOAD
 # =========================================================
-log_step "☁️  Uploading to PixelDrain..."
-tg_progress "☁️ Uploading patched ODM to PixelDrain..."
+log_step "☁️  Uploading patched ODM..."
+tg_progress "☁️ Uploading patched ODM..."
 
-UPLOAD_RESPONSE=$(curl -s -T "$PATCHED_ODM" \
-    -H "Content-Type: application/octet-stream" \
-    "https://pixeldrain.com/api/file/odm.img")
+UPLOAD_LINK="UPLOAD_FAILED"
 
-PD_ID=$(echo "$UPLOAD_RESPONSE" | jq -r '.id // empty')
+# --- Try PixelDrain (with API key if available) ---
+upload_pixeldrain() {
+    local file="$1"
+    local response=""
 
-if [ -n "$PD_ID" ]; then
-    PD_LINK="https://pixeldrain.com/u/$PD_ID"
-    log_success "Upload complete: $PD_LINK"
-else
-    log_error "PixelDrain upload failed: $UPLOAD_RESPONSE"
-    # Try again
-    log_info "Retrying upload..."
-    UPLOAD_RESPONSE=$(curl -s -T "$PATCHED_ODM" "https://pixeldrain.com/api/file/odm.img")
-    PD_ID=$(echo "$UPLOAD_RESPONSE" | jq -r '.id // empty')
-    if [ -n "$PD_ID" ]; then
-        PD_LINK="https://pixeldrain.com/u/$PD_ID"
-        log_success "Upload complete (retry): $PD_LINK"
+    if [ -n "$PIXELDRAIN_KEY" ]; then
+        log_info "Uploading to PixelDrain (authenticated)..."
+        response=$(curl -s -T "$file" \
+            -u ":$PIXELDRAIN_KEY" \
+            "https://pixeldrain.com/api/file/odm.img")
     else
-        PD_LINK="UPLOAD_FAILED"
-        log_error "Upload failed after retry"
+        log_info "Uploading to PixelDrain (anonymous)..."
+        response=$(curl -s -T "$file" \
+            "https://pixeldrain.com/api/file/odm.img")
     fi
+
+    local pd_id=$(echo "$response" | jq -r '.id // empty')
+    if [ -n "$pd_id" ]; then
+        echo "https://pixeldrain.com/u/$pd_id"
+        return 0
+    else
+        log_error "PixelDrain failed: $(echo "$response" | jq -r '.message // .value // "unknown error"')"
+        return 1
+    fi
+}
+
+# --- Fallback: GoFile ---
+upload_gofile() {
+    local file="$1"
+    log_info "Uploading to GoFile (fallback)..."
+
+    # Get best server
+    local server=$(curl -s "https://api.gofile.io/servers" | jq -r '.data.servers[0].name // "store1"')
+    log_info "GoFile server: $server"
+
+    local response=$(curl -s -F "file=@$file" "https://${server}.gofile.io/contents/uploadfile")
+    local dl_url=$(echo "$response" | jq -r '.data.downloadPage // empty')
+
+    if [ -n "$dl_url" ]; then
+        echo "$dl_url"
+        return 0
+    else
+        log_error "GoFile failed: $response"
+        return 1
+    fi
+}
+
+# Try PixelDrain first, then GoFile
+UPLOAD_LINK=$(upload_pixeldrain "$PATCHED_ODM") || \
+UPLOAD_LINK=$(upload_gofile "$PATCHED_ODM") || \
+UPLOAD_LINK="UPLOAD_FAILED"
+
+if [ "$UPLOAD_LINK" != "UPLOAD_FAILED" ]; then
+    log_success "Upload complete: $UPLOAD_LINK"
+else
+    log_error "All upload methods failed"
 fi
 
 # =========================================================
@@ -961,14 +1016,14 @@ ELAPSED_SEC=$((ELAPSED % 60))
 # =========================================================
 log_step "📤 Sending result..."
 
-if [ "$PD_LINK" != "UPLOAD_FAILED" ]; then
+if [ "$UPLOAD_LINK" != "UPLOAD_FAILED" ]; then
     FINAL_MSG="✅ *OPLUS ODM Patch Complete*
 
 📦 *Files Injected:* \`$INJECT_COUNT\`
 ⏱ *Time:* ${ELAPSED_MIN}m ${ELAPSED_SEC}s
 
 📥 *Download:*
-[Patched odm.img]($PD_LINK)
+[Patched odm.img]($UPLOAD_LINK)
 
 _Flash this odm.img to replace your stock Xiaomi ODM._"
 else
@@ -977,11 +1032,11 @@ else
 📦 *Files Injected:* \`$INJECT_COUNT\`
 ⏱ *Time:* ${ELAPSED_MIN}m ${ELAPSED_SEC}s
 
-❌ PixelDrain upload failed. Check logs for details."
+❌ Upload failed. Check logs for details."
 fi
 
 tg_send "$FINAL_MSG"
 
 log_success "=== OPLUS ODM PATCHER COMPLETE ==="
 log_info "Injected: $INJECT_COUNT files | Time: ${ELAPSED_MIN}m ${ELAPSED_SEC}s"
-[ "$PD_LINK" != "UPLOAD_FAILED" ] && log_info "Download: $PD_LINK"
+[ "$UPLOAD_LINK" != "UPLOAD_FAILED" ] && log_info "Download: $UPLOAD_LINK"
