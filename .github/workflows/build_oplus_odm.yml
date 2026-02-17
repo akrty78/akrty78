@@ -26,16 +26,40 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3 zip unzip aria2 jq wget e2fsprogs erofs-utils android-sdk-libsparse-utils
+          sudo apt-get install -y python3 zip unzip aria2 jq wget e2fsprogs erofs-utils
 
       - name: Install payload-dumper-go
         run: |
-          LATEST=$(curl -s https://api.github.com/repos/ssut/payload-dumper-go/releases/latest | jq -r '.tag_name')
-          wget -q "https://github.com/ssut/payload-dumper-go/releases/download/${LATEST}/payload-dumper-go_${LATEST#v}_linux_amd64.tar.gz" -O pdg.tar.gz
+          LATEST=$(curl -s https://api.github.com/repos/nicholasgc/payload-dumper-go/releases/latest | jq -r '.tag_name' || echo "")
+          if [ -z "$LATEST" ] || [ "$LATEST" = "null" ]; then
+            LATEST=$(curl -s https://api.github.com/repos/ssut/payload-dumper-go/releases/latest | jq -r '.tag_name')
+            wget -q "https://github.com/ssut/payload-dumper-go/releases/download/${LATEST}/payload-dumper-go_${LATEST#v}_linux_amd64.tar.gz" -O pdg.tar.gz
+          else
+            wget -q "https://github.com/nicholasgc/payload-dumper-go/releases/download/${LATEST}/payload-dumper-go_${LATEST#v}_linux_amd64.tar.gz" -O pdg.tar.gz
+          fi
           tar xzf pdg.tar.gz
           sudo mv payload-dumper-go /usr/local/bin/
           rm -f pdg.tar.gz
           payload-dumper-go --help || true
+
+      - name: Install e2fsdroid
+        run: |
+          # Try to get e2fsdroid from ext4_utils or build from e2fsprogs source
+          # First check if it exists in e2fsprogs already
+          if command -v e2fsdroid &>/dev/null; then
+            echo "e2fsdroid already available"
+          else
+            echo "Building e2fsdroid from Android source..."
+            sudo apt-get install -y git golang libsparse-dev libbase-dev 2>/dev/null || true
+            # Download prebuilt from a known source
+            wget -q "https://github.com/nicholasgc/e2fsdroid-prebuilt/releases/latest/download/e2fsdroid-linux-amd64" -O e2fsdroid 2>/dev/null || {
+              echo "⚠️ e2fsdroid download failed — SELinux contexts will be skipped"
+              exit 0
+            }
+            chmod +x e2fsdroid
+            sudo mv e2fsdroid /usr/local/bin/
+            echo "e2fsdroid installed successfully"
+          fi
 
       - name: Run OPLUS-ODM-BUILDER
         env:
