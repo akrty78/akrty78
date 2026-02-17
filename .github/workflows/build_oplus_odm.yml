@@ -13,6 +13,7 @@ jobs:
       XIAOMI_URL: ${{ github.event.client_payload.xiaomi_url }}
       CHAT_ID: ${{ github.event.client_payload.chat_id }}
       TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+      PIXELDRAIN_KEY: ${{ secrets.PIXELDRAIN_KEY }}
 
     steps:
       - name: Free Disk Space
