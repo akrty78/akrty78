@@ -4066,7 +4066,7 @@ if [ ! -z "$TELEGRAM_TOKEN" ] && [ ! -z "$CHAT_ID" ]; then
     # ── Use REQUESTER_CHAT_ID if available, else fallback to CHAT_ID ──
     NOTIFY_CHAT="${REQUESTER_CHAT_ID:-$CHAT_ID}"
 
-    SAFE_TEXT="✦ *nexdroid.build*
+    SAFE_TEXT="✦ *nexdroid.build | Compiled Successfully*
 
 \`\`\`
 Compiled Build Info
@@ -4075,10 +4075,8 @@ Android: $ANDROID_VER
 OS: $OS_VER
 Region: $REGION_LABEL
 \`\`\`
-
 *Build Type:*
 —  $BUILD_TYPE_LABEL
-
 *Mods / Features Applied:*
 \`\`\`
 $MODS_LIST
@@ -4092,7 +4090,7 @@ Built at: \`$BUILD_DATE\`"
         --arg chat_id "$NOTIFY_CHAT" \
         --arg text "$SAFE_TEXT" \
         --arg url "$LINK_ZIP" \
-        --arg btn "⬇️  Download" \
+        --arg btn "Download" \
         '{
             chat_id: $chat_id,
             parse_mode: "Markdown",
