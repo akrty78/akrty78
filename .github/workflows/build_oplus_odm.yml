@@ -100,11 +100,7 @@ jobs:
             curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
               -d chat_id="$CHAT_ID" \
               -d parse_mode="Markdown" \
-              -d text="❌ *OPLUS-ODM-BUILDER Failed*
-
-The build encountered an error.
-
-[View Logs](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+              -d text="❌ *OPLUS-ODM-BUILDER Failed*%0A%0AThe build encountered an error.%0A%0A[View Logs](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})"
           fi
 
       - name: Cleanup
