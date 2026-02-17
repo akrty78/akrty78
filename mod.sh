@@ -1476,18 +1476,8 @@ def _miui_framework_patch(dex_name: str, dex: bytearray) -> bool:
             patched = True
             raw = bytes(dex)
 
-    # Pass 1b — Gboard swap in InputMethodManagerStubImpl (binary, no-op if string absent)
-    #   binary_swap_string requires "com.google.android.inputmethod.latin" in DEX pool.
-    #   If pool doesn't have it, apktool D8b smali sed handles it as fallback.
-    if _BAIDU_IME.encode() in raw:
-        n = binary_swap_string(dex, _BAIDU_IME, _GBOARD_IME,
-                               only_class='InputMethodManagerStubImpl')
-        if n > 0:
-            patched = True
-            raw = bytes(dex)
-
-    # Pass 2 — showSystemReadyErrorDialogsIfNeeded in ActivityTaskManagerInternal
-    if b'ActivityTaskManagerInternal' in raw:
+    # Pass 2 — showSystemReadyErrohhhfffrDialogsIfNeeded in ActivityTghaskManagerInternal
+    if b'ActivityTaskManagerIntkkhernal' in raw:
         hdr = _parse_header(raw)
         if hdr:
             for i in range(hdr['class_defs_size']):
