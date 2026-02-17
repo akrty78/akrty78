@@ -81,6 +81,9 @@ OUTPUT_DIR="$WORK_DIR/odm_output"
 mkdir -p "$BIN_DIR" "$OPLUS_DL" "$XIAOMI_DL" "$OPLUS_PROJECT" "$XIAOMI_PROJECT" "$OUTPUT_DIR"
 export PATH="$BIN_DIR:$PATH"
 
+# Disk space helper
+log_disk() { log_info "💾 Disk free: $(df -h . | awk 'NR==2{print $4}')"; }
+
 # =========================================================
 #  1. INSTALL TOOLS
 # =========================================================
@@ -131,11 +134,15 @@ if [ ! -f "$BIN_DIR/extract.erofs" ]; then
 fi
 
 cd "$WORK_DIR"
+log_disk
 
 # =========================================================
-#  2. DOWNLOAD BOTH OTAs
+#  2. DOWNLOAD & EXTRACT — SEQUENTIAL (save disk space)
+#     Download one OTA → extract payload → dump ODM → delete → repeat
 # =========================================================
-log_step "📥 Downloading OTAs..."
+
+# --- OPLUS OTA ---
+log_step "📥 OPLUS: Download → Extract → Cleanup"
 tg_progress "📥 Downloading OPLUS OTA..."
 
 log_info "Downloading OPLUS OTA..."
@@ -145,8 +152,38 @@ if [ ! -f "$OPLUS_DL/oplus_ota.zip" ]; then
     tg_send "❌ *ODM Patch Failed*\nCould not download OPLUS OTA."
     exit 1
 fi
-log_success "OPLUS OTA downloaded"
+log_success "OPLUS OTA downloaded: $(du -h "$OPLUS_DL/oplus_ota.zip" | cut -f1)"
 
+log_info "Extracting OPLUS payload.bin..."
+cd "$OPLUS_DL"
+unzip -o -q oplus_ota.zip payload.bin 2>/dev/null || 7z e -y oplus_ota.zip payload.bin >/dev/null 2>&1
+# DELETE ZIP IMMEDIATELY
+rm -f "$OPLUS_DL/oplus_ota.zip"
+log_info "Deleted OPLUS OTA zip"
+
+if [ ! -f "payload.bin" ]; then
+    log_error "No payload.bin in OPLUS OTA"
+    tg_send "❌ *ODM Patch Failed*\nNo payload.bin found in OPLUS OTA."
+    exit 1
+fi
+
+log_info "Dumping OPLUS odm.img..."
+payload-dumper-go -p odm -o "$OPLUS_DL" payload.bin
+# DELETE PAYLOAD IMMEDIATELY
+rm -f "$OPLUS_DL/payload.bin"
+log_info "Deleted OPLUS payload.bin"
+
+OPLUS_ODM=$(find "$OPLUS_DL" -name "odm.img" -print -quit)
+if [ -z "$OPLUS_ODM" ] || [ ! -f "$OPLUS_ODM" ]; then
+    log_error "Failed to extract OPLUS odm.img"
+    tg_send "❌ *ODM Patch Failed*\nCould not extract OPLUS odm.img from payload."
+    exit 1
+fi
+log_success "OPLUS odm.img extracted: $(du -h "$OPLUS_ODM" | cut -f1)"
+log_disk
+
+# --- XIAOMI OTA ---
+log_step "📥 Xiaomi: Download → Extract → Cleanup"
 tg_progress "📥 Downloading Xiaomi OTA..."
 
 log_info "Downloading Xiaomi OTA..."
@@ -156,41 +193,15 @@ if [ ! -f "$XIAOMI_DL/xiaomi_ota.zip" ]; then
     tg_send "❌ *ODM Patch Failed*\nCould not download Xiaomi OTA."
     exit 1
 fi
-log_success "Xiaomi OTA downloaded"
+log_success "Xiaomi OTA downloaded: $(du -h "$XIAOMI_DL/xiaomi_ota.zip" | cut -f1)"
 
-# =========================================================
-#  3. EXTRACT ODM IMAGES FROM PAYLOAD
-# =========================================================
-log_step "📦 Extracting ODM images from payloads..."
-tg_progress "📦 Extracting ODM from payloads..."
-
-# OPLUS
-log_info "Extracting OPLUS payload.bin..."
-cd "$OPLUS_DL"
-unzip -o -q oplus_ota.zip payload.bin 2>/dev/null || 7z e -y oplus_ota.zip payload.bin >/dev/null 2>&1
-if [ ! -f "payload.bin" ]; then
-    log_error "No payload.bin in OPLUS OTA"
-    tg_send "❌ *ODM Patch Failed*\nNo payload.bin found in OPLUS OTA."
-    exit 1
-fi
-
-log_info "Dumping OPLUS odm.img..."
-payload-dumper-go -p odm -o "$OPLUS_DL" payload.bin
-OPLUS_ODM=$(find "$OPLUS_DL" -name "odm.img" -print -quit)
-if [ -z "$OPLUS_ODM" ] || [ ! -f "$OPLUS_ODM" ]; then
-    log_error "Failed to extract OPLUS odm.img"
-    tg_send "❌ *ODM Patch Failed*\nCould not extract OPLUS odm.img from payload."
-    exit 1
-fi
-log_success "OPLUS odm.img extracted: $(du -h "$OPLUS_ODM" | cut -f1)"
-
-# Cleanup OPLUS payload
-rm -f "$OPLUS_DL/payload.bin" "$OPLUS_DL/oplus_ota.zip"
-
-# XIAOMI
 log_info "Extracting Xiaomi payload.bin..."
 cd "$XIAOMI_DL"
 unzip -o -q xiaomi_ota.zip payload.bin 2>/dev/null || 7z e -y xiaomi_ota.zip payload.bin >/dev/null 2>&1
+# DELETE ZIP IMMEDIATELY
+rm -f "$XIAOMI_DL/xiaomi_ota.zip"
+log_info "Deleted Xiaomi OTA zip"
+
 if [ ! -f "payload.bin" ]; then
     log_error "No payload.bin in Xiaomi OTA"
     tg_send "❌ *ODM Patch Failed*\nNo payload.bin found in Xiaomi OTA."
@@ -199,6 +210,10 @@ fi
 
 log_info "Dumping Xiaomi odm.img..."
 payload-dumper-go -p odm -o "$XIAOMI_DL" payload.bin
+# DELETE PAYLOAD IMMEDIATELY
+rm -f "$XIAOMI_DL/payload.bin"
+log_info "Deleted Xiaomi payload.bin"
+
 XIAOMI_ODM=$(find "$XIAOMI_DL" -name "odm.img" -print -quit)
 if [ -z "$XIAOMI_ODM" ] || [ ! -f "$XIAOMI_ODM" ]; then
     log_error "Failed to extract Xiaomi odm.img"
@@ -207,10 +222,8 @@ if [ -z "$XIAOMI_ODM" ] || [ ! -f "$XIAOMI_ODM" ]; then
 fi
 log_success "Xiaomi odm.img extracted: $(du -h "$XIAOMI_ODM" | cut -f1)"
 
-# Cleanup Xiaomi payload
-rm -f "$XIAOMI_DL/payload.bin" "$XIAOMI_DL/xiaomi_ota.zip"
-
 cd "$WORK_DIR"
+log_disk
 
 # =========================================================
 #  4. UNPACK BOTH ODM IMAGES
@@ -287,8 +300,10 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# Delete raw .img files now — free disk space
+# Delete raw .img files and download dirs — free disk space
 rm -f "$OPLUS_ODM" "$XIAOMI_ODM"
+rm -rf "$OPLUS_DL" "$XIAOMI_DL"
+log_disk
 
 OPLUS_ODM_DIR="$OPLUS_PROJECT/odm"
 XIAOMI_ODM_DIR="$XIAOMI_PROJECT/odm"
@@ -448,6 +463,7 @@ for cfg_file in custom_power.cfg power_stats_config.xml; do
 done
 
 log_success "HAL injection complete: $INJECT_COUNT files injected, $INJECT_ERRORS warnings"
+log_disk
 
 # =========================================================
 #  6. PERMISSION CLONING (fs_config)
@@ -786,6 +802,11 @@ fi
 
 rm -f "$WORK_DIR/context_merger.py"
 
+# Free disk: delete entire OPLUS project (no longer needed)
+log_info "Deleting OPLUS project to free disk..."
+rm -rf "$OPLUS_PROJECT"
+log_disk
+
 # =========================================================
 #  8. PROPS INJECTION
 # =========================================================
@@ -886,6 +907,11 @@ if [ ! -f "$PATCHED_ODM" ] || [ ! -s "$PATCHED_ODM" ]; then
 fi
 
 log_success "Patched ODM image ready: $(du -h "$PATCHED_ODM" | cut -f1)"
+
+# Free disk: delete Xiaomi project (only the repacked image is needed now)
+log_info "Deleting Xiaomi project to free disk..."
+rm -rf "$XIAOMI_PROJECT"
+log_disk
 
 # =========================================================
 #  10. UPLOAD TO PIXELDRAIN
