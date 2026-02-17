@@ -140,18 +140,34 @@ preflight_checks() {
 # ═══════════════════════════════════════════════════════════════
 download_ota() {
     local url="$1" output="$2" label="$3"
-    log_info "Downloading $label from: $url"
+    log_info "Downloading $label..."
+    log_info "URL: ${url:0:80}..."
 
     local retries=3
     while [ $retries -gt 0 ]; do
-        if wget -q --show-progress -c -O "$output" "$url"; then
-            if [ -f "$output" ] && [ -s "$output" ]; then
-                local size
-                size=$(du -h "$output" | cut -f1)
-                log_success "Download complete ($size)"
-                return 0
-            fi
+        # Prefer aria2c — multi-connection, compact progress bar (summary mode for CI)
+        if command -v aria2c &>/dev/null; then
+            aria2c -x 8 -s 8 --console-log-level=error \
+                --summary-interval=5 \
+                --download-result=hide \
+                -d "$(dirname "$output")" \
+                -o "$(basename "$output")" \
+                "$url"
+        # Fallback: curl with horizontal progress bar
+        elif command -v curl &>/dev/null; then
+            curl -L --progress-bar -o "$output" "$url"
+        # Last resort: wget forced horizontal bar (no dots)
+        else
+            wget --progress=bar:force:noscroll -O "$output" "$url"
         fi
+
+        if [ -f "$output" ] && [ -s "$output" ]; then
+            local size
+            size=$(du -h "$output" | cut -f1)
+            log_success "$label downloaded ($size)"
+            return 0
+        fi
+
         retries=$((retries - 1))
         [ $retries -gt 0 ] && log_warning "Download failed, retrying in 5s... ($retries left)" && sleep 5
     done
