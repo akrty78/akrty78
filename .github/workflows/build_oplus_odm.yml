@@ -5,15 +5,15 @@ on:
     types: [build_oplus_odm]
 
 jobs:
-  build:
+  build_oplus_odm:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 90
 
     steps:
-      - name: Checkout
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Free Disk Space
+      - name: Maximize Disk Space
         uses: jlumbroso/free-disk-space@main
         with:
           tool-cache: true
@@ -26,48 +26,33 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            python3 \
-            zip \
-            unzip \
-            aria2 \
-            jq \
-            wget \
-            curl \
-            e2fsprogs \
-            erofs-utils \
-            bc \
-            file
+          sudo apt-get install -y python3 zip unzip aria2 jq wget e2fsprogs erofs-utils android-sdk-libsparse-utils
 
       - name: Install payload-dumper-go
         run: |
-          echo "Installing payload-dumper-go..."
-          
-          # Try nicholasgc repo first (maintained fork)
-          LATEST=$(curl -s https://api.github.com/repos/nicholasgc/payload-dumper-go/releases/latest | jq -r '.tag_name' 2>/dev/null || echo "")
-          
+          LATEST=$(curl -s https://api.github.com/repos/nicholasgc/payload-dumper-go/releases/latest | jq -r '.tag_name' || echo "")
           if [ -z "$LATEST" ] || [ "$LATEST" = "null" ]; then
-            # Fallback to ssut original
             LATEST=$(curl -s https://api.github.com/repos/ssut/payload-dumper-go/releases/latest | jq -r '.tag_name')
-            REPO="ssut/payload-dumper-go"
+            wget -q "https://github.com/ssut/payload-dumper-go/releases/download/${LATEST}/payload-dumper-go_${LATEST#v}_linux_amd64.tar.gz" -O pdg.tar.gz
           else
-            REPO="nicholasgc/payload-dumper-go"
+            wget -q "https://github.com/nicholasgc/payload-dumper-go/releases/download/${LATEST}/payload-dumper-go_${LATEST#v}_linux_amd64.tar.gz" -O pdg.tar.gz
           fi
-          
-          echo "Downloading from $REPO version $LATEST"
-          
-          wget -q "https://github.com/$REPO/releases/download/${LATEST}/payload-dumper-go_${LATEST#v}_linux_amd64.tar.gz" -O pdg.tar.gz || {
-            echo "Download failed, trying alternative..."
-            wget -q "https://github.com/ssut/payload-dumper-go/releases/download/${LATEST}/payload-dumper-go_linux_amd64.tar.gz" -O pdg.tar.gz
-          }
-          
           tar xzf pdg.tar.gz
           sudo mv payload-dumper-go /usr/local/bin/
-          sudo chmod +x /usr/local/bin/payload-dumper-go
           rm -f pdg.tar.gz
-          
-          # Verify
-          payload-dumper-go --help || payload-dumper-go -v || echo "payload-dumper-go installed"
+          payload-dumper-go --help || true
+
+
+      - name: Verify Tools
+        run: |
+          echo "=== Tool Status ==="
+          simg2img --version 2>/dev/null || simg2img 2>&1 | head -1 || echo "simg2img: checking..."
+          command -v simg2img && echo "✓ simg2img available" || { echo "✗ simg2img missing"; exit 1; }
+          command -v blkid && echo "✓ blkid available"
+          command -v e2fsck && echo "✓ e2fsck available"
+          command -v mkfs.ext4 && echo "✓ mkfs.ext4 available"
+          command -v extract.erofs || command -v fsck.erofs && echo "✓ erofs tools available" || echo "⚠ no erofs tools (OK if ODM is ext4)"
+          echo "==================="
 
       - name: Run OPLUS-ODM-BUILDER
         env:
@@ -75,20 +60,11 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ github.event.client_payload.chat_id }}
           REQUESTER_CHAT_ID: ${{ github.event.client_payload.chat_id }}
-          OPLUS_URL: ${{ github.event.client_payload.oplus_url }}
-          XIAOMI_URL: ${{ github.event.client_payload.xiaomi_url }}
         run: |
           chmod +x oplus_odm_patcher.sh
-          sudo -E bash oplus_odm_patcher.sh "$OPLUS_URL" "$XIAOMI_URL"
-
-      - name: Upload Artifact (Fallback)
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: patched-odm-${{ github.run_number }}
-          path: /tmp/oplus_odm_builder_*/patched_odm.img
-          retention-days: 7
-          if-no-files-found: ignore
+          sudo -E bash oplus_odm_patcher.sh \
+            "${{ github.event.client_payload.oplus_url }}" \
+            "${{ github.event.client_payload.xiaomi_url }}"
 
       - name: Notify on Failure
         if: failure()
@@ -100,10 +76,5 @@ jobs:
             curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
               -d chat_id="$CHAT_ID" \
               -d parse_mode="Markdown" \
-              -d text="❌ *OPLUS-ODM-BUILDER Failed*%0A%0AThe build encountered an error.%0A%0A[View Logs](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+              -d text="❌ *OPLUS-ODM-BUILDER Failed*%0A%0AThe ODM patching workflow encountered an error.%0ACheck the [Actions Log](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details."
           fi
-
-      - name: Cleanup
-        if: always()
-        run: |
-          sudo rm -rf /tmp/oplus_odm_builder_* || true
