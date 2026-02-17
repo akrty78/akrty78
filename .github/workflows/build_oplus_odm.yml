@@ -15,6 +15,24 @@ jobs:
       TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
 
     steps:
+      - name: Free Disk Space
+        run: |
+          echo "::group::Disk before cleanup"
+          df -h /
+          echo "::endgroup::"
+          # Remove heavy preinstalled software (~30GB freed)
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/powershell /usr/share/swift /usr/local/.ghcup \
+            /usr/lib/jvm /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache/go \
+            /opt/hostedtoolcache/PyPy /opt/hostedtoolcache/Ruby \
+            /usr/local/graalvm /usr/local/share/chromium 2>/dev/null || true
+          sudo docker image prune --all --force 2>/dev/null || true
+          sudo apt-get autoremove -y 2>/dev/null || true
+          sudo apt-get clean 2>/dev/null || true
+          echo "::group::Disk after cleanup"
+          df -h /
+          echo "::endgroup::"
+
       - name: Checkout Repository
         uses: actions/checkout@v4
 
