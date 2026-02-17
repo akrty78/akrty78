@@ -44,31 +44,38 @@ jobs:
 
       - name: Install Android ext4 tools
         run: |
-          # Install make_ext4fs (handles SELinux contexts natively)
-          sudo apt-get install -y android-sdk-libsparse-utils android-sdk-ext4-utils 2>/dev/null || true
+          # Try package install first (fast path)
+          sudo apt-get install -y android-sdk-ext4-utils 2>/dev/null && {
+            which make_ext4fs 2>/dev/null && echo "✓ make_ext4fs from packages"
+          } || true
 
-          # Check if available from packages
-          if command -v make_ext4fs &>/dev/null; then
-            echo "✓ make_ext4fs available from packages"
-          else
-            echo "Building from CyanogenMod source..."
-            sudo apt-get install -y build-essential libsparse-dev zlib1g-dev 2>/dev/null || true
-            git clone --depth=1 https://github.com/nicholasgc/android_system_extras_ext4_utils -b main /tmp/ext4_utils 2>/dev/null || \
-            git clone --depth=1 https://github.com/nicholasgc/ext4_utils -b master /tmp/ext4_utils 2>/dev/null || {
-              echo "⚠️ ext4_utils clone failed — will fall back to mkfs.ext4"
-              exit 0
-            }
-            cd /tmp/ext4_utils
-            make -j$(nproc) 2>/dev/null || gcc -o make_ext4fs make_ext4fs.c *.c -lsparse -lz 2>/dev/null || {
-              echo "⚠️ make_ext4fs build failed — will fall back to mkfs.ext4"
-              exit 0
-            }
-            sudo cp make_ext4fs /usr/local/bin/ 2>/dev/null || true
-            sudo cp e2fsdroid /usr/local/bin/ 2>/dev/null || true
-            cd -
-            rm -rf /tmp/ext4_utils
+          # Build e2fsdroid from official e2fsprogs source
+          if ! command -v e2fsdroid &>/dev/null; then
+            echo "Building e2fsdroid from e2fsprogs source..."
+            sudo apt-get install -y build-essential pkg-config libblkid-dev 2>/dev/null || true
+            cd /tmp
+            E2FS_VER="1.47.1"
+            wget -q "https://github.com/tytso/e2fsprogs/archive/refs/tags/v${E2FS_VER}.tar.gz" -O e2fsprogs.tar.gz
+            tar xzf e2fsprogs.tar.gz
+            cd "e2fsprogs-${E2FS_VER}"
+            mkdir build && cd build
+            ../configure --quiet 2>/dev/null
+            make -j$(nproc) -C contrib/android e2fsdroid 2>/dev/null || \
+            make -j$(nproc) 2>/dev/null
+            
+            # Find and install e2fsdroid
+            E2FSD=$(find /tmp/e2fsprogs-${E2FS_VER} -name "e2fsdroid" -type f -executable 2>/dev/null | head -1)
+            if [ -n "$E2FSD" ]; then
+              sudo cp "$E2FSD" /usr/local/bin/e2fsdroid
+              sudo chmod +x /usr/local/bin/e2fsdroid
+              echo "✓ e2fsdroid built and installed"
+            else
+              echo "⚠️ e2fsdroid build did not produce binary — SELinux contexts will be skipped"
+            fi
+            cd /tmp && rm -rf e2fsprogs* 
           fi
 
+          echo "=== Tool Status ==="
           which make_ext4fs 2>/dev/null && echo "✓ make_ext4fs available" || echo "⚠️ make_ext4fs not available"
           which e2fsdroid 2>/dev/null && echo "✓ e2fsdroid available" || echo "⚠️ e2fsdroid not available"
 
