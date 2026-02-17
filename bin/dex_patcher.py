@@ -800,9 +800,11 @@ def _fw_sig_patch(dex_name: str, dex: bytearray) -> bool:
 # ── Settings.apk  ────────────────────────────────────────────────
 def _settings_ai_patch(dex_name: str, dex: bytearray) -> bool:
     if b'InternalDeviceUtils' not in bytes(dex): return False
+    # trim=True: shrinks insns_size to stub length — no NOP flood in baksmali output
     return binary_patch_method(dex,
         "com/android/settings/InternalDeviceUtils",
-        "isAiSupported", 1, _STUB_TRUE)
+        "isAiSupported", 1, _STUB_TRUE,
+        trim=True)
 
 # ── SoundRecorder APK  ──────────────────────────────────────────
 def _recorder_ai_patch(dex_name: str, dex: bytearray) -> bool:
@@ -810,7 +812,7 @@ def _recorder_ai_patch(dex_name: str, dex: bytearray) -> bool:
     Two-pass:
     1. AiDeviceUtil::isAiSupportedDevice → return true.
        Tries known paths; if class present but path differs, scans all class defs.
-    2. IS_INTERNATIONAL_BUILD (Lmiui/os/Build;) → const/16 1 across entire DEX.
+    2. IS_INTERNATIONAL_BUILD (Lmiui/os/Build;) → const/4 1 across entire DEX.
        Handles region gating that exists alongside the AI method gate.
     Returns True if either pass patched anything.
     """
@@ -858,7 +860,7 @@ def _recorder_ai_patch(dex_name: str, dex: bytearray) -> bool:
 
     # Pass 2 — IS_INTERNATIONAL_BUILD region gate
     if b'IS_INTERNATIONAL_BUILD' in raw:
-        if binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD') > 0:
+        if binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD', use_const4=True) > 0:
             patched = True
 
     return patched
@@ -1214,17 +1216,19 @@ def _settings_region_patch(dex_name: str, dex: bytearray) -> bool:
       MiuiSettings          — ONLY sget-boolean v0 (exact register match)
       GeminiController      — getAvailabilityStatus() → return 1 (full method stub)
     """
-    if b'IS_GLOBAL_BUILD' not in bytes(dex): return False
     n = 0
-    n += binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
-                                    only_class='LocaleController',
-                                    use_const4=True)
-    n += binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
-                                    only_class='LocaleSettingsTree',
-                                    use_const4=True)
-    n += binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
-                                    only_class='OtherPersonalSettings',
-                                    use_const4=True)
+
+    # IS_GLOBAL_BUILD sget patches — only if field present in this DEX file
+    if b'IS_GLOBAL_BUILD' in bytes(dex):
+        n += binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
+                                        only_class='LocaleController',
+                                        use_const4=True)
+        n += binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
+                                        only_class='LocaleSettingsTree',
+                                        use_const4=True)
+        n += binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
+                                        only_class='OtherPersonalSettings',
+                                        use_const4=True)
 
     # MiuiSettings — exact v0 register only (do NOT touch v1, v10, etc.)
     if b'MiuiSettings' in bytes(dex):
@@ -1247,7 +1251,8 @@ def _settings_region_patch(dex_name: str, dex: bytearray) -> bool:
                     if type_str.endswith('/GeminiController;') and type_str.startswith('L'):
                         cls_path = type_str[1:-1]
                         if binary_patch_method(dex, cls_path,
-                                'getAvailabilityStatus', 1, _STUB_TRUE):
+                                'getAvailabilityStatus', 1, _STUB_TRUE,
+                                trim=True):
                             ok(f"  ✓ GeminiController::getAvailabilityStatus → return 1")
                             n += 1
                             break
