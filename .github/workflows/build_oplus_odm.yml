@@ -42,17 +42,19 @@ jobs:
           rm -f pdg.tar.gz
           payload-dumper-go --help || true
 
-
-      - name: Verify Tools
+      - name: Verify simg2img
         run: |
-          echo "=== Tool Status ==="
-          simg2img --version 2>/dev/null || simg2img 2>&1 | head -1 || echo "simg2img: checking..."
-          command -v simg2img && echo "✓ simg2img available" || { echo "✗ simg2img missing"; exit 1; }
-          command -v blkid && echo "✓ blkid available"
-          command -v e2fsck && echo "✓ e2fsck available"
+          echo "=== Verifying required tools ==="
+          command -v simg2img && echo "✓ simg2img: $(simg2img 2>&1 | head -1 || which simg2img)" || {
+            echo "✗ simg2img missing — trying fallback install"
+            sudo apt-get install -y android-sdk-libsparse-utils || true
+            command -v simg2img || { echo "FATAL: simg2img still not found"; exit 1; }
+          }
+          command -v blkid   && echo "✓ blkid available"
+          command -v e2fsck  && echo "✓ e2fsck available"
           command -v mkfs.ext4 && echo "✓ mkfs.ext4 available"
-          command -v extract.erofs || command -v fsck.erofs && echo "✓ erofs tools available" || echo "⚠ no erofs tools (OK if ODM is ext4)"
-          echo "==================="
+          command -v payload-dumper-go && echo "✓ payload-dumper-go available"
+          echo "=============================="
 
       - name: Run OPLUS-ODM-BUILDER
         env:
