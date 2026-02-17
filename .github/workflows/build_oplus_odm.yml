@@ -1,0 +1,66 @@
+name: OPLUS-ODM-BUILDER
+
+on:
+  repository_dispatch:
+    types: [build_oplus_odm]
+
+jobs:
+  build_oplus_odm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Maximize Disk Space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: true
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3 zip unzip aria2 jq wget e2fsprogs erofs-utils android-sdk-libsparse-utils
+
+      - name: Install payload-dumper-go
+        run: |
+          LATEST=$(curl -s https://api.github.com/repos/ssut/payload-dumper-go/releases/latest | jq -r '.tag_name')
+          wget -q "https://github.com/ssut/payload-dumper-go/releases/download/${LATEST}/payload-dumper-go_${LATEST#v}_linux_amd64.tar.gz" -O pdg.tar.gz
+          tar xzf pdg.tar.gz
+          sudo mv payload-dumper-go /usr/local/bin/
+          rm -f pdg.tar.gz
+          payload-dumper-go --help || true
+
+      - name: Run OPLUS-ODM-BUILDER
+        env:
+          PIXELDRAIN_KEY: ${{ secrets.PIXELDRAIN_KEY }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ github.event.client_payload.chat_id }}
+          REQUESTER_CHAT_ID: ${{ github.event.client_payload.chat_id }}
+        run: |
+          chmod +x oplus_odm_patcher.sh
+          sudo -E bash oplus_odm_patcher.sh \
+            "${{ github.event.client_payload.oplus_url }}" \
+            "${{ github.event.client_payload.xiaomi_url }}"
+
+      - name: Notify on Failure
+        if: failure()
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ github.event.client_payload.chat_id }}
+        run: |
+          if [ -n "$TELEGRAM_TOKEN" ] && [ -n "$CHAT_ID" ]; then
+            curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
+              -d chat_id="$CHAT_ID" \
+              -d parse_mode="Markdown" \
+              -d text="❌ *OPLUS-ODM-BUILDER Failed*
+
+          The ODM patching workflow encountered an error.
+          Check the [Actions Log](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details."
+          fi
