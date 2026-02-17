@@ -5,15 +5,15 @@ on:
     types: [build_oplus_odm]
 
 jobs:
-  build_oplus_odm:
+  build:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Maximize Disk Space
+      - name: Free Disk Space
         uses: jlumbroso/free-disk-space@main
         with:
           tool-cache: true
@@ -26,58 +26,48 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3 zip unzip aria2 jq wget e2fsprogs erofs-utils
+          sudo apt-get install -y \
+            python3 \
+            zip \
+            unzip \
+            aria2 \
+            jq \
+            wget \
+            curl \
+            e2fsprogs \
+            erofs-utils \
+            bc \
+            file
 
       - name: Install payload-dumper-go
         run: |
-          LATEST=$(curl -s https://api.github.com/repos/nicholasgc/payload-dumper-go/releases/latest | jq -r '.tag_name' || echo "")
+          echo "Installing payload-dumper-go..."
+          
+          # Try nicholasgc repo first (maintained fork)
+          LATEST=$(curl -s https://api.github.com/repos/nicholasgc/payload-dumper-go/releases/latest | jq -r '.tag_name' 2>/dev/null || echo "")
+          
           if [ -z "$LATEST" ] || [ "$LATEST" = "null" ]; then
+            # Fallback to ssut original
             LATEST=$(curl -s https://api.github.com/repos/ssut/payload-dumper-go/releases/latest | jq -r '.tag_name')
-            wget -q "https://github.com/ssut/payload-dumper-go/releases/download/${LATEST}/payload-dumper-go_${LATEST#v}_linux_amd64.tar.gz" -O pdg.tar.gz
+            REPO="ssut/payload-dumper-go"
           else
-            wget -q "https://github.com/nicholasgc/payload-dumper-go/releases/download/${LATEST}/payload-dumper-go_${LATEST#v}_linux_amd64.tar.gz" -O pdg.tar.gz
+            REPO="nicholasgc/payload-dumper-go"
           fi
+          
+          echo "Downloading from $REPO version $LATEST"
+          
+          wget -q "https://github.com/$REPO/releases/download/${LATEST}/payload-dumper-go_${LATEST#v}_linux_amd64.tar.gz" -O pdg.tar.gz || {
+            echo "Download failed, trying alternative..."
+            wget -q "https://github.com/ssut/payload-dumper-go/releases/download/${LATEST}/payload-dumper-go_linux_amd64.tar.gz" -O pdg.tar.gz
+          }
+          
           tar xzf pdg.tar.gz
           sudo mv payload-dumper-go /usr/local/bin/
+          sudo chmod +x /usr/local/bin/payload-dumper-go
           rm -f pdg.tar.gz
-          payload-dumper-go --help || true
-
-      - name: Install Android ext4 tools
-        run: |
-          # Try package install first (fast path)
-          sudo apt-get install -y android-sdk-ext4-utils 2>/dev/null && {
-            which make_ext4fs 2>/dev/null && echo "✓ make_ext4fs from packages"
-          } || true
-
-          # Build e2fsdroid from official e2fsprogs source
-          if ! command -v e2fsdroid &>/dev/null; then
-            echo "Building e2fsdroid from e2fsprogs source..."
-            sudo apt-get install -y build-essential pkg-config libblkid-dev 2>/dev/null || true
-            cd /tmp
-            E2FS_VER="1.47.1"
-            wget -q "https://github.com/tytso/e2fsprogs/archive/refs/tags/v${E2FS_VER}.tar.gz" -O e2fsprogs.tar.gz
-            tar xzf e2fsprogs.tar.gz
-            cd "e2fsprogs-${E2FS_VER}"
-            mkdir build && cd build
-            ../configure --quiet 2>/dev/null
-            make -j$(nproc) -C contrib/android e2fsdroid 2>/dev/null || \
-            make -j$(nproc) 2>/dev/null
-            
-            # Find and install e2fsdroid
-            E2FSD=$(find /tmp/e2fsprogs-${E2FS_VER} -name "e2fsdroid" -type f -executable 2>/dev/null | head -1)
-            if [ -n "$E2FSD" ]; then
-              sudo cp "$E2FSD" /usr/local/bin/e2fsdroid
-              sudo chmod +x /usr/local/bin/e2fsdroid
-              echo "✓ e2fsdroid built and installed"
-            else
-              echo "⚠️ e2fsdroid build did not produce binary — SELinux contexts will be skipped"
-            fi
-            cd /tmp && rm -rf e2fsprogs* 
-          fi
-
-          echo "=== Tool Status ==="
-          which make_ext4fs 2>/dev/null && echo "✓ make_ext4fs available" || echo "⚠️ make_ext4fs not available"
-          which e2fsdroid 2>/dev/null && echo "✓ e2fsdroid available" || echo "⚠️ e2fsdroid not available"
+          
+          # Verify
+          payload-dumper-go --help || payload-dumper-go -v || echo "payload-dumper-go installed"
 
       - name: Run OPLUS-ODM-BUILDER
         env:
@@ -85,11 +75,20 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ github.event.client_payload.chat_id }}
           REQUESTER_CHAT_ID: ${{ github.event.client_payload.chat_id }}
+          OPLUS_URL: ${{ github.event.client_payload.oplus_url }}
+          XIAOMI_URL: ${{ github.event.client_payload.xiaomi_url }}
         run: |
           chmod +x oplus_odm_patcher.sh
-          sudo -E bash oplus_odm_patcher.sh \
-            "${{ github.event.client_payload.oplus_url }}" \
-            "${{ github.event.client_payload.xiaomi_url }}"
+          sudo -E bash oplus_odm_patcher.sh "$OPLUS_URL" "$XIAOMI_URL"
+
+      - name: Upload Artifact (Fallback)
+        if: success()
+        uses: actions/upload-artifact@v3
+        with:
+          name: patched-odm-${{ github.run_number }}
+          path: /tmp/oplus_odm_builder_*/patched_odm.img
+          retention-days: 7
+          if-no-files-found: ignore
 
       - name: Notify on Failure
         if: failure()
@@ -103,6 +102,12 @@ jobs:
               -d parse_mode="Markdown" \
               -d text="❌ *OPLUS-ODM-BUILDER Failed*
 
-          The ODM patching workflow encountered an error.
-          Check the [Actions Log](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details."
+The build encountered an error.
+
+[View Logs](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})"
           fi
+
+      - name: Cleanup
+        if: always()
+        run: |
+          sudo rm -rf /tmp/oplus_odm_builder_* || true
