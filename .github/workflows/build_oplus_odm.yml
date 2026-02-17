@@ -83,7 +83,7 @@ jobs:
 
       - name: Upload Artifact (Fallback)
         if: success()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: patched-odm-${{ github.run_number }}
           path: /tmp/oplus_odm_builder_*/patched_odm.img
