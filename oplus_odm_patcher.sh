@@ -112,10 +112,14 @@ preflight_checks() {
         fi
     fi
 
-    # e2fsdroid — optional but recommended for SELinux context application
-    if ! command -v e2fsdroid &>/dev/null; then
-        log_warning "e2fsdroid not found — SELinux contexts will NOT be applied to image metadata"
-        log_warning "For full SELinux support, install e2fsdroid from Android platform tools"
+    # make_ext4fs / e2fsdroid — optional but recommended for SELinux context application
+    if command -v make_ext4fs &>/dev/null; then
+        log_success "make_ext4fs available (SELinux contexts will be applied natively)"
+    elif command -v e2fsdroid &>/dev/null; then
+        log_success "e2fsdroid available (SELinux contexts will be applied post-creation)"
+    else
+        log_warning "Neither make_ext4fs nor e2fsdroid found — SELinux contexts will NOT be applied"
+        log_warning "Image will still work but file labels may be missing"
     fi
 
     [ "$missing" -eq 1 ] && { log_error "Missing tools. Aborting."; exit 1; }
@@ -744,38 +748,58 @@ repack_odm_image() {
     local img_bytes=$(( (used_bytes * 115) / 100 ))
     # Minimum 256MB
     [ "$img_bytes" -lt 268435456 ] && img_bytes=268435456
+    local img_mb=$(( img_bytes / 1048576 ))
 
-    log_info "Creating ext4 image ($(( img_bytes / 1048576 )) MB)..."
+    log_info "Image size: ${img_mb}MB (content: $((used_bytes / 1048576))MB + overhead)"
 
-    # Create the image
-    dd if=/dev/zero of="$output_img" bs=1 count=0 seek="$img_bytes" 2>/dev/null
-    mkfs.ext4 -L odm -b 4096 -q "$output_img"
-
-    # Mount and copy
-    local temp_mount="$WORK_DIR/mount_repack"
-    mkdir -p "$temp_mount"
-    mount -o loop "$output_img" "$temp_mount"
-
-    log_info "Copying patched files into new image..."
-    cp -a "$source_dir"/* "$temp_mount/" 2>/dev/null || cp -a "$source_dir"/. "$temp_mount/"
-
-    umount "$temp_mount"
-    rm -rf "$temp_mount"
-
-    # ── Apply SELinux contexts via e2fsdroid ──
-    # Contexts are applied to the ext4 image metadata, NOT stored inside the filesystem
-    if [ -f "$contexts_file" ] && command -v e2fsdroid &>/dev/null; then
-        log_info "Applying SELinux contexts to image via e2fsdroid..."
-        e2fsdroid -e -S "$contexts_file" -a /odm "$output_img" 2>/dev/null
-        if [ $? -eq 0 ]; then
-            log_success "SELinux contexts applied to image metadata"
+    # ── Strategy 1: make_ext4fs (best — handles SELinux natively) ──
+    if command -v make_ext4fs &>/dev/null; then
+        log_info "Using make_ext4fs to create image with SELinux contexts..."
+        if [ -f "$contexts_file" ] && [ -s "$contexts_file" ]; then
+            make_ext4fs -l "${img_bytes}" -L odm -a odm -S "$contexts_file" "$output_img" "$source_dir"
         else
-            log_warning "e2fsdroid context application returned non-zero (may be partial)"
+            make_ext4fs -l "${img_bytes}" -L odm -a odm "$output_img" "$source_dir"
         fi
-    elif [ -f "$contexts_file" ]; then
-        # Fallback: use set_selinux_context with tune2fs if e2fsdroid unavailable
-        log_warning "e2fsdroid not found — SELinux contexts NOT applied to image"
-        log_warning "Install e2fsdroid (from Android build tools) for full context support"
+
+        if [ $? -eq 0 ] && [ -f "$output_img" ]; then
+            log_success "Image created with make_ext4fs (SELinux contexts applied)"
+        else
+            log_warning "make_ext4fs failed, falling back to mkfs.ext4..."
+            # Fall through to mkfs.ext4 method below
+            rm -f "$output_img"
+        fi
+    fi
+
+    # ── Strategy 2: mkfs.ext4 + e2fsdroid (fallback) ──
+    if [ ! -f "$output_img" ]; then
+        log_info "Using mkfs.ext4 to create image..."
+
+        dd if=/dev/zero of="$output_img" bs=1 count=0 seek="$img_bytes" 2>/dev/null
+        mkfs.ext4 -L odm -b 4096 -q "$output_img"
+
+        # Mount and copy
+        local temp_mount="$WORK_DIR/mount_repack"
+        mkdir -p "$temp_mount"
+        mount -o loop "$output_img" "$temp_mount"
+
+        log_info "Copying patched files into new image..."
+        cp -a "$source_dir"/* "$temp_mount/" 2>/dev/null || cp -a "$source_dir"/. "$temp_mount/"
+
+        umount "$temp_mount"
+        rm -rf "$temp_mount"
+
+        # Apply SELinux contexts via e2fsdroid if available
+        if [ -f "$contexts_file" ] && [ -s "$contexts_file" ] && command -v e2fsdroid &>/dev/null; then
+            log_info "Applying SELinux contexts via e2fsdroid..."
+            e2fsdroid -e -S "$contexts_file" -a /odm "$output_img" 2>/dev/null
+            if [ $? -eq 0 ]; then
+                log_success "SELinux contexts applied to image metadata"
+            else
+                log_warning "e2fsdroid returned non-zero (contexts may be partial)"
+            fi
+        elif [ -f "$contexts_file" ] && [ -s "$contexts_file" ]; then
+            log_warning "Neither make_ext4fs nor e2fsdroid available — SELinux contexts NOT applied"
+        fi
     fi
 
     # Optimize
