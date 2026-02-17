@@ -23,10 +23,20 @@ jobs:
           large-packages: true
           swap-storage: true
 
+      - name: Prepare /mnt workspace
+        run: |
+          sudo mkdir -p /mnt/oplus_work
+          sudo chmod 777 /mnt/oplus_work
+          echo "=== Disk space ==="
+          df -h /mnt / | column -t
+          FREE=$(df --output=avail -B1 /mnt | tail -1 | tr -d ' ')
+          echo "/mnt free: $((FREE/1024/1024/1024))GB"
+          [ "$FREE" -lt "$((20*1024*1024*1024))" ] && echo "WARNING: Less than 20GB free on /mnt" || echo "✓ Sufficient space"
+
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3 zip unzip aria2 jq wget e2fsprogs erofs-utils android-sdk-libsparse-utils
+          sudo apt-get install -y python3 zip unzip aria2 jq wget curl e2fsprogs erofs-utils android-sdk-libsparse-utils
 
       - name: Install payload-dumper-go
         run: |
@@ -44,17 +54,8 @@ jobs:
 
       - name: Verify simg2img
         run: |
-          echo "=== Verifying required tools ==="
-          command -v simg2img && echo "✓ simg2img: $(simg2img 2>&1 | head -1 || which simg2img)" || {
-            echo "✗ simg2img missing — trying fallback install"
-            sudo apt-get install -y android-sdk-libsparse-utils || true
-            command -v simg2img || { echo "FATAL: simg2img still not found"; exit 1; }
-          }
-          command -v blkid   && echo "✓ blkid available"
-          command -v e2fsck  && echo "✓ e2fsck available"
-          command -v mkfs.ext4 && echo "✓ mkfs.ext4 available"
+          command -v simg2img && echo "✓ simg2img available" || { echo "FATAL: simg2img missing"; exit 1; }
           command -v payload-dumper-go && echo "✓ payload-dumper-go available"
-          echo "=============================="
 
       - name: Run OPLUS-ODM-BUILDER
         env:
@@ -64,7 +65,7 @@ jobs:
           REQUESTER_CHAT_ID: ${{ github.event.client_payload.chat_id }}
         run: |
           chmod +x oplus_odm_patcher.sh
-          sudo -E bash oplus_odm_patcher.sh \
+          sudo -E ODM_WORK_DIR=/mnt/oplus_work bash oplus_odm_patcher.sh \
             "${{ github.event.client_payload.oplus_url }}" \
             "${{ github.event.client_payload.xiaomi_url }}"
 
@@ -78,5 +79,10 @@ jobs:
             curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
               -d chat_id="$CHAT_ID" \
               -d parse_mode="Markdown" \
-              -d text="❌ *OPLUS-ODM-BUILDER Failed*%0A%0AThe ODM patching workflow encountered an error.%0ACheck the [Actions Log](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details."
+              -d text="❌ *OPLUS-ODM-BUILDER Failed*%0A%0AThe build encountered an error.%0ACheck the [Actions Log](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details."
           fi
+
+      - name: Cleanup
+        if: always()
+        run: |
+          sudo rm -rf /mnt/oplus_work /mnt/oplus_odm_builder_* /tmp/oplus_odm_builder_* || true
