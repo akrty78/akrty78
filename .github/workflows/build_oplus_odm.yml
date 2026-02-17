@@ -42,24 +42,35 @@ jobs:
           rm -f pdg.tar.gz
           payload-dumper-go --help || true
 
-      - name: Install e2fsdroid
+      - name: Install Android ext4 tools
         run: |
-          # Try to get e2fsdroid from ext4_utils or build from e2fsprogs source
-          # First check if it exists in e2fsprogs already
-          if command -v e2fsdroid &>/dev/null; then
-            echo "e2fsdroid already available"
+          # Install make_ext4fs (handles SELinux contexts natively)
+          sudo apt-get install -y android-sdk-libsparse-utils android-sdk-ext4-utils 2>/dev/null || true
+
+          # Check if available from packages
+          if command -v make_ext4fs &>/dev/null; then
+            echo "✓ make_ext4fs available from packages"
           else
-            echo "Building e2fsdroid from Android source..."
-            sudo apt-get install -y git golang libsparse-dev libbase-dev 2>/dev/null || true
-            # Download prebuilt from a known source
-            wget -q "https://github.com/nicholasgc/e2fsdroid-prebuilt/releases/latest/download/e2fsdroid-linux-amd64" -O e2fsdroid 2>/dev/null || {
-              echo "⚠️ e2fsdroid download failed — SELinux contexts will be skipped"
+            echo "Building from CyanogenMod source..."
+            sudo apt-get install -y build-essential libsparse-dev zlib1g-dev 2>/dev/null || true
+            git clone --depth=1 https://github.com/nicholasgc/android_system_extras_ext4_utils -b main /tmp/ext4_utils 2>/dev/null || \
+            git clone --depth=1 https://github.com/nicholasgc/ext4_utils -b master /tmp/ext4_utils 2>/dev/null || {
+              echo "⚠️ ext4_utils clone failed — will fall back to mkfs.ext4"
               exit 0
             }
-            chmod +x e2fsdroid
-            sudo mv e2fsdroid /usr/local/bin/
-            echo "e2fsdroid installed successfully"
+            cd /tmp/ext4_utils
+            make -j$(nproc) 2>/dev/null || gcc -o make_ext4fs make_ext4fs.c *.c -lsparse -lz 2>/dev/null || {
+              echo "⚠️ make_ext4fs build failed — will fall back to mkfs.ext4"
+              exit 0
+            }
+            sudo cp make_ext4fs /usr/local/bin/ 2>/dev/null || true
+            sudo cp e2fsdroid /usr/local/bin/ 2>/dev/null || true
+            cd -
+            rm -rf /tmp/ext4_utils
           fi
+
+          which make_ext4fs 2>/dev/null && echo "✓ make_ext4fs available" || echo "⚠️ make_ext4fs not available"
+          which e2fsdroid 2>/dev/null && echo "✓ e2fsdroid available" || echo "⚠️ e2fsdroid not available"
 
       - name: Run OPLUS-ODM-BUILDER
         env:
