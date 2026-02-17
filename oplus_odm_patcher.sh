@@ -19,11 +19,11 @@ MAGENTA='\033[0;35m'
 NC='\033[0m'
 
 # ── Logging ──
-log_info()    { echo -e "${BLUE}[INFO]${NC} $*"; }
-log_success() { echo -e "${GREEN}[OK]${NC} $*"; }
-log_warning() { echo -e "${YELLOW}[WARN]${NC} $*"; }
-log_error()   { echo -e "${RED}[ERROR]${NC} $*"; }
-log_step()    { echo -e "${MAGENTA}$*${NC}"; }
+log_info()    { echo -e "${BLUE}[INFO]${NC} $*" >&2; }
+log_success() { echo -e "${GREEN}[OK]${NC} $*" >&2; }
+log_warning() { echo -e "${YELLOW}[WARN]${NC} $*" >&2; }
+log_error()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
+log_step()    { echo -e "${MAGENTA}$*${NC}" >&2; }
 
 # ── Telegram Progress ──
 TG_MSG_ID=""
@@ -55,9 +55,9 @@ _Last Update: ${timestamp}_"
 
 show_progress() {
     local step="$1" total="$2" message="$3"
-    echo ""
+    echo "" >&2
     log_step "[$step/$total] $message"
-    echo "$(printf '=%.0s' $(seq 1 50))"
+    echo "$(printf '=%.0s' $(seq 1 50))" >&2
 }
 
 # ── Inputs ──
@@ -69,7 +69,8 @@ if [ -z "$OPLUS_OTA_URL" ] || [ -z "$XIAOMI_OTA_URL" ]; then
     exit 1
 fi
 
-WORK_DIR="/tmp/oplus_odm_builder_$$"
+# Use /mnt — GitHub Actions has ~65GB there vs ~30GB on /tmp
+WORK_DIR="${ODM_WORK_DIR:-/mnt/oplus_odm_builder_$$}"
 LOG_FILE="$WORK_DIR/oplus_odm_builder.log"
 TOTAL_STEPS=13
 mkdir -p "$WORK_DIR"
@@ -126,7 +127,7 @@ preflight_checks() {
 
     # Disk space check (need ~10GB)
     local free_kb
-    free_kb=$(df /tmp 2>/dev/null | tail -1 | awk '{print $4}')
+    free_kb=$(df "${ODM_WORK_DIR:-/mnt}" 2>/dev/null | tail -1 | awk '{print $4}')
     if [ -n "$free_kb" ] && [ "$free_kb" -lt 10485760 ] 2>/dev/null; then
         log_error "Insufficient disk space. Need ≥10GB free in /tmp (have: $((free_kb/1024))MB)"
         exit 1
@@ -216,29 +217,46 @@ mount_odm() {
     local odm_img="$1" mount_point="$2" label="$3"
     mkdir -p "$mount_point"
 
-    # ── Step 1: Always try simg2img first ────────────────────────────────
-    # payload-dumper-go often outputs Android sparse images which blkid
-    # cannot detect and loop mount cannot handle. simg2img exits non-zero
-    # quickly on non-sparse input so it is safe to call unconditionally.
+    # ── Step 1: Sparse image conversion ──────────────────────────────────
+    # payload-dumper-go outputs Android sparse images. blkid returns "unknown"
+    # on them and mount -o loop fails. Always attempt simg2img first.
     if command -v simg2img &>/dev/null; then
-        local raw_img="${odm_img%.img}_raw.img"
-        if simg2img "$odm_img" "$raw_img" 2>/dev/null; then
-            log_info "$label ODM was sparse — converted to raw"
-            mv "$raw_img" "$odm_img"
+        local magic
+        magic=$(od -A n -t x4 -N 4 "$odm_img" 2>/dev/null | tr -d ' 
+')
+        if [ "$magic" = "3aff26ed" ]; then
+            log_info "$label ODM is Android sparse — converting to raw..."
+            local sparse_size free_bytes
+            sparse_size=$(stat -c%s "$odm_img")
+            free_bytes=$(df --output=avail -B1 "${ODM_WORK_DIR:-/mnt}" 2>/dev/null | tail -1 | tr -d ' ')
+            local needed=$(( sparse_size * 3 ))
+            if [ -n "$free_bytes" ] && [ "$free_bytes" -lt "$needed" ]; then
+                log_error "Not enough space to unsparse $label: need ~$((needed/1024/1024/1024))GB, have $((free_bytes/1024/1024/1024))GB on /mnt"
+                exit 1
+            fi
+            local raw_img="${odm_img%.img}_raw.img"
+            if simg2img "$odm_img" "$raw_img"; then
+                mv "$raw_img" "$odm_img"
+                log_success "$label sparse → raw conversion complete"
+            else
+                rm -f "$raw_img"
+                log_error "simg2img failed for $label"
+                exit 1
+            fi
         else
-            rm -f "$raw_img"
-            log_info "$label ODM is not sparse"
+            log_info "$label ODM is not sparse (magic: $magic)"
         fi
     else
-        log_warning "simg2img not found — skipping sparse conversion (may fail if image is sparse)"
+        log_error "simg2img not found — install android-sdk-libsparse-utils"
+        exit 1
     fi
 
-    # ── Step 2: Detect filesystem type on raw image ───────────────────────
+    # ── Step 2: Detect filesystem type ───────────────────────────────────
     local fs_type
     fs_type=$(blkid -s TYPE -o value "$odm_img" 2>/dev/null || echo "unknown")
     log_info "$label filesystem type: $fs_type"
 
-    # ── Step 3: Handle EROFS ──────────────────────────────────────────────
+    # ── Step 3: EROFS ─────────────────────────────────────────────────────
     if [ "$fs_type" = "erofs" ]; then
         log_info "$label ODM is EROFS — extracting to directory..."
         if command -v extract.erofs &>/dev/null; then
@@ -251,16 +269,16 @@ mount_odm() {
         fi
         log_success "$label ODM extracted (EROFS → directory)"
 
-    # ── Step 4: Mount ext4 ────────────────────────────────────────────────
+    # ── Step 4: EXT4 mount ────────────────────────────────────────────────
     else
         log_info "Mounting $label ODM (ext4) read-write..."
         if ! mount -o loop,rw "$odm_img" "$mount_point" 2>/dev/null; then
             log_warning "RW mount failed — attempting filesystem repair..."
             e2fsck -fy "$odm_img" >/dev/null 2>&1 || true
             if ! mount -o loop,rw "$odm_img" "$mount_point" 2>/dev/null; then
-                log_error "Failed to mount $label odm.img — image may be corrupt or unsupported format"
-                log_info "Image file info: $(file "$odm_img")"
-                log_info "Image blkid: $(blkid "$odm_img" 2>&1 || true)"
+                log_error "Failed to mount $label odm.img after repair"
+                log_info "Image info: $(file "$odm_img")" >&2
+                log_info "blkid: $(blkid "$odm_img" 2>&1 || true)" >&2
                 exit 1
             fi
         fi
