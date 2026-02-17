@@ -91,7 +91,7 @@ preflight_checks() {
     show_progress 1 $TOTAL_STEPS "Pre-flight checks"
     tg_progress "🔍 **[1/$TOTAL_STEPS] Running pre-flight checks...**"
 
-    local required_tools=("wget" "unzip" "jq" "curl" "mkfs.ext4" "e2fsck" "resize2fs" "e2fsdroid")
+    local required_tools=("wget" "unzip" "jq" "curl" "mkfs.ext4" "e2fsck" "resize2fs")
     local missing=0
 
     for tool in "${required_tools[@]}"; do
@@ -110,6 +110,12 @@ preflight_checks() {
             log_error "payload-dumper-go not found. Install it first."
             missing=1
         fi
+    fi
+
+    # e2fsdroid — optional but recommended for SELinux context application
+    if ! command -v e2fsdroid &>/dev/null; then
+        log_warning "e2fsdroid not found — SELinux contexts will NOT be applied to image metadata"
+        log_warning "For full SELinux support, install e2fsdroid from Android platform tools"
     fi
 
     [ "$missing" -eq 1 ] && { log_error "Missing tools. Aborting."; exit 1; }
