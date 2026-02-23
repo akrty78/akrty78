@@ -984,7 +984,7 @@ if fs_config_file:
         for d in sorted(dirs):
             full_path = os.path.join(root, d)
             # fs_config uses paths like: odm/bin/hw (NO leading slash)
-            rel = full_path.replace(os.path.dirname(odm_dir), '').replace('\\\\', '/').lstrip('/')
+            rel = full_path.replace(os.path.dirname(odm_dir), '').replace('\\', '/').lstrip('/')
             
             if rel not in fs_entries:
                 # Directories: 0 gid 0755
@@ -994,7 +994,7 @@ if fs_config_file:
         
         for f in sorted(files):
             full_path = os.path.join(root, f)
-            rel = full_path.replace(os.path.dirname(odm_dir), '').replace('\\\\', '/').lstrip('/')
+            rel = full_path.replace(os.path.dirname(odm_dir), '').replace('\\', '/').lstrip('/')
             
             if rel not in fs_entries:
                 # Files: determine mode based on path
@@ -1104,8 +1104,7 @@ if [ -n "$MKFS_CMD" ]; then
         log_info "Using fs_config: $XIAOMI_FS_CONFIG ($(wc -l < "$XIAOMI_FS_CONFIG") entries)"
     fi
 
-    # product-out (for MIO-KITCHEN compat)
-    EROFS_ARGS="$EROFS_ARGS --product-out=$XIAOMI_PROJECT"
+
 
     log_info "EROFS args: $EROFS_ARGS"
 
@@ -1130,6 +1129,15 @@ fi
 if [ ! -f "$PATCHED_ODM" ] || [ ! -s "$PATCHED_ODM" ]; then
     log_error "Failed to repack ODM image"
     tg_send "❌ *ODM Patch Failed*\nCould not repack ODM image."
+    exit 1
+fi
+
+# Sanity check: image must be at least 1MB (4KB = mkfs abort stub)
+PATCHED_SIZE=$(stat -c%s "$PATCHED_ODM" 2>/dev/null || echo 0)
+if [ "$PATCHED_SIZE" -lt 1048576 ]; then
+    log_error "ODM image is only $(numfmt --to=iec $PATCHED_SIZE) — mkfs.erofs likely aborted!"
+    log_error "This usually means --fs-config-file is missing entries for injected files."
+    tg_send "❌ *ODM Patch Failed*\nRepack produced a ${PATCHED_SIZE}B stub image (expected >1MB)."
     exit 1
 fi
 
