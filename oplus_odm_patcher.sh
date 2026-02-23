@@ -481,9 +481,47 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# Delete raw .img files and download dirs — free disk space
+# Delete raw ODM .img files
 rm -f "$OPLUS_ODM" "$XIAOMI_ODM"
+
+# Move non-ODM images to staging BEFORE deleting DL dirs
+STAGING_DIR="$WORK_DIR/staging"
+mkdir -p "$STAGING_DIR"
+
+# Preserve OPLUS system images + my_* images
+for _img_name in system.img system_ext.img product.img \
+    my_product.img my_engineering.img my_stock.img my_heytap.img \
+    my_carrier.img my_region.img my_bigball.img my_manifest.img; do
+    _src=$(find "$OPLUS_DL" -name "$_img_name" -print -quit 2>/dev/null)
+    if [ -n "$_src" ] && [ -f "$_src" ]; then
+        mv "$_src" "$STAGING_DIR/" 2>/dev/null
+    fi
+done
+
+# Preserve Xiaomi vendor.img
+_vendor_src=$(find "$XIAOMI_DL" -name "vendor.img" -print -quit 2>/dev/null)
+if [ -n "$_vendor_src" ] && [ -f "$_vendor_src" ]; then
+    mv "$_vendor_src" "$STAGING_DIR/" 2>/dev/null
+fi
+
+# Now safe to delete DL dirs
 rm -rf "$OPLUS_DL" "$XIAOMI_DL"
+
+# Update variables to point to staging locations
+[ -f "$STAGING_DIR/system.img" ] && OPLUS_SYSTEM_IMG="$STAGING_DIR/system.img"
+[ -f "$STAGING_DIR/system_ext.img" ] && OPLUS_SYSTEM_EXT_IMG="$STAGING_DIR/system_ext.img"
+[ -f "$STAGING_DIR/product.img" ] && OPLUS_PRODUCT_IMG="$STAGING_DIR/product.img"
+[ -f "$STAGING_DIR/vendor.img" ] && XIAOMI_VENDOR_IMG="$STAGING_DIR/vendor.img"
+[ -f "$STAGING_DIR/my_manifest.img" ] && OPLUS_MY_MANIFEST_IMG="$STAGING_DIR/my_manifest.img"
+[ -f "$STAGING_DIR/my_stock.img" ] && OPLUS_MY_STOCK_IMG="$STAGING_DIR/my_stock.img"
+[ -f "$STAGING_DIR/my_heytap.img" ] && OPLUS_MY_HEYTAP_IMG="$STAGING_DIR/my_heytap.img"
+[ -f "$STAGING_DIR/my_carrier.img" ] && OPLUS_MY_CARRIER_IMG="$STAGING_DIR/my_carrier.img"
+[ -f "$STAGING_DIR/my_region.img" ] && OPLUS_MY_REGION_IMG="$STAGING_DIR/my_region.img"
+[ -f "$STAGING_DIR/my_bigball.img" ] && OPLUS_MY_BIGBALL_IMG="$STAGING_DIR/my_bigball.img"
+[ -f "$STAGING_DIR/my_engineering.img" ] && OPLUS_MY_ENGINEERING_IMG="$STAGING_DIR/my_engineering.img"
+[ -f "$STAGING_DIR/my_product.img" ] && OPLUS_MY_PRODUCT_IMG="$STAGING_DIR/my_product.img"
+
+log_info "Staged $(ls "$STAGING_DIR"/*.img 2>/dev/null | wc -l) images for system merge + vendor patch"
 log_disk
 
 OPLUS_ODM_DIR="$OPLUS_PROJECT/odm"
@@ -1862,7 +1900,7 @@ fi
 log_step "🧹 Cleaning up..."
 
 rm -rf "$OPLUS_PROJECT" "$XIAOMI_PROJECT" "$SYSTEM_PROJECT" "$OPLUS_DL" "$XIAOMI_DL" \
-       "$WORK_DIR/vendor_project" 2>/dev/null
+       "$WORK_DIR/vendor_project" "$STAGING_DIR" 2>/dev/null
 
 SCRIPT_END=$(date +%s)
 ELAPSED=$((SCRIPT_END - SCRIPT_START))
@@ -1917,3 +1955,5 @@ log_info "Injected: $INJECT_COUNT files | Time: ${ELAPSED_MIN}m ${ELAPSED_SEC}s"
 [ "$ODM_UPLOAD_LINK" != "UPLOAD_FAILED" ] && log_info "ODM: $ODM_UPLOAD_LINK"
 [ "$SYSTEM_UPLOAD_LINK" != "UPLOAD_FAILED" ] && [ "$SYSTEM_UPLOAD_LINK" != "NOT_CREATED" ] && \
     log_info "System: $SYSTEM_UPLOAD_LINK"
+
+exit 0
