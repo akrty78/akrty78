@@ -3098,6 +3098,80 @@ CUSTKEYS
             log_info "Skipping build.prop for partition '${part}' — only product partition is allowed"
         fi
 
+        # H2. FSTAB PATCH (vendor only — AVB removal + ext4 fallback)
+        if [ "$part" == "vendor" ]; then
+            log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            log_step "🔧 VENDOR FSTAB PATCH (AVB + ext4 fallback)"
+            log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            FSTAB_FOUND=0
+            while IFS= read -r -d '' fstab_file; do
+                FSTAB_FOUND=$((FSTAB_FOUND + 1))
+                log_info "Patching: $(basename "$fstab_file")"
+                python3 - "$fstab_file" << 'FSTAB_PATCH_PY'
+import sys, re, os
+
+fstab_path = sys.argv[1]
+try:
+    with open(fstab_path, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+except UnicodeDecodeError:
+    with open(fstab_path, 'r', encoding='latin-1') as f:
+        lines = f.readlines()
+
+output = []
+changes = 0
+LOGICAL = {'system','system_ext','product','vendor','odm','system_dlkm','vendor_dlkm'}
+
+for line in lines:
+    s = line.strip()
+    if not s or s.startswith('#'):
+        output.append(line)
+        continue
+    cols = s.split()
+    if len(cols) < 5:
+        output.append(line)
+        continue
+
+    src, mnt, fs, opts, mgr = cols[0], cols[1], cols[2], cols[3], cols[4]
+
+    # OP1: Remove AVB flags
+    orig = mgr
+    mgr = re.sub(r',?avb=vbmeta_system', '', mgr)
+    mgr = re.sub(r',?avb=vbmeta', '', mgr)
+    mgr = re.sub(r',?avb_keys=[^,]*', '', mgr)
+    mgr = re.sub(r',?(?<![a-z_])verify(?![a-z_])', '', mgr)
+    mgr = re.sub(r',?(?<![a-z_])avb(?![a-z_=])', '', mgr)
+    mgr = re.sub(r'^,+|,+$', '', mgr)
+    mgr = re.sub(r',{2,}', ',', mgr)
+    if not mgr: mgr = 'defaults'
+    if mgr != orig: changes += 1
+
+    new_line = f"{src:<56}{mnt:<23}{fs:<8}{opts:<53}{mgr}\n"
+    output.append(new_line)
+
+    # OP2: ext4 fallback for erofs logical partitions
+    if fs == 'erofs' and src.strip() in LOGICAL:
+        ext4_line = f"{src:<56}{mnt:<23}{'ext4':<8}{'ro,barrier=1,discard':<53}{mgr}\n"
+        output.append(ext4_line)
+        changes += 1
+
+if changes > 0:
+    with open(fstab_path, 'w', encoding='utf-8', newline='\n') as f:
+        f.writelines(output)
+    print(f"PATCHED {changes} entries in {os.path.basename(fstab_path)}")
+else:
+    print(f"No changes in {os.path.basename(fstab_path)}")
+FSTAB_PATCH_PY
+            done < <(find "$DUMP_DIR" -name "fstab*" -type f -print0 2>/dev/null)
+
+            if [ "$FSTAB_FOUND" -gt 0 ]; then
+                log_success "✓ Vendor fstab patch: $FSTAB_FOUND files processed"
+            else
+                log_warning "⚠️ No fstab files found in vendor dump"
+            fi
+            log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        fi
+
         # I. REPACK
         log_info "📦 Repacking ${part} partition..."
         START_TIME=$(date +%s)
@@ -3136,11 +3210,13 @@ if [ "$BUILD_MODE" == "hybrid" ]; then
     log_step "🔨 Building super.img..."
     tg_progress "🔨 **Building super.img (lpmake)...**"
 
-    # Ensure lpmake is available — download AOSP 15 prebuilt binary
+    # Ensure lpmake + lpdump are available — download AOSP 15 prebuilt binaries
     if ! command -v lpmake &>/dev/null; then
-        log_info "Installing lpmake (AOSP 15 prebuilt)..."
-        LPMAKE_URL="https://raw.githubusercontent.com/Rprop/aosp15_partition_tools/main/linux_glibc_x86_64/lpmake"
-        IMG2SIMG_URL="https://raw.githubusercontent.com/Rprop/aosp15_partition_tools/main/linux_glibc_x86_64/img2simg"
+        log_info "Installing lpmake + lpdump (AOSP 15 prebuilt)..."
+        TOOLS_BASE_URL="https://raw.githubusercontent.com/Rprop/aosp15_partition_tools/main/linux_glibc_x86_64"
+        LPMAKE_URL="$TOOLS_BASE_URL/lpmake"
+        LPDUMP_URL="$TOOLS_BASE_URL/lpdump"
+        IMG2SIMG_URL="$TOOLS_BASE_URL/img2simg"
         if curl -fsSL --retry 3 --connect-timeout 30 -o "$BIN_DIR/lpmake" "$LPMAKE_URL"; then
             chmod +x "$BIN_DIR/lpmake"
             sudo cp "$BIN_DIR/lpmake" /usr/local/bin/lpmake
@@ -3148,6 +3224,14 @@ if [ "$BUILD_MODE" == "hybrid" ]; then
         else
             log_error "✗ Failed to download lpmake binary"
             exit 1
+        fi
+        # lpdump — for post-build validation
+        if curl -fsSL --retry 3 --connect-timeout 30 -o "$BIN_DIR/lpdump" "$LPDUMP_URL"; then
+            chmod +x "$BIN_DIR/lpdump"
+            sudo cp "$BIN_DIR/lpdump" /usr/local/bin/lpdump
+            log_success "✓ lpdump installed to /usr/local/bin/"
+        else
+            log_warning "⚠️ lpdump download failed — post-build validation will be skipped"
         fi
         # Also grab img2simg as utility
         curl -fsSL --retry 3 -o "$BIN_DIR/img2simg" "$IMG2SIMG_URL" 2>/dev/null && \
@@ -3163,8 +3247,16 @@ if [ "$BUILD_MODE" == "hybrid" ]; then
     SUPER_BUILD_DIR="$TEMP_DIR/super_build"
     mkdir -p "$SUPER_BUILD_DIR"
 
-    # Calculate total super partition size
-    TOTAL_SUPER_SIZE=0
+    # ── SMART SUPER.IMG SIZE CALCULATION ENGINE ──────────────
+    # Each partition inside super.img is 4096-byte (block) aligned.
+    # Exact sizing = sum of aligned partitions + geometry + metadata + safety buffer.
+    BLOCK_SIZE=4096
+    GEOMETRY_SIZE=4096     # LP_METADATA_GEOMETRY_SIZE — one block
+    METADATA_SIZE=65536    # lpmake default
+    # metadata is stored: primary(slot0) + primary(slot1) + backup(slot0) + backup(slot1)
+    METADATA_TOTAL=$((METADATA_SIZE * 2 * 2))  # = 262144
+
+    TOTAL_ALIGNED_SIZE=0
     LPMAKE_PARTS=""
     LPMAKE_IMAGES=""
     SUPER_PART_COUNT=0
@@ -3180,8 +3272,10 @@ if [ "$BUILD_MODE" == "hybrid" ]; then
         [ -z "$sp_img" ] && continue
 
         sp_size=$(stat -c%s "$sp_img" 2>/dev/null || echo 0)
+        # Align each partition size up to BLOCK_SIZE
+        sp_aligned=$(( (sp_size + BLOCK_SIZE - 1) / BLOCK_SIZE * BLOCK_SIZE ))
         sp_size_mb=$((sp_size / 1024 / 1024))
-        TOTAL_SUPER_SIZE=$((TOTAL_SUPER_SIZE + sp_size))
+        TOTAL_ALIGNED_SIZE=$((TOTAL_ALIGNED_SIZE + sp_aligned))
         SUPER_PART_COUNT=$((SUPER_PART_COUNT + 1))
 
         # VAB: partition_a gets the image, partition_b is empty (size=0)
@@ -3189,7 +3283,7 @@ if [ "$BUILD_MODE" == "hybrid" ]; then
         LPMAKE_PARTS="$LPMAKE_PARTS --partition ${sp}_b:readonly:0:main_b"
         LPMAKE_IMAGES="$LPMAKE_IMAGES --image ${sp}_a=$sp_img"
 
-        log_info "  📦 ${sp}.img → ${sp_size_mb}MB"
+        log_info "  📦 ${sp}.img → ${sp_size_mb}MB (aligned: ${sp_aligned})"
     done
 
     if [ "$SUPER_PART_COUNT" -eq 0 ]; then
@@ -3197,19 +3291,18 @@ if [ "$BUILD_MODE" == "hybrid" ]; then
         exit 1
     fi
 
-    # Group size = total partition sizes + 10% padding
-    PADDING=$((TOTAL_SUPER_SIZE / 10))
-    GROUP_SIZE=$((TOTAL_SUPER_SIZE + PADDING))
+    # GROUP_SIZE: exact aligned total + 4MB overhead for internal lpmake bookkeeping
+    GROUP_SIZE=$((TOTAL_ALIGNED_SIZE + 4 * 1024 * 1024))
 
-    # Device size = group size + metadata (65536 * 2 slots * 2 for safety) + alignment
-    METADATA_SIZE=65536
-    DEVICE_SIZE=$((GROUP_SIZE + METADATA_SIZE * 4 + 4096))
-    # Align to 4096 boundary
-    DEVICE_SIZE=$(( (DEVICE_SIZE + 4095) / 4096 * 4096 ))
+    # DEVICE_SIZE: geometry + metadata + group data + 8MB safety buffer
+    DEVICE_SIZE=$((GEOMETRY_SIZE + METADATA_TOTAL + GROUP_SIZE + 8 * 1024 * 1024))
+    # Align device size to BLOCK_SIZE boundary
+    DEVICE_SIZE=$(( (DEVICE_SIZE + BLOCK_SIZE - 1) / BLOCK_SIZE * BLOCK_SIZE ))
 
-    TOTAL_MB=$((TOTAL_SUPER_SIZE / 1024 / 1024))
+    TOTAL_MB=$((TOTAL_ALIGNED_SIZE / 1024 / 1024))
+    GROUP_MB=$((GROUP_SIZE / 1024 / 1024))
     DEVICE_MB=$((DEVICE_SIZE / 1024 / 1024))
-    log_info "Super partitions: $SUPER_PART_COUNT | Total: ${TOTAL_MB}MB | Device size: ${DEVICE_MB}MB"
+    log_info "Super Layout: ${SUPER_PART_COUNT} partitions | Data: ${TOTAL_MB}MB | Group: ${GROUP_MB}MB | Device: ${DEVICE_MB}MB"
 
     SUPER_RAW="$SUPER_BUILD_DIR/super.img"
 
@@ -3242,6 +3335,29 @@ if [ "$BUILD_MODE" == "hybrid" ]; then
     BUILD_TIME=$((END_TIME - START_TIME))
     SUPER_SIZE=$(du -h "$SUPER_RAW" | cut -f1)
     log_success "✓ super.img built (${SUPER_SIZE}) in ${BUILD_TIME}s"
+
+    # ── POST-BUILD VALIDATION WITH LPDUMP ────────────────────
+    if command -v lpdump &>/dev/null; then
+        log_info "Validating super.img with lpdump..."
+        LPDUMP_LOG="$TEMP_DIR/lpdump.log"
+        if lpdump "$SUPER_RAW" > "$LPDUMP_LOG" 2>&1; then
+            DUMP_PARTS=$(grep -c "Name:" "$LPDUMP_LOG" 2>/dev/null || echo 0)
+            DUMP_SIZE=$(grep "Super partition size:" "$LPDUMP_LOG" 2>/dev/null | head -1 || echo "")
+            log_success "✓ lpdump validation passed ($DUMP_PARTS partitions found)"
+            [ -n "$DUMP_SIZE" ] && log_info "  $DUMP_SIZE"
+        else
+            log_error "✗ lpdump validation FAILED — super.img may be corrupt!"
+            log_error "  lpdump output:"
+            tail -5 "$LPDUMP_LOG" | while IFS= read -r l; do log_error "    $l"; done
+            rm -f "$SUPER_RAW"
+            rm -f "$LPDUMP_LOG"
+            tg_progress "❌ **super.img validation failed — aborting**"
+            exit 1
+        fi
+        rm -f "$LPDUMP_LOG"
+    else
+        log_warning "⚠️ lpdump not available — skipping post-build validation"
+    fi
 
     # Move raw super.img to images directory (no chunking)
     log_info "Moving super.img to package..."
