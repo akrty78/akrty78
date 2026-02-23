@@ -373,26 +373,46 @@ inject_file_force() {
 }
 
 # ===========================================================
-# HAL KEYWORDS — Only essential OPLUS components
-# Based on analysis of working booted ODM (no hardcoded versions)
+# TWO-TIER KEYWORD SYSTEM (from working build analysis)
+# Services need STRICT filtering to avoid bootloops.
+# Libs are just dependencies — safe to include broadly.
 # ===========================================================
-# Core OPLUS HALs: power, performance, charger, OLC, stability
-OPLUS_HAL_KW="oplus|oppo|vendor.oplus|vendor-oplus|charger|performance|powermonitor|olc|stability|power.stats|power_stats|osense|gaia|handlefactory"
-# NFC stack: NXP, OPLUS NFC, Secure Element, ESE
-NFC_KW="nfc|nxp|secure_element|esepowermanager|pnscr|sn100|sn220|nq_client|nfc_nci|se_nq|ls_nq|jcos|omapi|mifare"
-# Combined keyword filter (version-agnostic — matches V1, V2, V5, V6, @1.0, @1.2, etc.)
-KEYWORDS="$OPLUS_HAL_KW|$NFC_KW"
 
-log_info "HAL filter keywords: $KEYWORDS"
+# TIER 1: STRICT — for bin/hw services, etc/init, etc/vintf
+# Only inject service binaries + manifests + init RCs for these categories:
+SERVICE_KEYWORDS="charger|performance|powermonitor|olc|stability|power.stats|power_stats"
+# NFC service stack
+NFC_SERVICE_KW="nfc|nxp|secure_element|esepowermanager|keymint.*strongbox.*nxp|weaver.*nxp"
+# Combined service filter
+SERVICE_FILTER="$SERVICE_KEYWORDS|$NFC_SERVICE_KW"
 
-# --- bin/hw/ — HAL service binaries ---
-log_info "Injecting HAL binaries (bin/hw)..."
+# BLACKLIST — explicitly skip these service binaries even if they match above
+# These are device-specific HALs that WILL cause bootloops on Xiaomi
+SKIP_SERVICES="biometrics|face|fingerprint|fingerprintpay|cammidasservice|cryptoeng|displaypanelfeature|eid|fido|gameinference|gameopt|location_aidl|riskdetect|rpmh|urcc|vibrator|wifi-aidl|misc-V|oplusSensor|osml|touch|transfer|transmessage|qrtr"
+
+# TIER 2: BROAD — for lib/lib64 .so files (safe as dependencies)
+LIB_KEYWORDS="oplus|oppo|nfc|nxp|secure_element|esepowermanager|pnscr|sn100|sn220|nq_client|nfc_nci|se_nq|ls_nq|jcos|omapi|mifare|olc|osense|gaia|handlefactory|power.stats|keymint.*nxp|weaver.*nxp"
+
+# TIER 2: For permissions (safe — just feature declarations)
+PERM_KEYWORDS="oplus|nfc|nxp|omapi|mifare|charger|stability|olc|power|performance"
+
+log_info "Service filter: $SERVICE_FILTER"
+log_info "Skip services: $SKIP_SERVICES"
+
+# --- bin/hw/ — HAL service binaries (STRICT filtering) ---
+log_info "Injecting HAL binaries (bin/hw) — STRICT mode..."
 tg_progress "💉 Injecting HAL binaries..."
 if [ -d "$OPLUS_ODM_DIR/bin/hw" ]; then
     for hal_bin in "$OPLUS_ODM_DIR/bin/hw/"*; do
         [ -f "$hal_bin" ] || continue
         fname=$(basename "$hal_bin")
-        if echo "$fname" | grep -qiE "$KEYWORDS"; then
+        # First check blacklist — skip unwanted services
+        if echo "$fname" | grep -qiE "$SKIP_SERVICES"; then
+            log_warning "  ✗ Skipped (blacklisted): $fname"
+            continue
+        fi
+        # Then check whitelist — only inject matching services
+        if echo "$fname" | grep -qiE "$SERVICE_FILTER"; then
             inject_file_force "$hal_bin" "$XIAOMI_ODM_DIR/bin/hw/$fname"
         fi
     done
@@ -404,17 +424,18 @@ if [ -d "$OPLUS_ODM_DIR/bin" ]; then
     for bin_file in "$OPLUS_ODM_DIR/bin/"*; do
         [ -f "$bin_file" ] || continue
         fname=$(basename "$bin_file")
-        if echo "$fname" | grep -qiE "$KEYWORDS"; then
-             inject_file "$bin_file" "$XIAOMI_ODM_DIR/bin/$fname"
+        # Only inject NFC-related binaries and performance script
+        if echo "$fname" | grep -qiE "nfc|nqnfcinfo|oplus_performance"; then
+            inject_file "$bin_file" "$XIAOMI_ODM_DIR/bin/$fname"
         fi
     done
 fi
 # Always inject performance script if present
 [ -f "$OPLUS_ODM_DIR/bin/oplus_performance.sh" ] && inject_file_force "$OPLUS_ODM_DIR/bin/oplus_performance.sh" "$XIAOMI_ODM_DIR/bin/oplus_performance.sh"
 
-# --- lib/ & lib64/ — Shared Libraries ---
+# --- lib/ & lib64/ — Shared Libraries (BROAD filtering — safe as deps) ---
 for arch in "lib" "lib64"; do
-    log_info "Injecting $arch/..."
+    log_info "Injecting $arch/ (broad mode)..."
     tg_progress "💉 Injecting $arch/..."
     
     # Main dir (.so files)
@@ -422,20 +443,20 @@ for arch in "lib" "lib64"; do
         for lib_file in "$OPLUS_ODM_DIR/$arch/"*.so; do
             [ -f "$lib_file" ] || continue
             fname=$(basename "$lib_file")
-            if echo "$fname" | grep -qiE "$KEYWORDS"; then
+            if echo "$fname" | grep -qiE "$LIB_KEYWORDS"; then
                 inject_file "$lib_file" "$XIAOMI_ODM_DIR/$arch/$fname"
             fi
         done
     fi
 
-    # hw/ subdir (HAL implementations — e.g. esepowermanager impl)
+    # hw/ subdir
     if [ -d "$OPLUS_ODM_DIR/$arch/hw" ]; then
         log_info "Injecting $arch/hw/..."
         mkdir -p "$XIAOMI_ODM_DIR/$arch/hw"
         for lib_file in "$OPLUS_ODM_DIR/$arch/hw/"*.so; do
             [ -f "$lib_file" ] || continue
             fname=$(basename "$lib_file")
-            if echo "$fname" | grep -qiE "$KEYWORDS"; then
+            if echo "$fname" | grep -qiE "$LIB_KEYWORDS"; then
                 inject_file "$lib_file" "$XIAOMI_ODM_DIR/$arch/hw/$fname"
             fi
         done
@@ -461,40 +482,51 @@ fi
 log_info "Injecting etc/ configs..."
 tg_progress "💉 Injecting configs & manifests..."
 
-# etc/init/ — Init RC files matching keywords
+# etc/init/ — STRICT: only inject init RCs for whitelisted services
 if [ -d "$OPLUS_ODM_DIR/etc/init" ]; then
-    log_info "Injecting etc/init/..."
+    log_info "Injecting etc/init/ — STRICT mode..."
     mkdir -p "$XIAOMI_ODM_DIR/etc/init"
     for item in "$OPLUS_ODM_DIR/etc/init/"*; do
         [ -f "$item" ] || continue
         fname=$(basename "$item")
-        if echo "$fname" | grep -qiE "$KEYWORDS"; then
+        # Blacklist check first
+        if echo "$fname" | grep -qiE "$SKIP_SERVICES"; then
+            log_warning "  ✗ Skipped init RC: $fname"
+            continue
+        fi
+        # Whitelist check
+        if echo "$fname" | grep -qiE "$SERVICE_FILTER"; then
             inject_file_force "$item" "$XIAOMI_ODM_DIR/etc/init/$fname"
         fi
     done
 fi
 
-# etc/vintf/manifest/ — VINTF manifest XMLs matching keywords
+# etc/vintf/manifest/ — STRICT: only inject VINTF manifests for whitelisted services
 if [ -d "$OPLUS_ODM_DIR/etc/vintf/manifest" ]; then
-    log_info "Injecting etc/vintf/manifest/..."
+    log_info "Injecting etc/vintf/manifest/ — STRICT mode..."
     mkdir -p "$XIAOMI_ODM_DIR/etc/vintf/manifest"
     for item in "$OPLUS_ODM_DIR/etc/vintf/manifest/"*; do
         [ -f "$item" ] || continue
         fname=$(basename "$item")
-        if echo "$fname" | grep -qiE "$KEYWORDS"; then
+        # Blacklist check first
+        if echo "$fname" | grep -qiE "$SKIP_SERVICES"; then
+            log_warning "  ✗ Skipped VINTF: $fname"
+            continue
+        fi
+        # Whitelist check
+        if echo "$fname" | grep -qiE "$SERVICE_FILTER"; then
             inject_file_force "$item" "$XIAOMI_ODM_DIR/etc/vintf/manifest/$fname"
         fi
     done
 fi
 
-# etc/permissions/ — Permission XMLs (including subdirectories like sku_marble/)
+# etc/permissions/ — BROAD: inject all OPLUS/NFC permission XMLs (safe — just declarations)
 if [ -d "$OPLUS_ODM_DIR/etc/permissions" ]; then
-    log_info "Injecting etc/permissions/ (recursive)..."
-    # Walk all files recursively under permissions/
+    log_info "Injecting etc/permissions/ (broad mode, recursive)..."
     find "$OPLUS_ODM_DIR/etc/permissions" -type f | while read -r item; do
         rel=$(realpath --relative-to="$OPLUS_ODM_DIR/etc/permissions" "$item")
         fname=$(basename "$item")
-        if echo "$fname" | grep -qiE "$KEYWORDS"; then
+        if echo "$fname" | grep -qiE "$PERM_KEYWORDS"; then
             dst_dir=$(dirname "$XIAOMI_ODM_DIR/etc/permissions/$rel")
             mkdir -p "$dst_dir"
             inject_file_force "$item" "$XIAOMI_ODM_DIR/etc/permissions/$rel"
@@ -502,7 +534,7 @@ if [ -d "$OPLUS_ODM_DIR/etc/permissions" ]; then
     done
 fi
 
-# etc/nfc/ — Complete NFC config directory (configs, firmware, pnscr scripts)
+# etc/nfc/ — Complete NFC config directory
 if [ -d "$OPLUS_ODM_DIR/etc/nfc" ]; then
     log_info "Injecting etc/nfc/ directory..."
     inject_file "$OPLUS_ODM_DIR/etc/nfc" "$XIAOMI_ODM_DIR/etc/nfc"
@@ -702,7 +734,9 @@ log_disk
 
 
 # =========================================================
-#  7. CONTEXT GENERATION ENGINE (Matches working ODM format)
+#  7. CONTEXT GENERATION ENGINE (Merge-based)
+#     Merges Xiaomi original contexts + generates new entries
+#     for injected OPLUS files.
 # =========================================================
 log_step "🏷️  Generating file_contexts..."
 tg_progress "🏷️ Generating file_contexts..."
@@ -715,8 +749,17 @@ log_disk
 XIAOMI_CONTEXTS="$XIAOMI_CONFIG/odm_file_contexts"
 mkdir -p "$XIAOMI_CONFIG"
 
-# Python Engine: Walks the FINAL merged filesystem and assigns
-# SELinux contexts matching the exact format from working booted ODM.
+# Check if Xiaomi already has an odm_file_contexts (from extract.erofs)
+XIAOMI_ORIG_CONTEXTS=""
+if [ -f "$XIAOMI_CONTEXTS" ] && [ -s "$XIAOMI_CONTEXTS" ]; then
+    XIAOMI_ORIG_CONTEXTS="$XIAOMI_CONTEXTS"
+    log_info "Found existing Xiaomi file_contexts ($(wc -l < "$XIAOMI_ORIG_CONTEXTS") entries)"
+    # Back up original before we regenerate
+    cp "$XIAOMI_ORIG_CONTEXTS" "$XIAOMI_CONTEXTS.orig"
+fi
+
+# Python Engine: Walks the FINAL merged filesystem and assigns SELinux contexts.
+# If Xiaomi original contexts exist, use them as base and add new entries only.
 # Version-agnostic — handles V1, V5, V6, @1.0, @1.2, etc.
 cat > "$WORK_DIR/context_gen.py" << 'PYEOF'
 import os
@@ -725,146 +768,154 @@ import re
 
 odm_dir = sys.argv[1]
 out_file = sys.argv[2]
+orig_ctx_file = sys.argv[3] if len(sys.argv) > 3 else ""
 
 print(f"Generating contexts for: {odm_dir}")
-entries = []
 
-# Static base entries
-entries.append("/ u:object_r:vendor_file:s0")
-entries.append("/odm u:object_r:vendor_file:s0")
-entries.append("/odm/ u:object_r:vendor_file:s0")
-entries.append("/odm/lost\\+found u:object_r:vendor_file:s0")
+# ==== PHASE 1: Load existing Xiaomi contexts as base ====
+existing_paths = set()  # Paths already covered by Xiaomi
+base_entries = []
 
-total_files = 0
-total_dirs = 0
+if orig_ctx_file and os.path.isfile(orig_ctx_file):
+    print(f"Loading existing contexts from: {orig_ctx_file}")
+    with open(orig_ctx_file, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            base_entries.append(line)
+            # Extract the path (first field before space)
+            parts = line.split()
+            if parts:
+                existing_paths.add(parts[0])
+    print(f"Loaded {len(base_entries)} existing entries")
+else:
+    # No existing contexts — add static base entries
+    base_entries.append("/ u:object_r:vendor_file:s0")
+    base_entries.append("/odm u:object_r:vendor_file:s0")
+    base_entries.append("/odm/ u:object_r:vendor_file:s0")
+    base_entries.append("/odm/lost\\+found u:object_r:vendor_file:s0")
+    for p in base_entries:
+        existing_paths.add(p.split()[0])
 
+# ==== PHASE 2: Helper functions ====
 def escape_path(p):
-    """Escape special regex chars in path for file_contexts format."""
-    # Escape dots and plus signs (common in Android paths)
-    p = p.replace('.', '\\.').replace('+', '\\+')
-    # Convert backslashes to forward slashes (Windows compat)
-    p = p.replace('\\', '/')
+    """Escape special regex chars for file_contexts format."""
+    p = p.replace('.', '\\.').replace('+', '\\+').replace('(', '\\(').replace(')', '\\)')
+    p = p.replace('\\', '/')  # Windows compat
     return p
 
 def get_dir_context(rel_path):
-    """Assign SELinux context to a directory."""
-    # etc/ and all subdirs under it
     if rel_path == 'odm/etc' or rel_path.startswith('odm/etc/'):
         return "u:object_r:vendor_configs_file:s0"
-    # lib/hw and lib64/hw directories
     if re.match(r'odm/lib(64)?/hw$', rel_path):
         return "u:object_r:vendor_hal_file:s0"
-    # firmware/ subdirs
     if rel_path.startswith('odm/firmware/'):
         return "u:object_r:vendor_configs_file:s0"
     if rel_path == 'odm/firmware':
         return "u:object_r:vendor_file:s0"
-    # Default: vendor_file for bin, lib, lib64, etc.
     return "u:object_r:vendor_file:s0"
 
 def get_file_context(rel_path, fname):
-    """Assign SELinux context to a file based on working ODM analysis."""
-    
-    # ===== BINARIES =====
+    # BINARIES
     if rel_path.startswith('odm/bin/hw/'):
-        # NXP NFC HAL
         if 'nxp' in fname and 'nfc' in fname:
             return "u:object_r:hal_nfc_default_exec:s0"
-        # QTI Secure Element
         if 'secure_element' in fname:
             return "u:object_r:hal_secure_element_default_exec:s0"
-        # QTI ESE Power Manager
         if 'esepowermanager' in fname:
             return "u:object_r:vendor_hal_esepowermanager_qti_exec:s0"
-        # Xiaomi Mikeybag (not in bin/hw, but handle just in case)
         if 'mikeybag' in fname:
             return "u:object_r:hal_mikeybag_default_exec:s0"
-        # All OPLUS HALs (charger, performance, powermonitor, olc, stability, nfc_aidl, nfcExtns, etc.)
         return "u:object_r:hal_allocator_default_exec:s0"
-    
     if rel_path.startswith('odm/bin/'):
-        # Xiaomi mikeybag service (in bin/, not bin/hw/)
         if 'mikeybag' in fname:
             return "u:object_r:hal_mikeybag_default_exec:s0"
-        # nqnfcinfo binary
         if 'nqnfcinfo' in fname:
             return "u:object_r:vendor_nqnfcinfo_exec:s0"
-        # OPLUS performance script
         if 'oplus_performance' in fname:
             return "u:object_r:hal_allocator_default_exec:s0"
         return "u:object_r:vendor_file:s0"
-    
-    # ===== build.prop at ODM root =====
-    if rel_path == 'odm/build.prop':
+    # build.prop files
+    if fname == 'build.prop' or fname.endswith('_build.prop'):
         return "u:object_r:vendor_file:s0"
-    
-    # ===== LIBRARIES =====
-    # lib/hw/ and lib64/hw/ — HAL implementation .so files
+    if fname == 'nexdroid.prop':
+        return "u:object_r:vendor_file:s0"
+    if fname.endswith('.prop'):
+        return "u:object_r:vendor_file:s0"
+    # LIBRARIES
     if re.match(r'odm/lib(64)?/hw/', rel_path):
-        return "u:object_r:vendor_file:s0"  # Files inside hw/ dir
-    
+        return "u:object_r:vendor_file:s0"
     if re.match(r'odm/lib(64)?/', rel_path):
-        # osense client libs -> same_process_hal_file
         if 'osense' in fname and 'client' in fname:
             return "u:object_r:same_process_hal_file:s0"
         return "u:object_r:vendor_file:s0"
-    
-    # ===== CONFIGS / ETC =====
+    # ETC / CONFIGS
     if rel_path.startswith('odm/etc/'):
-        # SELinux precompiled sepolicy
         if 'selinux/precompiled_sepolicy' in rel_path and not fname.endswith('.sha256'):
             return "u:object_r:sepolicy_file:s0"
-        # build.prop under etc/
         if fname == 'build.prop':
             return "u:object_r:vendor_file:s0"
-        # Everything else in etc/ is vendor_configs_file
         return "u:object_r:vendor_configs_file:s0"
-    
-    # ===== FIRMWARE =====
+    # FIRMWARE
     if rel_path.startswith('odm/firmware/'):
         return "u:object_r:vendor_configs_file:s0"
-    
-    # Default fallback
     return "u:object_r:vendor_file:s0"
 
-# Walk the entire ODM directory
+# ==== PHASE 3: Walk filesystem and add NEW entries ====
+new_entries = []
+new_files = 0
+new_dirs = 0
+
 for root, dirs, files in os.walk(odm_dir):
-    # Sort for consistent output
     dirs.sort()
     files.sort()
     
-    # Handle directories
     for d in sorted(dirs):
         full_path = os.path.join(root, d)
         rel_path = os.path.relpath(full_path, os.path.dirname(odm_dir))
-        rel_path = rel_path.replace('\\', '/')  # Windows compat
-        
+        rel_path = rel_path.replace('\\', '/')
         regex_path = '/' + escape_path(rel_path)
-        ctx = get_dir_context(rel_path)
-        entries.append(f"{regex_path} {ctx}")
-        total_dirs += 1
+        
+        if regex_path not in existing_paths:
+            ctx = get_dir_context(rel_path)
+            new_entries.append(f"{regex_path} {ctx}")
+            new_dirs += 1
 
-    # Handle files
     for f in sorted(files):
         full_path = os.path.join(root, f)
         rel_path = os.path.relpath(full_path, os.path.dirname(odm_dir))
-        rel_path = rel_path.replace('\\', '/')  # Windows compat
-        
+        rel_path = rel_path.replace('\\', '/')
         regex_path = '/' + escape_path(rel_path)
-        ctx = get_file_context(rel_path, f)
-        entries.append(f"{regex_path} {ctx}")
-        total_files += 1
+        
+        if regex_path not in existing_paths:
+            ctx = get_file_context(rel_path, f)
+            new_entries.append(f"{regex_path} {ctx}")
+            new_files += 1
 
+# ==== PHASE 4: Write merged output ====
 with open(out_file, 'w') as fh:
-    fh.write('\n'.join(entries))
-    fh.write('\n')
+    # Write existing base entries first
+    for entry in base_entries:
+        fh.write(entry + '\n')
+    # Append new entries
+    if new_entries:
+        fh.write('\n# === Injected OPLUS entries ===\n')
+        for entry in new_entries:
+            fh.write(entry + '\n')
 
-print(f"Generated contexts: {total_files} files, {total_dirs} dirs")
+total = len(base_entries) + len(new_entries)
+print(f"Context merge complete: {len(base_entries)} existing + {new_files} new files + {new_dirs} new dirs = {total} total")
 PYEOF
 
-python3 "$WORK_DIR/context_gen.py" "$XIAOMI_ODM_DIR" "$XIAOMI_CONTEXTS"
+# Run with optional original contexts file
+if [ -n "$XIAOMI_ORIG_CONTEXTS" ]; then
+    python3 "$WORK_DIR/context_gen.py" "$XIAOMI_ODM_DIR" "$XIAOMI_CONTEXTS" "$XIAOMI_CONTEXTS.orig"
+else
+    python3 "$WORK_DIR/context_gen.py" "$XIAOMI_ODM_DIR" "$XIAOMI_CONTEXTS"
+fi
 log_success "Context generation complete"
-rm -f "$WORK_DIR/context_gen.py"
+rm -f "$WORK_DIR/context_gen.py" "$XIAOMI_CONTEXTS.orig"
 
 
 # =========================================================
