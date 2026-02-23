@@ -77,13 +77,128 @@ OPLUS_DL="$WORK_DIR/oplus_ota"
 XIAOMI_DL="$WORK_DIR/xiaomi_ota"
 OPLUS_PROJECT="$WORK_DIR/oplus_project"
 XIAOMI_PROJECT="$WORK_DIR/xiaomi_project"
+SYSTEM_PROJECT="$WORK_DIR/system_project"
 OUTPUT_DIR="$WORK_DIR/odm_output"
 
 mkdir -p "$BIN_DIR" "$OPLUS_DL" "$XIAOMI_DL" "$OPLUS_PROJECT" "$XIAOMI_PROJECT" "$OUTPUT_DIR"
+
+# Flags for optional features (fail gracefully)
+SYSTEM_MERGE_OK=false
+VENDOR_PATCH_OK=false
 export PATH="$BIN_DIR:$PATH"
 
 # Disk space helper
 log_disk() { log_info "💾 Disk free: $(df -h . | awk 'NR==2{print $4}')"; }
+
+# Disk threshold check — returns 1 if disk critically low
+check_disk_threshold() {
+    local threshold_gb=${1:-5}
+    local free_kb=$(df . | awk 'NR==2{print $4}')
+    local free_gb=$((free_kb / 1024 / 1024))
+    if [ "$free_gb" -lt "$threshold_gb" ]; then
+        log_error "Disk critically low (${free_gb}GB free, need ${threshold_gb}GB). Skipping."
+        return 1
+    fi
+    return 0
+}
+
+# Generic partition unpacker (reusable for system, vendor, etc.)
+unpack_partition() {
+    local img="$1"        # path to .img file
+    local out_dir="$2"    # where to unpack (e.g. system_project/system)
+    local label="$3"      # for logging
+    local config_dir="$4" # where config/ appears (parent of out_dir)
+
+    mkdir -p "$out_dir"
+
+    local EROFS_BIN="$SCRIPT_DIR/bin/extract.erofs"
+    if [ -f "$EROFS_BIN" ]; then
+        chmod +x "$EROFS_BIN" 2>/dev/null
+        cd "$config_dir"
+        "$EROFS_BIN" -i "$img" -x 2>&1 | tail -5
+        cd "$WORK_DIR"
+        if [ -d "$out_dir" ] && [ "$(ls -A "$out_dir" 2>/dev/null)" ]; then
+            log_success "$label unpacked successfully"
+            return 0
+        fi
+    fi
+
+    # Fallback: fsck.erofs
+    if command -v fsck.erofs &>/dev/null; then
+        fsck.erofs --extract="$out_dir" "$img" 2>&1 | tail -3
+        if [ "$(ls -A "$out_dir" 2>/dev/null)" ]; then
+            log_success "$label unpacked (fsck fallback, no xattrs)"
+            mkdir -p "$config_dir/config"
+            return 0
+        fi
+    fi
+
+    log_error "Failed to unpack $label"
+    return 1
+}
+
+# Merge a my_* partition into the system tree
+merge_my_partition() {
+    local img="$1"
+    local part_name="$2"   # e.g. "my_product"
+    local system_dir="$3"  # destination: $SYSTEM_PROJECT/system
+
+    if [ -z "$img" ] || [ ! -f "$img" ]; then
+        log_warning "  Skipping $part_name — image not found"
+        return 0
+    fi
+
+    check_disk_threshold 3 || return 0
+
+    log_info "Merging $part_name into system..."
+    local tmp_dir="$WORK_DIR/${part_name}_tmp"
+    mkdir -p "$tmp_dir"
+
+    # Unpack into temp dir
+    local EROFS_BIN="$SCRIPT_DIR/bin/extract.erofs"
+    if [ -f "$EROFS_BIN" ]; then
+        chmod +x "$EROFS_BIN" 2>/dev/null
+        cd "$tmp_dir"
+        "$EROFS_BIN" -i "$img" -x 2>&1 | tail -3
+        cd "$WORK_DIR"
+    fi
+
+    local src_dir="$tmp_dir/$part_name"
+    if [ ! -d "$src_dir" ] || [ -z "$(ls -A "$src_dir" 2>/dev/null)" ]; then
+        # Fallback: fsck
+        if command -v fsck.erofs &>/dev/null; then
+            fsck.erofs --extract="$src_dir" "$img" 2>&1 | tail -3
+        fi
+    fi
+
+    if [ ! -d "$src_dir" ] || [ -z "$(ls -A "$src_dir" 2>/dev/null)" ]; then
+        log_warning "  Could not unpack $part_name — skipping"
+        rm -rf "$tmp_dir"
+        rm -f "$img"
+        return 0
+    fi
+
+    # MERGE: cp -a with overwrite (my_* always wins over base system)
+    if command -v rsync &>/dev/null; then
+        rsync -a --no-perms "$src_dir/" "$system_dir/" 2>/dev/null
+    else
+        cp -a "$src_dir/." "$system_dir/" 2>/dev/null
+    fi
+
+    local merged_count=$(find "$src_dir" -type f 2>/dev/null | wc -l)
+    log_success "  ✓ Merged $part_name: $merged_count files into system"
+
+    # Capture contexts from this my_* partition for merging
+    local my_ctx="$tmp_dir/config/${part_name}_file_contexts"
+    if [ -f "$my_ctx" ]; then
+        cat "$my_ctx" >> "$SYSTEM_PROJECT/config/my_combined_contexts.tmp" 2>/dev/null
+    fi
+
+    # Cleanup immediately to free disk
+    rm -rf "$tmp_dir"
+    rm -f "$img"
+    log_disk
+}
 
 # =========================================================
 #  1. INSTALL TOOLS
@@ -168,12 +283,14 @@ if [ ! -f "payload.bin" ]; then
     exit 1
 fi
 
-log_info "Dumping OPLUS odm.img..."
-payload-dumper-go -p odm -o "$OPLUS_DL" payload.bin
+log_info "Dumping OPLUS partitions (odm + system + my_*)..."
+tg_progress "📦 Extracting OPLUS partitions..."
+payload-dumper-go -p odm,system,system_ext,product,my_product,my_engineering,my_stock,my_heytap,my_carrier,my_region,my_bigball,my_manifest -o "$OPLUS_DL" payload.bin 2>&1 | tail -3
 # DELETE PAYLOAD IMMEDIATELY
 rm -f "$OPLUS_DL/payload.bin"
 log_info "Deleted OPLUS payload.bin"
 
+# --- Locate extracted images ---
 OPLUS_ODM=$(find "$OPLUS_DL" -name "odm.img" -print -quit)
 if [ -z "$OPLUS_ODM" ] || [ ! -f "$OPLUS_ODM" ]; then
     log_error "Failed to extract OPLUS odm.img"
@@ -181,6 +298,39 @@ if [ -z "$OPLUS_ODM" ] || [ ! -f "$OPLUS_ODM" ]; then
     exit 1
 fi
 log_success "OPLUS odm.img extracted: $(du -h "$OPLUS_ODM" | cut -f1)"
+
+# System images (optional — failure doesn't block ODM patch)
+OPLUS_SYSTEM_IMG=$(find "$OPLUS_DL" -name "system.img" -print -quit)
+OPLUS_SYSTEM_EXT_IMG=$(find "$OPLUS_DL" -name "system_ext.img" -print -quit)
+OPLUS_PRODUCT_IMG=$(find "$OPLUS_DL" -name "product.img" -print -quit)
+
+if [ -n "$OPLUS_SYSTEM_IMG" ] && [ -f "$OPLUS_SYSTEM_IMG" ]; then
+    log_success "OPLUS system.img extracted: $(du -h "$OPLUS_SYSTEM_IMG" | cut -f1)"
+else
+    log_warning "OPLUS system.img not found — system merge will be skipped"
+fi
+[ -n "$OPLUS_SYSTEM_EXT_IMG" ] && [ -f "$OPLUS_SYSTEM_EXT_IMG" ] && \
+    log_success "OPLUS system_ext.img: $(du -h "$OPLUS_SYSTEM_EXT_IMG" | cut -f1)"
+[ -n "$OPLUS_PRODUCT_IMG" ] && [ -f "$OPLUS_PRODUCT_IMG" ] && \
+    log_success "OPLUS product.img: $(du -h "$OPLUS_PRODUCT_IMG" | cut -f1)"
+
+# my_* images (optional)
+OPLUS_MY_MANIFEST_IMG=$(find "$OPLUS_DL" -name "my_manifest.img" -print -quit)
+OPLUS_MY_STOCK_IMG=$(find "$OPLUS_DL" -name "my_stock.img" -print -quit)
+OPLUS_MY_HEYTAP_IMG=$(find "$OPLUS_DL" -name "my_heytap.img" -print -quit)
+OPLUS_MY_CARRIER_IMG=$(find "$OPLUS_DL" -name "my_carrier.img" -print -quit)
+OPLUS_MY_REGION_IMG=$(find "$OPLUS_DL" -name "my_region.img" -print -quit)
+OPLUS_MY_BIGBALL_IMG=$(find "$OPLUS_DL" -name "my_bigball.img" -print -quit)
+OPLUS_MY_ENGINEERING_IMG=$(find "$OPLUS_DL" -name "my_engineering.img" -print -quit)
+OPLUS_MY_PRODUCT_IMG=$(find "$OPLUS_DL" -name "my_product.img" -print -quit)
+
+MY_FOUND=0
+for _mi in "$OPLUS_MY_MANIFEST_IMG" "$OPLUS_MY_STOCK_IMG" "$OPLUS_MY_HEYTAP_IMG" \
+          "$OPLUS_MY_CARRIER_IMG" "$OPLUS_MY_REGION_IMG" "$OPLUS_MY_BIGBALL_IMG" \
+          "$OPLUS_MY_ENGINEERING_IMG" "$OPLUS_MY_PRODUCT_IMG"; do
+    [ -n "$_mi" ] && [ -f "$_mi" ] && MY_FOUND=$((MY_FOUND + 1))
+done
+log_info "Found $MY_FOUND my_* partition images"
 log_disk
 
 # --- XIAOMI OTA ---
@@ -209,8 +359,8 @@ if [ ! -f "payload.bin" ]; then
     exit 1
 fi
 
-log_info "Dumping Xiaomi odm.img..."
-payload-dumper-go -p odm -o "$XIAOMI_DL" payload.bin
+log_info "Dumping Xiaomi odm.img + vendor.img..."
+payload-dumper-go -p odm,vendor -o "$XIAOMI_DL" payload.bin 2>&1 | tail -3
 # DELETE PAYLOAD IMMEDIATELY
 rm -f "$XIAOMI_DL/payload.bin"
 log_info "Deleted Xiaomi payload.bin"
@@ -222,6 +372,15 @@ if [ -z "$XIAOMI_ODM" ] || [ ! -f "$XIAOMI_ODM" ]; then
     exit 1
 fi
 log_success "Xiaomi odm.img extracted: $(du -h "$XIAOMI_ODM" | cut -f1)"
+
+# Vendor (optional — for fstab patching)
+XIAOMI_VENDOR_IMG=$(find "$XIAOMI_DL" -name "vendor.img" -print -quit)
+if [ -n "$XIAOMI_VENDOR_IMG" ] && [ -f "$XIAOMI_VENDOR_IMG" ]; then
+    log_success "Xiaomi vendor.img extracted: $(du -h "$XIAOMI_VENDOR_IMG" | cut -f1)"
+else
+    log_warning "Xiaomi vendor.img not found — vendor fstab patch will be skipped"
+    XIAOMI_VENDOR_IMG=""
+fi
 
 cd "$WORK_DIR"
 log_disk
@@ -1143,33 +1302,476 @@ fi
 
 log_success "Patched ODM image ready: $(du -h "$PATCHED_ODM" | cut -f1)"
 
-# Free disk: delete Xiaomi project (only the repacked image is needed now)
-log_info "Deleting Xiaomi project to free disk..."
+# Free disk: delete Xiaomi ODM project (only the repacked image is needed now)
+log_info "Deleting Xiaomi ODM project to free disk..."
 rm -rf "$XIAOMI_PROJECT"
 log_disk
 
 # =========================================================
-#  10. UPLOAD
+#  10. VENDOR FSTAB PATCH (AVB removal + ext4 fallback)
 # =========================================================
-log_step "☁️  Uploading patched ODM..."
-tg_progress "☁️ Uploading patched ODM..."
+VENDOR_DIR=""
+VENDOR_CONFIG=""
+PATCHED_VENDOR="$OUTPUT_DIR/vendor.img"
 
-UPLOAD_LINK="UPLOAD_FAILED"
+if [ -n "$XIAOMI_VENDOR_IMG" ] && [ -f "$XIAOMI_VENDOR_IMG" ]; then
+    if check_disk_threshold 3; then
+        log_step "🔧 Patching Xiaomi vendor fstab..."
+        tg_progress "🔧 Patching vendor fstab..."
 
-# --- Try PixelDrain (with API key if available) ---
+        VENDOR_DIR="$WORK_DIR/vendor_project/vendor"
+        VENDOR_CONFIG="$WORK_DIR/vendor_project"
+        mkdir -p "$VENDOR_CONFIG"
+
+        unpack_partition "$XIAOMI_VENDOR_IMG" "$VENDOR_DIR" "Xiaomi vendor" "$VENDOR_CONFIG"
+        rm -f "$XIAOMI_VENDOR_IMG"
+
+        if [ -d "$VENDOR_DIR" ] && [ "$(ls -A "$VENDOR_DIR" 2>/dev/null)" ]; then
+            # Save original vendor contexts + fs_config
+            if [ -f "$VENDOR_CONFIG/config/vendor_file_contexts" ]; then
+                cp "$VENDOR_CONFIG/config/vendor_file_contexts" "$VENDOR_CONFIG/config/vendor_file_contexts.orig"
+            fi
+            if [ -f "$VENDOR_CONFIG/config/vendor_fs_config" ]; then
+                cp "$VENDOR_CONFIG/config/vendor_fs_config" "$VENDOR_CONFIG/config/vendor_fs_config.orig"
+            fi
+
+            # --- FSTAB PATCHER (AVB removal + ext4 fallback, NO decrypt removal) ---
+            FSTAB_PATCHED=0
+            while IFS= read -r -d '' fstab_file; do
+                log_info "Patching fstab: $(basename "$fstab_file")"
+                python3 - "$fstab_file" << 'FSTAB_PY'
+import sys, re, os
+
+fstab_path = sys.argv[1]
+try:
+    with open(fstab_path, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+except UnicodeDecodeError:
+    with open(fstab_path, 'r', encoding='latin-1') as f:
+        lines = f.readlines()
+
+output = []
+changes = 0
+# Logical partitions that get ext4 fallback
+LOGICAL_PARTS = {'system', 'system_ext', 'product', 'vendor', 'odm', 'system_dlkm', 'vendor_dlkm'}
+
+for line in lines:
+    stripped = line.strip()
+    # Skip comments and empty lines
+    if not stripped or stripped.startswith('#'):
+        output.append(line)
+        continue
+
+    cols = stripped.split()
+    if len(cols) < 5:
+        output.append(line)
+        continue
+
+    src, mnt, fstype, mntopts, fsmgr = cols[0], cols[1], cols[2], cols[3], cols[4]
+
+    # --- OPERATION 1: Remove AVB flags from fs_mgr_flags ---
+    orig_fsmgr = fsmgr
+    # Remove avb=vbmeta_system, avb=vbmeta, avb_keys=<path>
+    fsmgr = re.sub(r',?avb=vbmeta_system', '', fsmgr)
+    fsmgr = re.sub(r',?avb=vbmeta', '', fsmgr)
+    fsmgr = re.sub(r',?avb_keys=[^,]*', '', fsmgr)
+    # Remove standalone verify and avb (word boundaries)
+    fsmgr = re.sub(r',?(?<![a-z_])verify(?![a-z_])', '', fsmgr)
+    fsmgr = re.sub(r',?(?<![a-z_])avb(?![a-z_=])', '', fsmgr)
+    # Clean up dangling commas
+    fsmgr = re.sub(r'^,+', '', fsmgr)
+    fsmgr = re.sub(r',+$', '', fsmgr)
+    fsmgr = re.sub(r',{2,}', ',', fsmgr)
+    if not fsmgr:
+        fsmgr = 'defaults'
+
+    if fsmgr != orig_fsmgr:
+        changes += 1
+
+    # Reconstruct line with proper spacing
+    new_line = f"{src:<56}{mnt:<23}{fstype:<8}{mntopts:<53}{fsmgr}\n"
+    output.append(new_line)
+
+    # --- OPERATION 2: Add ext4 fallback for erofs logical partitions ---
+    part_name = src.strip()
+    if fstype == 'erofs' and part_name in LOGICAL_PARTS:
+        ext4_opts = 'ro,barrier=1,discard'
+        ext4_line = f"{src:<56}{mnt:<23}{'ext4':<8}{ext4_opts:<53}{fsmgr}\n"
+        # Only add if not already followed by an ext4 line for same mount
+        output.append(ext4_line)
+        changes += 1
+
+if changes > 0:
+    with open(fstab_path, 'w', encoding='utf-8', newline='\n') as f:
+        f.writelines(output)
+    print(f"Patched {changes} entries in {os.path.basename(fstab_path)}")
+else:
+    print(f"No changes needed in {os.path.basename(fstab_path)}")
+FSTAB_PY
+                FSTAB_PATCHED=$((FSTAB_PATCHED + 1))
+            done < <(find "$VENDOR_DIR" -name "fstab*" -type f -print0 2>/dev/null)
+
+            if [ "$FSTAB_PATCHED" -gt 0 ]; then
+                log_success "Vendor fstab patch complete ($FSTAB_PATCHED files patched)"
+            else
+                log_warning "No fstab files found in vendor"
+            fi
+
+            # --- REPACK VENDOR ---
+            log_info "Repacking vendor.img..."
+            VENDOR_CONTEXTS="$VENDOR_CONFIG/config/vendor_file_contexts"
+            VENDOR_FS_CFG="$VENDOR_CONFIG/config/vendor_fs_config"
+
+            MKFS_BIN="$SCRIPT_DIR/bin/mkfs.erofs"
+            [ ! -f "$MKFS_BIN" ] && MKFS_BIN="mkfs.erofs"
+
+            V_ARGS="-zlz4hc,9 -T 1230768000 --mount-point=/vendor"
+            [ -f "$VENDOR_CONTEXTS" ] && [ -s "$VENDOR_CONTEXTS" ] && \
+                V_ARGS="$V_ARGS --file-contexts=$VENDOR_CONTEXTS"
+            [ -f "$VENDOR_FS_CFG" ] && [ -s "$VENDOR_FS_CFG" ] && \
+                V_ARGS="$V_ARGS --fs-config-file=$VENDOR_FS_CFG"
+
+            $MKFS_BIN $V_ARGS "$PATCHED_VENDOR" "$VENDOR_DIR" 2>&1 | tail -5
+
+            V_SIZE=$(stat -c%s "$PATCHED_VENDOR" 2>/dev/null || echo 0)
+            if [ "$V_SIZE" -gt 1048576 ]; then
+                log_success "vendor.img repacked: $(du -h "$PATCHED_VENDOR" | cut -f1)"
+                VENDOR_PATCH_OK=true
+            else
+                log_error "vendor.img repack failed (${V_SIZE}B)"
+                rm -f "$PATCHED_VENDOR"
+            fi
+        else
+            log_warning "Vendor unpack failed — skipping vendor fstab patch"
+        fi
+
+        # Cleanup vendor project
+        rm -rf "$WORK_DIR/vendor_project"
+        log_disk
+    else
+        log_warning "Disk too low for vendor patch — skipping"
+    fi
+else
+    log_info "No Xiaomi vendor.img — vendor fstab patch skipped"
+fi
+
+
+# =========================================================
+#  11. SYSTEM PARTITION MERGE (OPLUS my_* → system)
+# =========================================================
+if [ -n "$OPLUS_SYSTEM_IMG" ] && [ -f "$OPLUS_SYSTEM_IMG" ]; then
+    if check_disk_threshold 5; then
+        log_step "📦 Unpacking system partitions..."
+        tg_progress "📦 Unpacking system partitions..."
+        mkdir -p "$SYSTEM_PROJECT/config"
+
+        # --- Unpack system.img ---
+        unpack_partition "$OPLUS_SYSTEM_IMG" "$SYSTEM_PROJECT/system" "OPLUS system" "$SYSTEM_PROJECT"
+        rm -f "$OPLUS_SYSTEM_IMG"
+
+        if [ -d "$SYSTEM_PROJECT/system" ] && [ "$(ls -A "$SYSTEM_PROJECT/system" 2>/dev/null)" ]; then
+            # Save original contexts
+            [ -f "$SYSTEM_PROJECT/config/system_file_contexts" ] && \
+                cp "$SYSTEM_PROJECT/config/system_file_contexts" "$SYSTEM_PROJECT/config/system_file_contexts.orig"
+            [ -f "$SYSTEM_PROJECT/config/system_fs_config" ] && \
+                cp "$SYSTEM_PROJECT/config/system_fs_config" "$SYSTEM_PROJECT/config/system_fs_config.orig"
+
+            # --- Unpack system_ext.img ---
+            if [ -n "$OPLUS_SYSTEM_EXT_IMG" ] && [ -f "$OPLUS_SYSTEM_EXT_IMG" ]; then
+                unpack_partition "$OPLUS_SYSTEM_EXT_IMG" "$SYSTEM_PROJECT/system_ext" "OPLUS system_ext" "$SYSTEM_PROJECT"
+                rm -f "$OPLUS_SYSTEM_EXT_IMG"
+            fi
+
+            # --- Unpack product.img ---
+            if [ -n "$OPLUS_PRODUCT_IMG" ] && [ -f "$OPLUS_PRODUCT_IMG" ]; then
+                unpack_partition "$OPLUS_PRODUCT_IMG" "$SYSTEM_PROJECT/product" "OPLUS product" "$SYSTEM_PROJECT"
+                rm -f "$OPLUS_PRODUCT_IMG"
+            fi
+
+            log_disk
+
+            # --- Merge my_* partitions into system (priority order) ---
+            log_step "🔀 Merging my_* overlays into system..."
+            tg_progress "🔀 Merging my_* overlays..."
+
+            merge_my_partition "$OPLUS_MY_MANIFEST_IMG"    "my_manifest"    "$SYSTEM_PROJECT/system"
+            merge_my_partition "$OPLUS_MY_STOCK_IMG"       "my_stock"       "$SYSTEM_PROJECT/system"
+            merge_my_partition "$OPLUS_MY_HEYTAP_IMG"      "my_heytap"      "$SYSTEM_PROJECT/system"
+            merge_my_partition "$OPLUS_MY_CARRIER_IMG"     "my_carrier"     "$SYSTEM_PROJECT/system"
+            merge_my_partition "$OPLUS_MY_REGION_IMG"      "my_region"      "$SYSTEM_PROJECT/system"
+            merge_my_partition "$OPLUS_MY_BIGBALL_IMG"     "my_bigball"     "$SYSTEM_PROJECT/system"
+            merge_my_partition "$OPLUS_MY_ENGINEERING_IMG" "my_engineering" "$SYSTEM_PROJECT/system"
+            merge_my_partition "$OPLUS_MY_PRODUCT_IMG"     "my_product"     "$SYSTEM_PROJECT/system"
+
+            # --- System context + fs_config generation ---
+            log_step "🏷️  Generating system file_contexts + fs_config..."
+            tg_progress "🏷️ Generating system contexts..."
+
+            SYS_CONTEXTS="$SYSTEM_PROJECT/config/system_file_contexts"
+            SYS_FS_CONFIG="$SYSTEM_PROJECT/config/system_fs_config"
+
+            cat > "$WORK_DIR/system_context_gen.py" << 'SYSCTX_PY'
+import os, sys, re
+from re import escape as re_escape
+
+system_dir    = sys.argv[1]
+out_ctx       = sys.argv[2]
+orig_ctx      = sys.argv[3] if len(sys.argv) > 3 else ""
+out_fs        = sys.argv[4] if len(sys.argv) > 4 else ""
+orig_fs       = sys.argv[5] if len(sys.argv) > 5 else ""
+my_ctx_file   = sys.argv[6] if len(sys.argv) > 6 else ""
+
+def str_to_selinux(s):
+    if s.endswith('(/.*)?'):
+        return s
+    return re_escape(s).replace('\\-', '-')
+
+# PHASE 1: Load base contexts
+base = {}
+for f in [orig_ctx, my_ctx_file]:
+    if f and os.path.isfile(f):
+        with open(f, 'r', encoding='utf-8', errors='replace') as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                parts = line.split()
+                if len(parts) >= 2:
+                    base[parts[0]] = parts[1]
+print(f"Loaded {len(base)} base context entries")
+
+# PHASE 2: Context rules for new files
+def get_ctx(rel, fname):
+    if '/bin/' in rel or '/xbin/' in rel:
+        return "u:object_r:system_file:s0"
+    if '/lib/' in rel or '/lib64/' in rel:
+        return "u:object_r:system_lib_file:s0"
+    if fname.endswith('.apk'):
+        return "u:object_r:system_app_file:s0"
+    if '/priv-app/' in rel or '/app/' in rel:
+        return "u:object_r:system_app_file:s0"
+    if '/etc/' in rel:
+        return "u:object_r:system_file:s0"
+    return "u:object_r:system_file:s0"
+
+def get_dir_ctx(rel):
+    if '/lib' in rel:
+        return "u:object_r:system_lib_file:s0"
+    if '/app' in rel or '/priv-app' in rel:
+        return "u:object_r:system_app_file:s0"
+    return "u:object_r:system_file:s0"
+
+# PHASE 3: Walk filesystem
+merged = dict(base)
+add_count = 0
+part = os.path.basename(system_dir)
+
+for path, ctx in [('/', 'u:object_r:system_file:s0'),
+                   (f'/{part}', 'u:object_r:system_file:s0'),
+                   (f'/{part}/', 'u:object_r:system_file:s0')]:
+    if path not in merged:
+        merged[path] = ctx
+
+for root, dirs, files in os.walk(system_dir):
+    dirs.sort(); files.sort()
+    for d in sorted(dirs):
+        rel = os.path.join(root, d).replace(os.path.dirname(system_dir), '').replace('\\', '/').lstrip('/')
+        if not rel.startswith('/'):
+            rel = '/' + rel
+        esc = str_to_selinux(rel)
+        if esc not in merged:
+            merged[esc] = get_dir_ctx(rel)
+            add_count += 1
+    for f in sorted(files):
+        rel = os.path.join(root, f).replace(os.path.dirname(system_dir), '').replace('\\', '/').lstrip('/')
+        if not rel.startswith('/'):
+            rel = '/' + rel
+        esc = str_to_selinux(rel)
+        if esc not in merged:
+            merged[esc] = get_ctx(rel, f)
+            add_count += 1
+
+# PHASE 4: Write contexts
+with open(out_ctx, 'w', newline='\n') as fh:
+    for p in sorted(merged.keys()):
+        fh.write(f"{p} {merged[p]}\n")
+print(f"Contexts: {len(base)} base + {add_count} new = {len(merged)} total")
+
+# PHASE 5: fs_config
+if out_fs:
+    base_fs = {}
+    if orig_fs and os.path.isfile(orig_fs):
+        with open(orig_fs, 'r', encoding='utf-8', errors='replace') as fh:
+            for line in fh:
+                parts = line.strip().split()
+                if len(parts) >= 4:
+                    base_fs[parts[0]] = parts[1:]
+    fs = dict(base_fs)
+    fs_add = 0
+    if '/' not in fs: fs['/'] = ['0','0','0755']
+    if part not in fs: fs[part] = ['0','2000','0755']
+    for root, dirs, files in os.walk(system_dir):
+        dirs.sort(); files.sort()
+        for d in sorted(dirs):
+            rel = os.path.join(root, d).replace(os.path.dirname(system_dir), '').replace('\\', '/').lstrip('/')
+            if rel not in fs:
+                gid = '2000' if '/bin' in rel else '0'
+                fs[rel] = ['0', gid, '0755']
+                fs_add += 1
+        for f in sorted(files):
+            rel = os.path.join(root, f).replace(os.path.dirname(system_dir), '').replace('\\', '/').lstrip('/')
+            if rel not in fs:
+                if '/bin/' in rel:
+                    fs[rel] = ['0','2000','0750' if f.endswith('.sh') else '0755']
+                else:
+                    fs[rel] = ['0','0','0644']
+                fs_add += 1
+    with open(out_fs, 'w', newline='\n') as fh:
+        for p in sorted(fs.keys()):
+            fh.write(f"{p} {' '.join(fs[p])}\n")
+    print(f"fs_config: {len(base_fs)} base + {fs_add} new = {len(fs)} total")
+SYSCTX_PY
+
+            python3 "$WORK_DIR/system_context_gen.py" \
+                "$SYSTEM_PROJECT/system" \
+                "$SYS_CONTEXTS" \
+                "$SYSTEM_PROJECT/config/system_file_contexts.orig" \
+                "$SYS_FS_CONFIG" \
+                "$SYSTEM_PROJECT/config/system_fs_config.orig" \
+                "$SYSTEM_PROJECT/config/my_combined_contexts.tmp"
+
+            SYSTEM_USE_CONTEXTS=false
+            if [ -f "$SYS_CONTEXTS" ] && [ -f "$SYS_FS_CONFIG" ]; then
+                SYS_CTX_LINES=$(wc -l < "$SYS_CONTEXTS")
+                SYS_FS_LINES=$(wc -l < "$SYS_FS_CONFIG")
+                if [ "$SYS_CTX_LINES" -gt 100 ] && [ "$SYS_FS_LINES" -gt 100 ]; then
+                    log_success "System file_contexts: $SYS_CTX_LINES entries"
+                    log_success "System fs_config: $SYS_FS_LINES entries"
+                    SYSTEM_USE_CONTEXTS=true
+                else
+                    log_warning "System contexts too small — will repack without"
+                fi
+            fi
+
+            rm -f "$WORK_DIR/system_context_gen.py" \
+                  "$SYSTEM_PROJECT/config/system_file_contexts.orig" \
+                  "$SYSTEM_PROJECT/config/system_fs_config.orig" \
+                  "$SYSTEM_PROJECT/config/my_combined_contexts.tmp"
+
+            # --- Repack system.img ---
+            log_step "📦 Repacking system images..."
+            tg_progress "📦 Repacking system images..."
+
+            MKFS_BIN="$SCRIPT_DIR/bin/mkfs.erofs"
+            [ ! -f "$MKFS_BIN" ] && MKFS_BIN="mkfs.erofs"
+
+            PATCHED_SYSTEM="$OUTPUT_DIR/system.img"
+            S_ARGS="-zlz4hc,9 -T 1230768000 --mount-point=/system"
+            if [ "$SYSTEM_USE_CONTEXTS" = true ]; then
+                S_ARGS="$S_ARGS --file-contexts=$SYS_CONTEXTS"
+                S_ARGS="$S_ARGS --fs-config-file=$SYS_FS_CONFIG"
+            fi
+            $MKFS_BIN $S_ARGS "$PATCHED_SYSTEM" "$SYSTEM_PROJECT/system" 2>&1 | tail -5
+
+            S_SIZE=$(stat -c%s "$PATCHED_SYSTEM" 2>/dev/null || echo 0)
+            if [ "$S_SIZE" -lt 10485760 ]; then
+                log_warning "system.img too small (${S_SIZE}B) — retrying without contexts..."
+                rm -f "$PATCHED_SYSTEM"
+                $MKFS_BIN -zlz4hc,9 -T 1230768000 --mount-point=/system \
+                    "$PATCHED_SYSTEM" "$SYSTEM_PROJECT/system" 2>&1 | tail -5
+                S_SIZE=$(stat -c%s "$PATCHED_SYSTEM" 2>/dev/null || echo 0)
+            fi
+
+            if [ "$S_SIZE" -gt 10485760 ]; then
+                log_success "system.img repacked: $(du -h "$PATCHED_SYSTEM" | cut -f1)"
+                SYSTEM_MERGE_OK=true
+            else
+                log_error "system.img repack failed"
+                rm -f "$PATCHED_SYSTEM"
+            fi
+            rm -rf "$SYSTEM_PROJECT/system"
+
+            # --- Repack system_ext.img (unchanged, just repack) ---
+            PATCHED_SYSTEM_EXT="$OUTPUT_DIR/system_ext.img"
+            if [ -d "$SYSTEM_PROJECT/system_ext" ] && [ "$(ls -A "$SYSTEM_PROJECT/system_ext" 2>/dev/null)" ]; then
+                E_ARGS="-zlz4hc,9 -T 1230768000 --mount-point=/system_ext"
+                [ -f "$SYSTEM_PROJECT/config/system_ext_file_contexts" ] && \
+                    E_ARGS="$E_ARGS --file-contexts=$SYSTEM_PROJECT/config/system_ext_file_contexts"
+                [ -f "$SYSTEM_PROJECT/config/system_ext_fs_config" ] && \
+                    E_ARGS="$E_ARGS --fs-config-file=$SYSTEM_PROJECT/config/system_ext_fs_config"
+                $MKFS_BIN $E_ARGS "$PATCHED_SYSTEM_EXT" "$SYSTEM_PROJECT/system_ext" 2>&1 | tail -5
+
+                E_SIZE=$(stat -c%s "$PATCHED_SYSTEM_EXT" 2>/dev/null || echo 0)
+                if [ "$E_SIZE" -gt 1048576 ]; then
+                    log_success "system_ext.img repacked: $(du -h "$PATCHED_SYSTEM_EXT" | cut -f1)"
+                else
+                    log_error "system_ext.img repack failed"
+                    rm -f "$PATCHED_SYSTEM_EXT"
+                fi
+                rm -rf "$SYSTEM_PROJECT/system_ext"
+            fi
+
+            # --- Repack product.img (unchanged, just repack) ---
+            PATCHED_PRODUCT="$OUTPUT_DIR/product.img"
+            if [ -d "$SYSTEM_PROJECT/product" ] && [ "$(ls -A "$SYSTEM_PROJECT/product" 2>/dev/null)" ]; then
+                P_ARGS="-zlz4hc,9 -T 1230768000 --mount-point=/product"
+                [ -f "$SYSTEM_PROJECT/config/product_file_contexts" ] && \
+                    P_ARGS="$P_ARGS --file-contexts=$SYSTEM_PROJECT/config/product_file_contexts"
+                [ -f "$SYSTEM_PROJECT/config/product_fs_config" ] && \
+                    P_ARGS="$P_ARGS --fs-config-file=$SYSTEM_PROJECT/config/product_fs_config"
+                $MKFS_BIN $P_ARGS "$PATCHED_PRODUCT" "$SYSTEM_PROJECT/product" 2>&1 | tail -5
+
+                P_SIZE=$(stat -c%s "$PATCHED_PRODUCT" 2>/dev/null || echo 0)
+                if [ "$P_SIZE" -gt 1048576 ]; then
+                    log_success "product.img repacked: $(du -h "$PATCHED_PRODUCT" | cut -f1)"
+                else
+                    log_error "product.img repack failed"
+                    rm -f "$PATCHED_PRODUCT"
+                fi
+                rm -rf "$SYSTEM_PROJECT/product"
+            fi
+
+            rm -rf "$SYSTEM_PROJECT"
+            log_disk
+        else
+            log_warning "System unpack failed — skipping system merge"
+            rm -f "$OPLUS_SYSTEM_IMG" "$OPLUS_SYSTEM_EXT_IMG" "$OPLUS_PRODUCT_IMG"
+        fi
+    else
+        log_warning "Disk too low for system merge — skipping"
+        rm -f "$OPLUS_SYSTEM_IMG"
+    fi
+else
+    log_info "No OPLUS system.img — system merge skipped"
+fi
+
+# Delete any remaining my_* images that weren't processed
+rm -f "$OPLUS_MY_MANIFEST_IMG" "$OPLUS_MY_STOCK_IMG" "$OPLUS_MY_HEYTAP_IMG" \
+      "$OPLUS_MY_CARRIER_IMG" "$OPLUS_MY_REGION_IMG" "$OPLUS_MY_BIGBALL_IMG" \
+      "$OPLUS_MY_ENGINEERING_IMG" "$OPLUS_MY_PRODUCT_IMG" 2>/dev/null
+log_disk
+
+# =========================================================
+#  12. CREATE ZIP FILES + UPLOAD
+# =========================================================
+log_step "☁️  Creating zips and uploading..."
+tg_progress "☁️ Creating zips and uploading..."
+
+# --- Upload helpers (all logging to stderr to avoid URL poisoning) ---
 upload_pixeldrain() {
     local file="$1"
+    local fname=$(basename "$file")
     local response=""
 
     if [ -n "$PIXELDRAIN_KEY" ]; then
-        log_info "Uploading to PixelDrain (authenticated)..."
+        log_info "Uploading $fname to PixelDrain (authenticated)..." >&2
         response=$(curl -s -T "$file" \
             -u ":$PIXELDRAIN_KEY" \
-            "https://pixeldrain.com/api/file/odm.img")
+            "https://pixeldrain.com/api/file/$fname")
     else
-        log_info "Uploading to PixelDrain (anonymous)..."
+        log_info "Uploading $fname to PixelDrain (anonymous)..." >&2
         response=$(curl -s -T "$file" \
-            "https://pixeldrain.com/api/file/odm.img")
+            "https://pixeldrain.com/api/file/$fname")
     fi
 
     local pd_id=$(echo "$response" | jq -r '.id // empty')
@@ -1177,20 +1779,16 @@ upload_pixeldrain() {
         echo "https://pixeldrain.com/u/$pd_id"
         return 0
     else
-        log_error "PixelDrain failed: $(echo "$response" | jq -r '.message // .value // "unknown error"')"
+        log_error "PixelDrain failed: $(echo "$response" | jq -r '.message // .value // "unknown error"')" >&2
         return 1
     fi
 }
 
-# --- Fallback: GoFile ---
 upload_gofile() {
     local file="$1"
-    log_info "Uploading to GoFile (fallback)..."
+    log_info "Uploading $(basename "$file") to GoFile (fallback)..." >&2
 
-    # Get best server
     local server=$(curl -s "https://api.gofile.io/servers" | jq -r '.data.servers[0].name // "store1"')
-    log_info "GoFile server: $server"
-
     local response=$(curl -s -F "file=@$file" "https://${server}.gofile.io/contents/uploadfile")
     local dl_url=$(echo "$response" | jq -r '.data.downloadPage // empty')
 
@@ -1198,29 +1796,73 @@ upload_gofile() {
         echo "$dl_url"
         return 0
     else
-        log_error "GoFile failed: $response"
+        log_error "GoFile failed: $response" >&2
         return 1
     fi
 }
 
-# Try PixelDrain first, then GoFile
-UPLOAD_LINK=$(upload_pixeldrain "$PATCHED_ODM") || \
-UPLOAD_LINK=$(upload_gofile "$PATCHED_ODM") || \
-UPLOAD_LINK="UPLOAD_FAILED"
+# --- Create ZIP files ---
+cd "$OUTPUT_DIR"
 
-if [ "$UPLOAD_LINK" != "UPLOAD_FAILED" ]; then
-    log_success "Upload complete: $UPLOAD_LINK"
+# ZIP 1: ODM + Vendor (always includes odm.img, conditionally includes vendor.img)
+ODM_ZIP_FILES="odm.img"
+[ "$VENDOR_PATCH_OK" = true ] && [ -f "vendor.img" ] && ODM_ZIP_FILES="$ODM_ZIP_FILES vendor.img"
+zip -0 odm_patched.zip $ODM_ZIP_FILES 2>/dev/null
+ODM_ZIP_SIZE=$(du -h "odm_patched.zip" 2>/dev/null | cut -f1)
+log_success "Created odm_patched.zip: $ODM_ZIP_SIZE (contains: $ODM_ZIP_FILES)"
+
+# ZIP 2: System images (only if system merge succeeded)
+SYSTEM_ZIP_OK=false
+SYSTEM_ZIP_FILES=""
+[ -f "system.img" ] && SYSTEM_ZIP_FILES="$SYSTEM_ZIP_FILES system.img"
+[ -f "system_ext.img" ] && SYSTEM_ZIP_FILES="$SYSTEM_ZIP_FILES system_ext.img"
+[ -f "product.img" ] && SYSTEM_ZIP_FILES="$SYSTEM_ZIP_FILES product.img"
+
+if [ -n "$SYSTEM_ZIP_FILES" ]; then
+    zip -0 system_patched.zip $SYSTEM_ZIP_FILES 2>/dev/null
+    SYS_ZIP_SIZE=$(du -h "system_patched.zip" 2>/dev/null | cut -f1)
+    log_success "Created system_patched.zip: $SYS_ZIP_SIZE"
+    SYSTEM_ZIP_OK=true
 else
-    log_error "All upload methods failed"
+    log_info "No system images to zip — system_patched.zip not created"
+fi
+
+# Remove loose .img files (zips are the deliverables)
+rm -f odm.img vendor.img system.img system_ext.img product.img
+cd "$WORK_DIR"
+
+# --- Upload ODM zip ---
+ODM_UPLOAD_LINK=$(upload_pixeldrain "$OUTPUT_DIR/odm_patched.zip") || \
+ODM_UPLOAD_LINK=$(upload_gofile "$OUTPUT_DIR/odm_patched.zip") || \
+ODM_UPLOAD_LINK="UPLOAD_FAILED"
+
+[ "$ODM_UPLOAD_LINK" != "UPLOAD_FAILED" ] && log_success "ODM zip uploaded: $ODM_UPLOAD_LINK"
+
+# --- Upload System zip ---
+SYSTEM_UPLOAD_LINK="NOT_CREATED"
+if [ "$SYSTEM_ZIP_OK" = true ]; then
+    SYSTEM_UPLOAD_LINK=$(upload_pixeldrain "$OUTPUT_DIR/system_patched.zip") || \
+    SYSTEM_UPLOAD_LINK=$(upload_gofile "$OUTPUT_DIR/system_patched.zip") || \
+    SYSTEM_UPLOAD_LINK="UPLOAD_FAILED"
+
+    [ "$SYSTEM_UPLOAD_LINK" != "UPLOAD_FAILED" ] && log_success "System zip uploaded: $SYSTEM_UPLOAD_LINK"
+fi
+
+# --- Upload tool itself (best-effort) ---
+TOOL_UPLOAD_LINK=""
+if [ -f "$SCRIPT_DIR/oplus_odm_patcher.sh" ]; then
+    TOOL_UPLOAD_LINK=$(upload_pixeldrain "$SCRIPT_DIR/oplus_odm_patcher.sh") || \
+    TOOL_UPLOAD_LINK=""
+    [ -n "$TOOL_UPLOAD_LINK" ] && log_success "Tool uploaded: $TOOL_UPLOAD_LINK"
 fi
 
 # =========================================================
-#  11. CLEANUP
+#  13. CLEANUP
 # =========================================================
 log_step "🧹 Cleaning up..."
 
-rm -rf "$OPLUS_PROJECT" "$XIAOMI_PROJECT" "$OPLUS_DL" "$XIAOMI_DL"
-# Keep the output dir with the patched image
+rm -rf "$OPLUS_PROJECT" "$XIAOMI_PROJECT" "$SYSTEM_PROJECT" "$OPLUS_DL" "$XIAOMI_DL" \
+       "$WORK_DIR/vendor_project" 2>/dev/null
 
 SCRIPT_END=$(date +%s)
 ELAPSED=$((SCRIPT_END - SCRIPT_START))
@@ -1228,31 +1870,50 @@ ELAPSED_MIN=$((ELAPSED / 60))
 ELAPSED_SEC=$((ELAPSED % 60))
 
 # =========================================================
-#  12. FINAL TELEGRAM NOTIFICATION
+#  14. FINAL TELEGRAM NOTIFICATION
 # =========================================================
 log_step "📤 Sending result..."
 
-if [ "$UPLOAD_LINK" != "UPLOAD_FAILED" ]; then
-    FINAL_MSG="✅ *OPLUS ODM Patch Complete*
+if [ "$ODM_UPLOAD_LINK" != "UPLOAD_FAILED" ] || [ "$SYSTEM_UPLOAD_LINK" != "UPLOAD_FAILED" ] && [ "$SYSTEM_UPLOAD_LINK" != "NOT_CREATED" ]; then
+    FINAL_MSG="✅ *OPLUS ODM Patcher Complete*
 
-📦 *Files Injected:* \`$INJECT_COUNT\`
+📦 *ODM Files Injected:* \`$INJECT_COUNT\`
 ⏱ *Time:* ${ELAPSED_MIN}m ${ELAPSED_SEC}s
 
-📥 *Download:*
-[Patched odm.img]($UPLOAD_LINK)
+📥 *Downloads:*"
 
-_Flash this odm.img to replace your stock Xiaomi ODM._"
+    [ "$ODM_UPLOAD_LINK" != "UPLOAD_FAILED" ] && \
+        FINAL_MSG="$FINAL_MSG
+[📱 odm\\_patched.zip]($ODM_UPLOAD_LINK)"
+    [ "$VENDOR_PATCH_OK" = true ] && \
+        FINAL_MSG="$FINAL_MSG _(includes vendor with AVB-disabled fstab)_"
+
+    if [ "$SYSTEM_UPLOAD_LINK" != "NOT_CREATED" ] && [ "$SYSTEM_UPLOAD_LINK" != "UPLOAD_FAILED" ]; then
+        FINAL_MSG="$FINAL_MSG
+[🗂️ system\\_patched.zip]($SYSTEM_UPLOAD_LINK) _(system + system\\_ext + product)_"
+    elif [ "$SYSTEM_ZIP_OK" = true ] && [ "$SYSTEM_UPLOAD_LINK" = "UPLOAD_FAILED" ]; then
+        FINAL_MSG="$FINAL_MSG
+⚠️ system\\_patched.zip upload failed"
+    fi
+
+    [ -n "$TOOL_UPLOAD_LINK" ] && \
+        FINAL_MSG="$FINAL_MSG
+[🔧 OPLUS HyperOS Modder Tool]($TOOL_UPLOAD_LINK)"
+
+    FINAL_MSG="$FINAL_MSG
+
+_ODM: Xiaomi ODM patched with OPLUS HALs_
+_System: merged my\\_\\* overlays into base system_"
 else
-    FINAL_MSG="⚠️ *ODM Patch Finished (Upload Failed)*
-
-📦 *Files Injected:* \`$INJECT_COUNT\`
-⏱ *Time:* ${ELAPSED_MIN}m ${ELAPSED_SEC}s
-
-❌ Upload failed. Check logs for details."
+    FINAL_MSG="⚠️ *Patcher Finished — All Uploads Failed*
+⏱ Time: ${ELAPSED_MIN}m ${ELAPSED_SEC}s
+Check runner logs for details."
 fi
 
 tg_send "$FINAL_MSG"
 
 log_success "=== OPLUS ODM PATCHER COMPLETE ==="
 log_info "Injected: $INJECT_COUNT files | Time: ${ELAPSED_MIN}m ${ELAPSED_SEC}s"
-[ "$UPLOAD_LINK" != "UPLOAD_FAILED" ] && log_info "Download: $UPLOAD_LINK"
+[ "$ODM_UPLOAD_LINK" != "UPLOAD_FAILED" ] && log_info "ODM: $ODM_UPLOAD_LINK"
+[ "$SYSTEM_UPLOAD_LINK" != "UPLOAD_FAILED" ] && [ "$SYSTEM_UPLOAD_LINK" != "NOT_CREATED" ] && \
+    log_info "System: $SYSTEM_UPLOAD_LINK"
