@@ -314,16 +314,45 @@ log_info "OPLUS ODM contents: $(ls "$OPLUS_ODM_DIR" 2>/dev/null | tr '\n' ' ')"
 log_info "Xiaomi ODM contents: $(ls "$XIAOMI_ODM_DIR" 2>/dev/null | tr '\n' ' ')"
 
 # =========================================================
-#  5. HAL INJECTION ENGINE
+#  5. HAL INJECTION ENGINE (Refined — Working Build Analysis)
 # =========================================================
 log_step "💉 Injecting OPLUS HALs into Xiaomi ODM..."
 tg_progress "💉 Injecting OPLUS HALs..."
 
 INJECT_COUNT=0
 INJECT_ERRORS=0
+SKIP_COUNT=0
 
-# Helper: copy a file/dir from OPLUS to Xiaomi, preserving permissions
+# Helper: copy a file from OPLUS to Xiaomi with NO-CLOBBER protection
+# Never overwrites existing Xiaomi-native files
 inject_file() {
+    local src="$1"
+    local dst="$2"
+
+    if [ -d "$src" ]; then
+        mkdir -p "$dst"
+        # Use cp -a --no-clobber to preserve Xiaomi originals
+        cp -a -n "$src/"* "$dst/" 2>/dev/null
+        local count=$(find "$src" -type f | wc -l)
+        INJECT_COUNT=$((INJECT_COUNT + count))
+        log_success "  ✓ Injected dir: $(basename "$src") ($count files)"
+    elif [ -f "$src" ]; then
+        mkdir -p "$(dirname "$dst")"
+        if [ -f "$dst" ]; then
+            # File already exists — skip to preserve Xiaomi native
+            SKIP_COUNT=$((SKIP_COUNT + 1))
+            return 0
+        fi
+        cp -a "$src" "$dst" 2>/dev/null
+        INJECT_COUNT=$((INJECT_COUNT + 1))
+        log_success "  ✓ Injected: $(basename "$src")"
+    else
+        INJECT_ERRORS=$((INJECT_ERRORS + 1))
+    fi
+}
+
+# Force-inject: overwrites even if destination exists (for OPLUS-specific HALs)
+inject_file_force() {
     local src="$1"
     local dst="$2"
 
@@ -332,27 +361,29 @@ inject_file() {
         cp -a "$src/"* "$dst/" 2>/dev/null
         local count=$(find "$src" -type f | wc -l)
         INJECT_COUNT=$((INJECT_COUNT + count))
-        log_success "  ✓ Injected dir: $(basename "$src") ($count files)"
+        log_success "  ✓ Force-injected dir: $(basename "$src") ($count files)"
     elif [ -f "$src" ]; then
         mkdir -p "$(dirname "$dst")"
         cp -a "$src" "$dst" 2>/dev/null
         INJECT_COUNT=$((INJECT_COUNT + 1))
         log_success "  ✓ Injected: $(basename "$src")"
     else
-        # log_warning "  ✗ Not found: $src" # Reduce noise
         INJECT_ERRORS=$((INJECT_ERRORS + 1))
     fi
 }
 
-# KEYWORDS for HAL filtering
-KEYWORDS="oplus|oppo|vendor.oplus|vendor-oplus|charger|performance|powermonitor|olc|stability|power.stats|osense|gaia|handlefactory|nfc|biometrics|fingerprint|face|vibrator|touch|sensor|wifi|transfer|transmessage|crypto|esim|fido|rpmh|urcc|gameopt|display|camera|cwb|engineer|subsys|radio|keymint|weaver|virtual_device|misc|osml|binaural|hypnus"
+# ===========================================================
+# HAL KEYWORDS — Only essential OPLUS components
+# Based on analysis of working booted ODM (no hardcoded versions)
+# ===========================================================
+# Core OPLUS HALs: power, performance, charger, OLC, stability
+OPLUS_HAL_KW="oplus|oppo|vendor.oplus|vendor-oplus|charger|performance|powermonitor|olc|stability|power.stats|power_stats|osense|gaia|handlefactory"
+# NFC stack: NXP, OPLUS NFC, Secure Element, ESE
+NFC_KW="nfc|nxp|secure_element|esepowermanager|pnscr|sn100|sn220|nq_client|nfc_nci|se_nq|ls_nq|jcos|omapi|mifare"
+# Combined keyword filter (version-agnostic — matches V1, V2, V5, V6, @1.0, @1.2, etc.)
+KEYWORDS="$OPLUS_HAL_KW|$NFC_KW"
 
-# --- Root Init RC Files (init.oplus.*.rc) ---
-log_info "Injecting root init RC files..."
-tg_progress "💉 Injecting root init scripts..."
-for rc_file in "$OPLUS_ODM_DIR/init.oplus."*.rc; do
-    [ -f "$rc_file" ] && inject_file "$rc_file" "$XIAOMI_ODM_DIR/$(basename "$rc_file")"
-done
+log_info "HAL filter keywords: $KEYWORDS"
 
 # --- bin/hw/ — HAL service binaries ---
 log_info "Injecting HAL binaries (bin/hw)..."
@@ -361,88 +392,137 @@ if [ -d "$OPLUS_ODM_DIR/bin/hw" ]; then
     for hal_bin in "$OPLUS_ODM_DIR/bin/hw/"*; do
         [ -f "$hal_bin" ] || continue
         fname=$(basename "$hal_bin")
-        if echo "$fname" | grep -qE "$KEYWORDS"; then
-            inject_file "$hal_bin" "$XIAOMI_ODM_DIR/bin/hw/$fname"
+        if echo "$fname" | grep -qiE "$KEYWORDS"; then
+            inject_file_force "$hal_bin" "$XIAOMI_ODM_DIR/bin/hw/$fname"
         fi
     done
 fi
 
-# --- bin/ — Shell scripts and standalone binaries ---
+# --- bin/ — OPLUS scripts and standalone NFC binaries ---
 log_info "Injecting bin/ scripts..."
 if [ -d "$OPLUS_ODM_DIR/bin" ]; then
     for bin_file in "$OPLUS_ODM_DIR/bin/"*; do
         [ -f "$bin_file" ] || continue
         fname=$(basename "$bin_file")
-        if echo "$fname" | grep -qE "$KEYWORDS"; then
+        if echo "$fname" | grep -qiE "$KEYWORDS"; then
              inject_file "$bin_file" "$XIAOMI_ODM_DIR/bin/$fname"
         fi
     done
 fi
-# Always inject specific performance script if exists
-[ -f "$OPLUS_ODM_DIR/bin/oplus_performance.sh" ] && inject_file "$OPLUS_ODM_DIR/bin/oplus_performance.sh" "$XIAOMI_ODM_DIR/bin/oplus_performance.sh"
+# Always inject performance script if present
+[ -f "$OPLUS_ODM_DIR/bin/oplus_performance.sh" ] && inject_file_force "$OPLUS_ODM_DIR/bin/oplus_performance.sh" "$XIAOMI_ODM_DIR/bin/oplus_performance.sh"
 
 # --- lib/ & lib64/ — Shared Libraries ---
 for arch in "lib" "lib64"; do
     log_info "Injecting $arch/..."
     tg_progress "💉 Injecting $arch/..."
     
-    # 1. Main dir
+    # Main dir (.so files)
     if [ -d "$OPLUS_ODM_DIR/$arch" ]; then
         for lib_file in "$OPLUS_ODM_DIR/$arch/"*.so; do
             [ -f "$lib_file" ] || continue
             fname=$(basename "$lib_file")
-            if echo "$fname" | grep -qE "$KEYWORDS"; then
+            if echo "$fname" | grep -qiE "$KEYWORDS"; then
                 inject_file "$lib_file" "$XIAOMI_ODM_DIR/$arch/$fname"
             fi
         done
     fi
 
-    # 2. hw/ subdir (HAL implementations)
+    # hw/ subdir (HAL implementations — e.g. esepowermanager impl)
     if [ -d "$OPLUS_ODM_DIR/$arch/hw" ]; then
         log_info "Injecting $arch/hw/..."
+        mkdir -p "$XIAOMI_ODM_DIR/$arch/hw"
         for lib_file in "$OPLUS_ODM_DIR/$arch/hw/"*.so; do
             [ -f "$lib_file" ] || continue
             fname=$(basename "$lib_file")
-            # Inject PROPER OPLUS HALs (usually contain oplus/oppo/specific names)
-            if echo "$fname" | grep -qE "$KEYWORDS"; then
+            if echo "$fname" | grep -qiE "$KEYWORDS"; then
                 inject_file "$lib_file" "$XIAOMI_ODM_DIR/$arch/hw/$fname"
             fi
         done
     fi
 done
 
-# --- firmware/ ---
-log_info "Injecting firmware/..."
-if [ -d "$OPLUS_ODM_DIR/firmware" ]; then
-    # Inject contents recursively (fastchg, etc.)
-    cp -a "$OPLUS_ODM_DIR/firmware/"* "$XIAOMI_ODM_DIR/firmware/" 2>/dev/null
-    log_success "  ✓ Injected firmware/ contents"
+# --- firmware/ (fastchg only — from working build) ---
+log_info "Injecting firmware/fastchg..."
+tg_progress "💉 Injecting firmware..."
+if [ -d "$OPLUS_ODM_DIR/firmware/fastchg" ]; then
+    mkdir -p "$XIAOMI_ODM_DIR/firmware/fastchg"
+    cp -a -n "$OPLUS_ODM_DIR/firmware/fastchg/"* "$XIAOMI_ODM_DIR/firmware/fastchg/" 2>/dev/null
+    local_count=$(find "$OPLUS_ODM_DIR/firmware/fastchg" -type f | wc -l)
+    INJECT_COUNT=$((INJECT_COUNT + local_count))
+    log_success "  ✓ Injected firmware/fastchg ($local_count files)"
+elif [ -d "$OPLUS_ODM_DIR/firmware" ]; then
+    mkdir -p "$XIAOMI_ODM_DIR/firmware"
+    cp -a -n "$OPLUS_ODM_DIR/firmware/"* "$XIAOMI_ODM_DIR/firmware/" 2>/dev/null
+    log_success "  ✓ Injected firmware/ contents (fallback)"
 fi
 
 # --- etc/ — Configs, Init, VINTF, Permissions ---
 log_info "Injecting etc/ configs..."
 tg_progress "💉 Injecting configs & manifests..."
 
-# Subdirectories to scan
-for subdir in "init" "vintf/manifest" "permissions"; do
-    if [ -d "$OPLUS_ODM_DIR/etc/$subdir" ]; then
-        for item in "$OPLUS_ODM_DIR/etc/$subdir/"*; do
-            [ -f "$item" ] || continue
-            fname=$(basename "$item")
-            if echo "$fname" | grep -qE "$KEYWORDS"; then
-                inject_file "$item" "$XIAOMI_ODM_DIR/etc/$subdir/$fname"
-            fi
-        done
-    fi
-done
+# etc/init/ — Init RC files matching keywords
+if [ -d "$OPLUS_ODM_DIR/etc/init" ]; then
+    log_info "Injecting etc/init/..."
+    mkdir -p "$XIAOMI_ODM_DIR/etc/init"
+    for item in "$OPLUS_ODM_DIR/etc/init/"*; do
+        [ -f "$item" ] || continue
+        fname=$(basename "$item")
+        if echo "$fname" | grep -qiE "$KEYWORDS"; then
+            inject_file_force "$item" "$XIAOMI_ODM_DIR/etc/init/$fname"
+        fi
+    done
+fi
 
-# Specific config dirs/files
+# etc/vintf/manifest/ — VINTF manifest XMLs matching keywords
+if [ -d "$OPLUS_ODM_DIR/etc/vintf/manifest" ]; then
+    log_info "Injecting etc/vintf/manifest/..."
+    mkdir -p "$XIAOMI_ODM_DIR/etc/vintf/manifest"
+    for item in "$OPLUS_ODM_DIR/etc/vintf/manifest/"*; do
+        [ -f "$item" ] || continue
+        fname=$(basename "$item")
+        if echo "$fname" | grep -qiE "$KEYWORDS"; then
+            inject_file_force "$item" "$XIAOMI_ODM_DIR/etc/vintf/manifest/$fname"
+        fi
+    done
+fi
+
+# etc/permissions/ — Permission XMLs (including subdirectories like sku_marble/)
+if [ -d "$OPLUS_ODM_DIR/etc/permissions" ]; then
+    log_info "Injecting etc/permissions/ (recursive)..."
+    # Walk all files recursively under permissions/
+    find "$OPLUS_ODM_DIR/etc/permissions" -type f | while read -r item; do
+        rel=$(realpath --relative-to="$OPLUS_ODM_DIR/etc/permissions" "$item")
+        fname=$(basename "$item")
+        if echo "$fname" | grep -qiE "$KEYWORDS"; then
+            dst_dir=$(dirname "$XIAOMI_ODM_DIR/etc/permissions/$rel")
+            mkdir -p "$dst_dir"
+            inject_file_force "$item" "$XIAOMI_ODM_DIR/etc/permissions/$rel"
+        fi
+    done
+fi
+
+# etc/nfc/ — Complete NFC config directory (configs, firmware, pnscr scripts)
+if [ -d "$OPLUS_ODM_DIR/etc/nfc" ]; then
+    log_info "Injecting etc/nfc/ directory..."
+    inject_file "$OPLUS_ODM_DIR/etc/nfc" "$XIAOMI_ODM_DIR/etc/nfc"
+fi
+
+# etc/dolby/ — Dolby configs
+if [ -d "$OPLUS_ODM_DIR/etc/dolby" ]; then
+    log_info "Injecting etc/dolby/ directory..."
+    inject_file "$OPLUS_ODM_DIR/etc/dolby" "$XIAOMI_ODM_DIR/etc/dolby"
+fi
+
+# Specific config dirs/files (power, thermal)
 inject_file "$OPLUS_ODM_DIR/etc/ThermalServiceConfig" "$XIAOMI_ODM_DIR/etc/ThermalServiceConfig"
 inject_file "$OPLUS_ODM_DIR/etc/power_profile" "$XIAOMI_ODM_DIR/etc/power_profile"
 inject_file "$OPLUS_ODM_DIR/etc/power_save" "$XIAOMI_ODM_DIR/etc/power_save"
 inject_file "$OPLUS_ODM_DIR/etc/temperature_profile" "$XIAOMI_ODM_DIR/etc/temperature_profile"
-[ -f "$OPLUS_ODM_DIR/etc/custom_power.cfg" ] && inject_file "$OPLUS_ODM_DIR/etc/custom_power.cfg" "$XIAOMI_ODM_DIR/etc/custom_power.cfg"
-[ -f "$OPLUS_ODM_DIR/etc/power_stats_config.xml" ] && inject_file "$OPLUS_ODM_DIR/etc/power_stats_config.xml" "$XIAOMI_ODM_DIR/etc/power_stats_config.xml"
+[ -f "$OPLUS_ODM_DIR/etc/custom_power.cfg" ] && inject_file_force "$OPLUS_ODM_DIR/etc/custom_power.cfg" "$XIAOMI_ODM_DIR/etc/custom_power.cfg"
+[ -f "$OPLUS_ODM_DIR/etc/power_stats_config.xml" ] && inject_file_force "$OPLUS_ODM_DIR/etc/power_stats_config.xml" "$XIAOMI_ODM_DIR/etc/power_stats_config.xml"
+
+log_info "Injection summary: $INJECT_COUNT injected, $SKIP_COUNT skipped (Xiaomi native preserved), $INJECT_ERRORS not found"
 
 
 # =========================================================
@@ -622,12 +702,12 @@ log_disk
 
 
 # =========================================================
-#  7. CONTEXT MERGE ENGINE (Full Filesystem Walk)
+#  7. CONTEXT GENERATION ENGINE (Matches working ODM format)
 # =========================================================
 log_step "🏷️  Generating file_contexts..."
 tg_progress "🏷️ Generating file_contexts..."
 
-# Free disk: delete OPLUS project NOW
+# Free disk: delete OPLUS project NOW (injection is done)
 log_info "Deleting OPLUS project to free disk..."
 rm -rf "$OPLUS_PROJECT"
 log_disk
@@ -635,10 +715,13 @@ log_disk
 XIAOMI_CONTEXTS="$XIAOMI_CONFIG/odm_file_contexts"
 mkdir -p "$XIAOMI_CONFIG"
 
-# New Python Engine: Walks the entire FINAL file structure
+# Python Engine: Walks the FINAL merged filesystem and assigns
+# SELinux contexts matching the exact format from working booted ODM.
+# Version-agnostic — handles V1, V5, V6, @1.0, @1.2, etc.
 cat > "$WORK_DIR/context_gen.py" << 'PYEOF'
 import os
 import sys
+import re
 
 odm_dir = sys.argv[1]
 out_file = sys.argv[2]
@@ -646,89 +729,137 @@ out_file = sys.argv[2]
 print(f"Generating contexts for: {odm_dir}")
 entries = []
 
-# Base dir entries
+# Static base entries
+entries.append("/ u:object_r:vendor_file:s0")
 entries.append("/odm u:object_r:vendor_file:s0")
-entries.append("/odm/lost\+found u:object_r:vendor_file:s0")
+entries.append("/odm/ u:object_r:vendor_file:s0")
+entries.append("/odm/lost\\+found u:object_r:vendor_file:s0")
 
-total = 0
+total_files = 0
+total_dirs = 0
 
+def escape_path(p):
+    """Escape special regex chars in path for file_contexts format."""
+    # Escape dots and plus signs (common in Android paths)
+    p = p.replace('.', '\\.').replace('+', '\\+')
+    # Convert backslashes to forward slashes (Windows compat)
+    p = p.replace('\\', '/')
+    return p
+
+def get_dir_context(rel_path):
+    """Assign SELinux context to a directory."""
+    # etc/ and all subdirs under it
+    if rel_path == 'odm/etc' or rel_path.startswith('odm/etc/'):
+        return "u:object_r:vendor_configs_file:s0"
+    # lib/hw and lib64/hw directories
+    if re.match(r'odm/lib(64)?/hw$', rel_path):
+        return "u:object_r:vendor_hal_file:s0"
+    # firmware/ subdirs
+    if rel_path.startswith('odm/firmware/'):
+        return "u:object_r:vendor_configs_file:s0"
+    if rel_path == 'odm/firmware':
+        return "u:object_r:vendor_file:s0"
+    # Default: vendor_file for bin, lib, lib64, etc.
+    return "u:object_r:vendor_file:s0"
+
+def get_file_context(rel_path, fname):
+    """Assign SELinux context to a file based on working ODM analysis."""
+    
+    # ===== BINARIES =====
+    if rel_path.startswith('odm/bin/hw/'):
+        # NXP NFC HAL
+        if 'nxp' in fname and 'nfc' in fname:
+            return "u:object_r:hal_nfc_default_exec:s0"
+        # QTI Secure Element
+        if 'secure_element' in fname:
+            return "u:object_r:hal_secure_element_default_exec:s0"
+        # QTI ESE Power Manager
+        if 'esepowermanager' in fname:
+            return "u:object_r:vendor_hal_esepowermanager_qti_exec:s0"
+        # Xiaomi Mikeybag (not in bin/hw, but handle just in case)
+        if 'mikeybag' in fname:
+            return "u:object_r:hal_mikeybag_default_exec:s0"
+        # All OPLUS HALs (charger, performance, powermonitor, olc, stability, nfc_aidl, nfcExtns, etc.)
+        return "u:object_r:hal_allocator_default_exec:s0"
+    
+    if rel_path.startswith('odm/bin/'):
+        # Xiaomi mikeybag service (in bin/, not bin/hw/)
+        if 'mikeybag' in fname:
+            return "u:object_r:hal_mikeybag_default_exec:s0"
+        # nqnfcinfo binary
+        if 'nqnfcinfo' in fname:
+            return "u:object_r:vendor_nqnfcinfo_exec:s0"
+        # OPLUS performance script
+        if 'oplus_performance' in fname:
+            return "u:object_r:hal_allocator_default_exec:s0"
+        return "u:object_r:vendor_file:s0"
+    
+    # ===== build.prop at ODM root =====
+    if rel_path == 'odm/build.prop':
+        return "u:object_r:vendor_file:s0"
+    
+    # ===== LIBRARIES =====
+    # lib/hw/ and lib64/hw/ — HAL implementation .so files
+    if re.match(r'odm/lib(64)?/hw/', rel_path):
+        return "u:object_r:vendor_file:s0"  # Files inside hw/ dir
+    
+    if re.match(r'odm/lib(64)?/', rel_path):
+        # osense client libs -> same_process_hal_file
+        if 'osense' in fname and 'client' in fname:
+            return "u:object_r:same_process_hal_file:s0"
+        return "u:object_r:vendor_file:s0"
+    
+    # ===== CONFIGS / ETC =====
+    if rel_path.startswith('odm/etc/'):
+        # SELinux precompiled sepolicy
+        if 'selinux/precompiled_sepolicy' in rel_path and not fname.endswith('.sha256'):
+            return "u:object_r:sepolicy_file:s0"
+        # build.prop under etc/
+        if fname == 'build.prop':
+            return "u:object_r:vendor_file:s0"
+        # Everything else in etc/ is vendor_configs_file
+        return "u:object_r:vendor_configs_file:s0"
+    
+    # ===== FIRMWARE =====
+    if rel_path.startswith('odm/firmware/'):
+        return "u:object_r:vendor_configs_file:s0"
+    
+    # Default fallback
+    return "u:object_r:vendor_file:s0"
+
+# Walk the entire ODM directory
 for root, dirs, files in os.walk(odm_dir):
+    # Sort for consistent output
+    dirs.sort()
+    files.sort()
+    
     # Handle directories
-    for d in dirs:
+    for d in sorted(dirs):
         full_path = os.path.join(root, d)
         rel_path = os.path.relpath(full_path, os.path.dirname(odm_dir))
+        rel_path = rel_path.replace('\\', '/')  # Windows compat
         
-        # Path escaping for regex
-        regex_path = '/' + rel_path.replace('.', '\\.').replace('+', '\\+')
-        
-        # Directory contexts
-        if rel_path == 'odm/bin':
-            ctx = "u:object_r:vendor_file:s0"
-        elif rel_path == 'odm/etc':
-             ctx = "u:object_r:vendor_configs_file:s0"
-        elif rel_path.startswith('odm/firmware'):
-             ctx = "u:object_r:vendor_file:s0"
-        else:
-             ctx = "u:object_r:vendor_file:s0"
-        
+        regex_path = '/' + escape_path(rel_path)
+        ctx = get_dir_context(rel_path)
         entries.append(f"{regex_path} {ctx}")
+        total_dirs += 1
 
     # Handle files
-    for f in files:
+    for f in sorted(files):
         full_path = os.path.join(root, f)
         rel_path = os.path.relpath(full_path, os.path.dirname(odm_dir))
+        rel_path = rel_path.replace('\\', '/')  # Windows compat
         
-        regex_path = '/' + rel_path.replace('.', '\\.').replace('+', '\\+')
-        
-        # --- CONTEXT RULES ---
-        ctx = "u:object_r:vendor_file:s0" # Default
-        
-        # 1. BINARIES
-        if rel_path.startswith('odm/bin/hw/'):
-            # OPLUS HALs -> hal_allocator or specific
-            if any(k in f for k in ['xiaomi', 'qti', 'nxp', 'mikeybag']):
-                # Native Xiaomi/QCom HALs - try to guess or use specific defaults
-                if 'mikeybag' in f: ctx = "u:object_r:hal_mikeybag_default_exec:s0"
-                elif 'nxp' in f: ctx = "u:object_r:hal_nfc_default_exec:s0"
-                elif 'secure_element' in f: ctx = "u:object_r:hal_secure_element_default_exec:s0"
-                elif 'esepowermanager' in f: ctx = "u:object_r:vendor_hal_esepowermanager_qti_exec:s0"
-                else: ctx = "u:object_r:vendor_file:s0" # Safety fallback
-            else:
-                # OPLUS HALs
-                ctx = "u:object_r:hal_allocator_default_exec:s0"
-        
-        elif rel_path.startswith('odm/bin/'):
-            if 'nqnfcinfo' in f: ctx = "u:object_r:vendor_nqnfcinfo_exec:s0"
-            else: ctx = "u:object_r:vendor_file:s0"
-
-        # 2. LIBRARIES
-        elif rel_path.startswith('odm/lib/') or rel_path.startswith('odm/lib64/'):
-            if '/hw/' in rel_path:
-                ctx = "u:object_r:vendor_hal_file:s0"
-            elif 'osense' in f and 'client' in f:
-                ctx = "u:object_r:same_process_hal_file:s0"
-            else:
-                ctx = "u:object_r:vendor_file:s0"
-
-        # 3. CONFIGS / ETC
-        elif rel_path.startswith('odm/etc/'):
-            if 'selinux/precompiled_sepolicy' in rel_path:
-                ctx = "u:object_r:sepolicy_file:s0"
-            else:
-                ctx = "u:object_r:vendor_configs_file:s0"
-        
-        # 4. FIRMWARE
-        elif rel_path.startswith('odm/firmware/'):
-            ctx = "u:object_r:vendor_configs_file:s0"
-
+        regex_path = '/' + escape_path(rel_path)
+        ctx = get_file_context(rel_path, f)
         entries.append(f"{regex_path} {ctx}")
-        total += 1
+        total_files += 1
 
-with open(out_file, 'w') as f:
-    f.write('\n'.join(entries))
-    f.write('\n')
+with open(out_file, 'w') as fh:
+    fh.write('\n'.join(entries))
+    fh.write('\n')
 
-print(f"Generated {total} contexts.")
+print(f"Generated contexts: {total_files} files, {total_dirs} dirs")
 PYEOF
 
 python3 "$WORK_DIR/context_gen.py" "$XIAOMI_ODM_DIR" "$XIAOMI_CONTEXTS"
