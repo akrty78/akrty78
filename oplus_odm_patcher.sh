@@ -7,6 +7,7 @@
 set +e
 
 SCRIPT_START=$(date +%s)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # --- COLOR CODES ---
 RED='\033[0;31m'
@@ -239,36 +240,57 @@ unpack_odm() {
 
     mkdir -p "$project_dir"
 
-    # Try extract.erofs first (produces odm/ + config/)
-    if [ -f "$BIN_DIR/extract.erofs" ]; then
-        log_info "Unpacking $label with extract.erofs..."
+    # === PRIMARY: Use bundled extract.erofs (extracts xattrs = SELinux contexts) ===
+    local EROFS_BIN="$SCRIPT_DIR/bin/extract.erofs"
+    if [ -f "$EROFS_BIN" ]; then
+        chmod +x "$EROFS_BIN" 2>/dev/null
+        log_info "Unpacking $label with bundled extract.erofs -x..."
         cd "$project_dir"
-        "$BIN_DIR/extract.erofs" -i "$img" -x -o . 2>&1 | tail -5
+        "$EROFS_BIN" -i "$img" -x 2>&1 | tail -5
 
         # extract.erofs puts files in odm/ and config in config/
         if [ -d "$project_dir/odm" ] && [ "$(ls -A $project_dir/odm 2>/dev/null)" ]; then
-            log_success "$label unpacked with extract.erofs"
+            log_success "$label unpacked with extract.erofs (xattrs extracted)"
+            # Check if config was produced
+            if [ -f "$project_dir/config/odm_file_contexts" ]; then
+                local ctx_lines=$(wc -l < "$project_dir/config/odm_file_contexts")
+                log_success "  → Found odm_file_contexts ($ctx_lines entries)"
+            fi
+            if [ -f "$project_dir/config/odm_fs_config" ]; then
+                local fs_lines=$(wc -l < "$project_dir/config/odm_fs_config")
+                log_success "  → Found odm_fs_config ($fs_lines entries)"
+            fi
             cd "$WORK_DIR"
             return 0
         fi
     fi
 
-    # Fallback: fsck.erofs --extract
+    # === FALLBACK 1: System extract.erofs ===
+    if command -v extract.erofs &>/dev/null; then
+        log_info "Trying system extract.erofs for $label..."
+        cd "$project_dir"
+        extract.erofs -i "$img" -x 2>&1 | tail -5
+        if [ -d "$project_dir/odm" ] && [ "$(ls -A $project_dir/odm 2>/dev/null)" ]; then
+            log_success "$label unpacked with system extract.erofs"
+            cd "$WORK_DIR"
+            return 0
+        fi
+    fi
+
+    # === FALLBACK 2: fsck.erofs --extract (NO xattrs) ===
     log_info "Trying fsck.erofs for $label..."
     mkdir -p "$project_dir/odm"
     fsck.erofs --extract="$project_dir/odm" "$img" 2>&1 | tail -3
 
     if [ "$(ls -A $project_dir/odm 2>/dev/null)" ]; then
         log_success "$label unpacked with fsck.erofs"
-        # fsck.erofs doesn't produce config/, we generate file_contexts from the image
+        log_warning "fsck.erofs does NOT extract xattrs — contexts must be generated from scratch"
         mkdir -p "$project_dir/config"
-        # Dump file_contexts from EROFS extended attributes if possible
-        log_warning "config/odm_file_contexts may need manual population for $label"
         cd "$WORK_DIR"
         return 0
     fi
 
-    # Fallback: erofsfuse mount
+    # === FALLBACK 3: erofsfuse mount ===
     log_info "Trying erofsfuse mount for $label..."
     local mnt="$project_dir/mnt_tmp"
     mkdir -p "$mnt"
@@ -734,9 +756,10 @@ log_disk
 
 
 # =========================================================
-#  7. CONTEXT GENERATION ENGINE (Merge-based)
-#     Merges Xiaomi original contexts + generates new entries
-#     for injected OPLUS files.
+#  7. CONTEXT GENERATION ENGINE (MIO-KITCHEN approach)
+#     Merges Xiaomi original contexts (from extract.erofs)
+#     + generates new entries for injected OPLUS files with
+#     proper OPLUS HAL contexts.
 # =========================================================
 log_step "🏷️  Generating file_contexts..."
 tg_progress "🏷️ Generating file_contexts..."
@@ -747,88 +770,85 @@ rm -rf "$OPLUS_PROJECT"
 log_disk
 
 XIAOMI_CONTEXTS="$XIAOMI_CONFIG/odm_file_contexts"
+XIAOMI_FS_CONFIG="$XIAOMI_CONFIG/odm_fs_config"
 mkdir -p "$XIAOMI_CONFIG"
 
-# Check if Xiaomi already has an odm_file_contexts (from extract.erofs)
-XIAOMI_ORIG_CONTEXTS=""
+# Check if Xiaomi already has contexts (from extract.erofs -x)
 if [ -f "$XIAOMI_CONTEXTS" ] && [ -s "$XIAOMI_CONTEXTS" ]; then
-    XIAOMI_ORIG_CONTEXTS="$XIAOMI_CONTEXTS"
-    log_info "Found existing Xiaomi file_contexts ($(wc -l < "$XIAOMI_ORIG_CONTEXTS") entries)"
-    # Back up original before we regenerate
-    cp "$XIAOMI_ORIG_CONTEXTS" "$XIAOMI_CONTEXTS.orig"
+    log_info "Found existing Xiaomi file_contexts ($(wc -l < "$XIAOMI_CONTEXTS") entries)"
+    cp "$XIAOMI_CONTEXTS" "$XIAOMI_CONTEXTS.orig"
 fi
 
-# Python Engine: Walks the FINAL merged filesystem and assigns SELinux contexts.
-# If Xiaomi original contexts exist, use them as base and add new entries only.
-# Version-agnostic — handles V1, V5, V6, @1.0, @1.2, etc.
+# Python Engine: MIO-KITCHEN-style context patching
+# 1. Read existing Xiaomi contexts as base dict (path -> context)
+# 2. Walk the FINAL merged filesystem
+# 3. For each path: re.escape() for SELinux-safe path escaping
+# 4. If path exists in base -> keep original context
+# 5. If path is NEW -> assign OPLUS HAL context rules
+# 6. Write sorted merged output
 cat > "$WORK_DIR/context_gen.py" << 'PYEOF'
 import os
 import sys
 import re
+from re import escape as re_escape
 
 odm_dir = sys.argv[1]
 out_file = sys.argv[2]
 orig_ctx_file = sys.argv[3] if len(sys.argv) > 3 else ""
 
-print(f"Generating contexts for: {odm_dir}")
+print(f"Context engine: {odm_dir}")
 
-# ==== PHASE 1: Load existing Xiaomi contexts as base ====
-existing_paths = set()  # Paths already covered by Xiaomi
-base_entries = []
+# ==== MIO-KITCHEN str_to_selinux ====
+def str_to_selinux(s):
+    """Escape path for file_contexts format (like MIO-KITCHEN)."""
+    if s.endswith('(/.*)?'):
+        return s
+    escaped = re_escape(s).replace('\\-', '-')
+    return escaped
+
+# ==== PHASE 1: Load existing Xiaomi contexts ====
+base_contexts = {}  # path -> context
 
 if orig_ctx_file and os.path.isfile(orig_ctx_file):
     print(f"Loading existing contexts from: {orig_ctx_file}")
-    with open(orig_ctx_file, 'r') as f:
+    with open(orig_ctx_file, 'r', encoding='utf-8') as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith('#'):
                 continue
-            base_entries.append(line)
-            # Extract the path (first field before space)
             parts = line.split()
-            if parts:
-                existing_paths.add(parts[0])
-    print(f"Loaded {len(base_entries)} existing entries")
+            if len(parts) >= 2:
+                base_contexts[parts[0]] = parts[1]
+    print(f"Loaded {len(base_contexts)} existing Xiaomi contexts")
 else:
-    # No existing contexts — add static base entries
-    base_entries.append("/ u:object_r:vendor_file:s0")
-    base_entries.append("/odm u:object_r:vendor_file:s0")
-    base_entries.append("/odm/ u:object_r:vendor_file:s0")
-    base_entries.append("/odm/lost\\+found u:object_r:vendor_file:s0")
-    for p in base_entries:
-        existing_paths.add(p.split()[0])
+    print("No existing contexts found — generating from scratch")
 
-# ==== PHASE 2: Helper functions ====
-def escape_path(p):
-    """Escape special regex chars for file_contexts format."""
-    p = p.replace('.', '\\.').replace('+', '\\+').replace('(', '\\(').replace(')', '\\)')
-    p = p.replace('\\', '/')  # Windows compat
-    return p
-
-def get_dir_context(rel_path):
-    if rel_path == 'odm/etc' or rel_path.startswith('odm/etc/'):
-        return "u:object_r:vendor_configs_file:s0"
-    if re.match(r'odm/lib(64)?/hw$', rel_path):
-        return "u:object_r:vendor_hal_file:s0"
-    if rel_path.startswith('odm/firmware/'):
-        return "u:object_r:vendor_configs_file:s0"
-    if rel_path == 'odm/firmware':
-        return "u:object_r:vendor_file:s0"
-    return "u:object_r:vendor_file:s0"
-
-def get_file_context(rel_path, fname):
-    # BINARIES
-    if rel_path.startswith('odm/bin/hw/'):
+# ==== PHASE 2: OPLUS HAL Context Rules ====
+# These are the OPLUS-specific contexts that differ from Xiaomi defaults.
+# Xiaomi uses different context types for their HALs.
+def get_oplus_context(rel_path, fname):
+    """Assign SELinux context for OPLUS-injected files.
+    Xiaomi-original files should keep their original contexts from base_contexts.
+    This function is ONLY called for NEW files not in the base."""
+    
+    # ===== BINARIES (bin/hw/) =====
+    if '/bin/hw/' in rel_path:
+        # NXP NFC HAL
         if 'nxp' in fname and 'nfc' in fname:
             return "u:object_r:hal_nfc_default_exec:s0"
+        # QTI Secure Element
         if 'secure_element' in fname:
             return "u:object_r:hal_secure_element_default_exec:s0"
+        # QTI ESE Power Manager
         if 'esepowermanager' in fname:
             return "u:object_r:vendor_hal_esepowermanager_qti_exec:s0"
+        # Xiaomi Mikeybag
         if 'mikeybag' in fname:
             return "u:object_r:hal_mikeybag_default_exec:s0"
+        # All OPLUS HALs: charger, performance, powermonitor, olc, stability, nfc_aidl, nfcExtns
         return "u:object_r:hal_allocator_default_exec:s0"
-    if rel_path.startswith('odm/bin/'):
+    
+    if '/bin/' in rel_path:
         if 'mikeybag' in fname:
             return "u:object_r:hal_mikeybag_default_exec:s0"
         if 'nqnfcinfo' in fname:
@@ -836,85 +856,116 @@ def get_file_context(rel_path, fname):
         if 'oplus_performance' in fname:
             return "u:object_r:hal_allocator_default_exec:s0"
         return "u:object_r:vendor_file:s0"
-    # build.prop files
-    if fname == 'build.prop' or fname.endswith('_build.prop'):
+    
+    # ===== LIBRARIES =====
+    if re.match(r'.*/lib(64)?/hw/', rel_path):
         return "u:object_r:vendor_file:s0"
-    if fname == 'nexdroid.prop':
-        return "u:object_r:vendor_file:s0"
-    if fname.endswith('.prop'):
-        return "u:object_r:vendor_file:s0"
-    # LIBRARIES
-    if re.match(r'odm/lib(64)?/hw/', rel_path):
-        return "u:object_r:vendor_file:s0"
-    if re.match(r'odm/lib(64)?/', rel_path):
+    if re.match(r'.*/lib(64)?/', rel_path):
         if 'osense' in fname and 'client' in fname:
             return "u:object_r:same_process_hal_file:s0"
         return "u:object_r:vendor_file:s0"
-    # ETC / CONFIGS
-    if rel_path.startswith('odm/etc/'):
+    
+    # ===== PROPS =====
+    if fname.endswith('.prop'):
+        return "u:object_r:vendor_file:s0"
+    
+    # ===== ETC / CONFIGS =====
+    if '/etc/' in rel_path:
         if 'selinux/precompiled_sepolicy' in rel_path and not fname.endswith('.sha256'):
             return "u:object_r:sepolicy_file:s0"
         if fname == 'build.prop':
             return "u:object_r:vendor_file:s0"
         return "u:object_r:vendor_configs_file:s0"
-    # FIRMWARE
-    if rel_path.startswith('odm/firmware/'):
+    
+    # ===== FIRMWARE =====
+    if '/firmware/' in rel_path:
+        return "u:object_r:vendor_configs_file:s0"
+    
+    return "u:object_r:vendor_file:s0"
+
+def get_dir_context(rel_path):
+    """Context for directories."""
+    if '/etc' in rel_path:
+        return "u:object_r:vendor_configs_file:s0"
+    if re.match(r'.*/lib(64)?/hw$', rel_path):
+        return "u:object_r:vendor_hal_file:s0"
+    if '/firmware/' in rel_path:
         return "u:object_r:vendor_configs_file:s0"
     return "u:object_r:vendor_file:s0"
 
-# ==== PHASE 3: Walk filesystem and add NEW entries ====
-new_entries = []
-new_files = 0
-new_dirs = 0
+# ==== PHASE 3: Walk filesystem (MIO-KITCHEN scan_dir approach) ====
+part_name = os.path.basename(odm_dir)  # 'odm'
+merged = dict(base_contexts)  # Start with existing contexts
+add_count = 0
 
+# Static base entries (always include)
+static_entries = [
+    ('/', 'u:object_r:vendor_file:s0'),
+    ('/lost+found', 'u:object_r:vendor_file:s0'),
+    (f'/{part_name}', 'u:object_r:vendor_file:s0'),
+    (f'/{part_name}/', 'u:object_r:vendor_file:s0'),
+    (f'/{part_name}/lost\\+found', 'u:object_r:vendor_file:s0'),
+]
+for path, ctx in static_entries:
+    if path not in merged:
+        merged[path] = ctx
+
+# Walk the entire ODM directory
 for root, dirs, files in os.walk(odm_dir):
     dirs.sort()
     files.sort()
     
     for d in sorted(dirs):
         full_path = os.path.join(root, d)
-        rel_path = os.path.relpath(full_path, os.path.dirname(odm_dir))
-        rel_path = rel_path.replace('\\', '/')
-        regex_path = '/' + escape_path(rel_path)
+        # Build path relative to parent: /odm/bin/hw
+        rel = os.path.join(root, d).replace(os.path.dirname(odm_dir), '').replace('\\', '/')
+        if not rel.startswith('/'):
+            rel = '/' + rel
+        escaped = str_to_selinux(rel)
         
-        if regex_path not in existing_paths:
-            ctx = get_dir_context(rel_path)
-            new_entries.append(f"{regex_path} {ctx}")
-            new_dirs += 1
-
+        if escaped not in merged:
+            ctx = get_dir_context(rel)
+            merged[escaped] = ctx
+            add_count += 1
+    
     for f in sorted(files):
         full_path = os.path.join(root, f)
-        rel_path = os.path.relpath(full_path, os.path.dirname(odm_dir))
-        rel_path = rel_path.replace('\\', '/')
-        regex_path = '/' + escape_path(rel_path)
+        rel = os.path.join(root, f).replace(os.path.dirname(odm_dir), '').replace('\\', '/')
+        if not rel.startswith('/'):
+            rel = '/' + rel
+        escaped = str_to_selinux(rel)
         
-        if regex_path not in existing_paths:
-            ctx = get_file_context(rel_path, f)
-            new_entries.append(f"{regex_path} {ctx}")
-            new_files += 1
+        if escaped not in merged:
+            ctx = get_oplus_context(rel, f)
+            merged[escaped] = ctx
+            add_count += 1
 
-# ==== PHASE 4: Write merged output ====
-with open(out_file, 'w') as fh:
-    # Write existing base entries first
-    for entry in base_entries:
-        fh.write(entry + '\n')
-    # Append new entries
-    if new_entries:
-        fh.write('\n# === Injected OPLUS entries ===\n')
-        for entry in new_entries:
-            fh.write(entry + '\n')
+# ==== PHASE 4: Write sorted output ====
+with open(out_file, 'w', newline='\n') as fh:
+    for path in sorted(merged.keys()):
+        fh.write(f"{path} {merged[path]}\n")
 
-total = len(base_entries) + len(new_entries)
-print(f"Context merge complete: {len(base_entries)} existing + {new_files} new files + {new_dirs} new dirs = {total} total")
+print(f"Context complete: {len(base_contexts)} existing + {add_count} new = {len(merged)} total entries")
 PYEOF
 
 # Run with optional original contexts file
-if [ -n "$XIAOMI_ORIG_CONTEXTS" ]; then
+if [ -f "$XIAOMI_CONTEXTS.orig" ]; then
     python3 "$WORK_DIR/context_gen.py" "$XIAOMI_ODM_DIR" "$XIAOMI_CONTEXTS" "$XIAOMI_CONTEXTS.orig"
 else
     python3 "$WORK_DIR/context_gen.py" "$XIAOMI_ODM_DIR" "$XIAOMI_CONTEXTS"
 fi
-log_success "Context generation complete"
+
+# Verify contexts were generated properly
+if [ -f "$XIAOMI_CONTEXTS" ]; then
+    CTX_LINES=$(wc -l < "$XIAOMI_CONTEXTS")
+    log_success "Context generation complete: $CTX_LINES entries"
+    # Quick sanity check: should have at least 100 entries for a real ODM
+    if [ "$CTX_LINES" -lt 50 ]; then
+        log_warning "Context file seems too small ($CTX_LINES entries)! Check for errors."
+    fi
+else
+    log_error "Context generation FAILED — no output file!"
+fi
 rm -f "$WORK_DIR/context_gen.py" "$XIAOMI_CONTEXTS.orig"
 
 
@@ -933,53 +984,54 @@ ODM_SIZE=$((ODM_SIZE + ODM_SIZE / 10))
 log_info "ODM dir size: $(du -sh "$XIAOMI_ODM_DIR" | cut -f1), allocating $(numfmt --to=iec $ODM_SIZE)"
 
 # Try mkfs.erofs first (most Xiaomi devices use EROFS)
-if command -v mkfs.erofs &>/dev/null; then
+# Try bundled mkfs.erofs first (has libselinux + fs-config support)
+MKFS_BIN="$SCRIPT_DIR/bin/mkfs.erofs"
+if [ -f "$MKFS_BIN" ]; then
+    chmod +x "$MKFS_BIN" 2>/dev/null
+    log_info "Using bundled mkfs.erofs (with libselinux)..."
+    MKFS_CMD="$MKFS_BIN"
+elif command -v mkfs.erofs &>/dev/null; then
+    log_info "Using system mkfs.erofs..."
+    MKFS_CMD="mkfs.erofs"
+else
+    log_error "mkfs.erofs not found!"
+    MKFS_CMD=""
+fi
+
+if [ -n "$MKFS_CMD" ]; then
     log_info "Repacking with mkfs.erofs..."
     tg_progress "📦 Repacking ODM (mkfs.erofs)..."
-    EROFS_VER=$(mkfs.erofs --version 2>&1 | head -1 || echo "unknown")
+    EROFS_VER=$($MKFS_CMD --version 2>&1 | head -1 || echo "unknown")
     log_info "mkfs.erofs version: $EROFS_VER"
 
-    # Probe which flags are actually supported
-    EROFS_HELP=$(mkfs.erofs --help 2>&1 || true)
-    EROFS_ARGS="-zlz4hc"
-
-    # Check for lz4hc compression level support
-    if echo "$EROFS_HELP" | grep -q "lz4hc,"; then
-        EROFS_ARGS="-zlz4hc,9"
+    # Build args — MIO-KITCHEN pattern
+    EROFS_ARGS="-zlz4hc,9 -T 1230768000 --mount-point=/odm"
+    
+    # file-contexts (SELinux labels)
+    if [ -f "$XIAOMI_CONTEXTS" ] && [ -s "$XIAOMI_CONTEXTS" ]; then
+        EROFS_ARGS="$EROFS_ARGS --file-contexts=$XIAOMI_CONTEXTS"
+        log_info "Using file_contexts: $XIAOMI_CONTEXTS ($(wc -l < "$XIAOMI_CONTEXTS") entries)"
     fi
 
-    # Only use --file-contexts if the build actually supports it (requires libselinux)
-    if echo "$EROFS_HELP" | grep -q "\-\-file-contexts"; then
-        if [ -f "$XIAOMI_CONTEXTS" ] && [ -s "$XIAOMI_CONTEXTS" ]; then
-            EROFS_ARGS="$EROFS_ARGS --file-contexts=$XIAOMI_CONTEXTS"
-            log_info "Using file_contexts: $XIAOMI_CONTEXTS"
-        fi
-    else
-        log_warning "mkfs.erofs does not support --file-contexts (needs libselinux build)"
+    # fs-config (ownership + permissions)
+    if [ -f "$XIAOMI_FS_CONFIG" ] && [ -s "$XIAOMI_FS_CONFIG" ]; then
+        EROFS_ARGS="$EROFS_ARGS --fs-config-file=$XIAOMI_FS_CONFIG"
+        log_info "Using fs_config: $XIAOMI_FS_CONFIG ($(wc -l < "$XIAOMI_FS_CONFIG") entries)"
     fi
 
-    # Only use --fs-config-file if supported
-    if echo "$EROFS_HELP" | grep -q "\-\-fs-config-file"; then
-        if [ -f "$XIAOMI_FS_CONFIG" ] && [ -s "$XIAOMI_FS_CONFIG" ]; then
-            EROFS_ARGS="$EROFS_ARGS --fs-config-file=$XIAOMI_FS_CONFIG"
-            log_info "Using fs_config: $XIAOMI_FS_CONFIG"
-        fi
-    else
-        log_warning "mkfs.erofs does not support --fs-config-file"
-    fi
+    # product-out (for MIO-KITCHEN compat)
+    EROFS_ARGS="$EROFS_ARGS --product-out=$XIAOMI_PROJECT"
 
     log_info "EROFS args: $EROFS_ARGS"
 
-    mkfs.erofs $EROFS_ARGS \
-        -T 1230768000 \
-        --mount-point=/odm \
+    $MKFS_CMD $EROFS_ARGS \
         "$PATCHED_ODM" \
         "$XIAOMI_ODM_DIR" 2>&1 | tail -5
 
     if [ ! -f "$PATCHED_ODM" ] || [ ! -s "$PATCHED_ODM" ]; then
-        log_error "EROFS repack failed, retrying with minimal flags..."
+        log_warning "Repack failed with full args, retrying minimal..."
         rm -f "$PATCHED_ODM"
-        mkfs.erofs -zlz4hc \
+        $MKFS_CMD -zlz4hc \
             --mount-point=/odm \
             "$PATCHED_ODM" \
             "$XIAOMI_ODM_DIR" 2>&1 | tail -5
