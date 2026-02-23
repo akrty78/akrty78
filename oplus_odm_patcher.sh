@@ -940,33 +940,118 @@ for root, dirs, files in os.walk(odm_dir):
             merged[escaped] = ctx
             add_count += 1
 
-# ==== PHASE 4: Write sorted output ====
+# ==== PHASE 4: Write sorted file_contexts ====
 with open(out_file, 'w', newline='\n') as fh:
     for path in sorted(merged.keys()):
         fh.write(f"{path} {merged[path]}\n")
 
 print(f"Context complete: {len(base_contexts)} existing + {add_count} new = {len(merged)} total entries")
+
+# ==== PHASE 5: Generate fs_config (MIO-KITCHEN fspatch approach) ====
+# fs_config format: path uid gid mode [capabilities] [link_target]
+fs_config_file = sys.argv[4] if len(sys.argv) > 4 else ""
+if fs_config_file:
+    print(f"Generating fs_config: {fs_config_file}")
+    
+    # Load existing fs_config as base
+    base_fs = {}
+    orig_fs_file = fs_config_file + ".orig"
+    if os.path.isfile(orig_fs_file):
+        with open(orig_fs_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split()
+                if len(parts) >= 4:
+                    base_fs[parts[0]] = parts[1:]
+        print(f"Loaded {len(base_fs)} existing fs_config entries")
+    
+    # Walk filesystem and generate entries for ALL files
+    fs_entries = dict(base_fs)
+    fs_add = 0
+    
+    # Static base entries
+    if '/' not in fs_entries:
+        fs_entries['/'] = ['0', '0', '0755']
+    if 'odm' not in fs_entries:
+        fs_entries['odm'] = ['0', '2000', '0755']
+    
+    for root, dirs, files in os.walk(odm_dir):
+        dirs.sort()
+        files.sort()
+        
+        for d in sorted(dirs):
+            full_path = os.path.join(root, d)
+            # fs_config uses paths like: odm/bin/hw (NO leading slash)
+            rel = full_path.replace(os.path.dirname(odm_dir), '').replace('\\\\', '/').lstrip('/')
+            
+            if rel not in fs_entries:
+                # Directories: 0 gid 0755
+                gid = '2000' if '/bin' in rel else '0'
+                fs_entries[rel] = ['0', gid, '0755']
+                fs_add += 1
+        
+        for f in sorted(files):
+            full_path = os.path.join(root, f)
+            rel = full_path.replace(os.path.dirname(odm_dir), '').replace('\\\\', '/').lstrip('/')
+            
+            if rel not in fs_entries:
+                # Files: determine mode based on path
+                if '/bin/' in rel or '/bin' == rel.rsplit('/', 1)[0]:
+                    # Executables
+                    gid = '2000'
+                    mode = '0750' if f.endswith('.sh') else '0755'
+                elif f.endswith('.sh'):
+                    gid = '0'
+                    mode = '0750'
+                else:
+                    gid = '0'
+                    mode = '0644'
+                fs_entries[rel] = ['0', gid, mode]
+                fs_add += 1
+    
+    # Write sorted fs_config
+    with open(fs_config_file, 'w', newline='\n') as fh:
+        for path in sorted(fs_entries.keys()):
+            fh.write(f"{path} {' '.join(fs_entries[path])}\n")
+    
+    print(f"fs_config complete: {len(base_fs)} existing + {fs_add} new = {len(fs_entries)} total entries")
 PYEOF
 
-# Run with optional original contexts file
+# Back up existing fs_config if it exists
+if [ -f "$XIAOMI_FS_CONFIG" ] && [ -s "$XIAOMI_FS_CONFIG" ]; then
+    log_info "Found existing Xiaomi fs_config ($(wc -l < "$XIAOMI_FS_CONFIG") entries)"
+    cp "$XIAOMI_FS_CONFIG" "$XIAOMI_FS_CONFIG.orig"
+fi
+
+# Run with optional original contexts file + fs_config output
 if [ -f "$XIAOMI_CONTEXTS.orig" ]; then
-    python3 "$WORK_DIR/context_gen.py" "$XIAOMI_ODM_DIR" "$XIAOMI_CONTEXTS" "$XIAOMI_CONTEXTS.orig"
+    python3 "$WORK_DIR/context_gen.py" "$XIAOMI_ODM_DIR" "$XIAOMI_CONTEXTS" "$XIAOMI_CONTEXTS.orig" "$XIAOMI_FS_CONFIG"
 else
-    python3 "$WORK_DIR/context_gen.py" "$XIAOMI_ODM_DIR" "$XIAOMI_CONTEXTS"
+    python3 "$WORK_DIR/context_gen.py" "$XIAOMI_ODM_DIR" "$XIAOMI_CONTEXTS" "" "$XIAOMI_FS_CONFIG"
 fi
 
 # Verify contexts were generated properly
 if [ -f "$XIAOMI_CONTEXTS" ]; then
     CTX_LINES=$(wc -l < "$XIAOMI_CONTEXTS")
     log_success "Context generation complete: $CTX_LINES entries"
-    # Quick sanity check: should have at least 100 entries for a real ODM
     if [ "$CTX_LINES" -lt 50 ]; then
         log_warning "Context file seems too small ($CTX_LINES entries)! Check for errors."
     fi
 else
     log_error "Context generation FAILED — no output file!"
 fi
-rm -f "$WORK_DIR/context_gen.py" "$XIAOMI_CONTEXTS.orig"
+
+# Verify fs_config
+if [ -f "$XIAOMI_FS_CONFIG" ]; then
+    FS_LINES=$(wc -l < "$XIAOMI_FS_CONFIG")
+    log_success "fs_config generation complete: $FS_LINES entries"
+else
+    log_warning "fs_config not generated — mkfs.erofs will use defaults"
+fi
+
+rm -f "$WORK_DIR/context_gen.py" "$XIAOMI_CONTEXTS.orig" "$XIAOMI_FS_CONFIG.orig"
 
 
 # =========================================================
