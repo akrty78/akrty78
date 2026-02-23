@@ -1912,7 +1912,7 @@ ELAPSED_SEC=$((ELAPSED % 60))
 # =========================================================
 log_step "📤 Sending result..."
 
-if [ "$ODM_UPLOAD_LINK" != "UPLOAD_FAILED" ] || [ "$SYSTEM_UPLOAD_LINK" != "UPLOAD_FAILED" ] && [ "$SYSTEM_UPLOAD_LINK" != "NOT_CREATED" ]; then
+if [ "$ODM_UPLOAD_LINK" != "UPLOAD_FAILED" ] || { [ "$SYSTEM_UPLOAD_LINK" != "UPLOAD_FAILED" ] && [ "$SYSTEM_UPLOAD_LINK" != "NOT_CREATED" ]; }; then
     FINAL_MSG="✅ *OPLUS ODM Patcher Complete*
 
 📦 *ODM Files Injected:* \`$INJECT_COUNT\`
@@ -1920,28 +1920,31 @@ if [ "$ODM_UPLOAD_LINK" != "UPLOAD_FAILED" ] || [ "$SYSTEM_UPLOAD_LINK" != "UPLO
 
 📥 *Downloads:*"
 
-    [ "$ODM_UPLOAD_LINK" != "UPLOAD_FAILED" ] && \
+    if [ "$ODM_UPLOAD_LINK" != "UPLOAD_FAILED" ]; then
         FINAL_MSG="$FINAL_MSG
-[📱 odm\\_patched.zip]($ODM_UPLOAD_LINK)"
-    [ "$VENDOR_PATCH_OK" = true ] && \
-        FINAL_MSG="$FINAL_MSG _(includes vendor with AVB-disabled fstab)_"
+[📱 ODM Patched](${ODM_UPLOAD_LINK})"
+        if [ "$VENDOR_PATCH_OK" = true ]; then
+            FINAL_MSG="$FINAL_MSG (odm + vendor with AVB-disabled fstab)"
+        fi
+    fi
 
     if [ "$SYSTEM_UPLOAD_LINK" != "NOT_CREATED" ] && [ "$SYSTEM_UPLOAD_LINK" != "UPLOAD_FAILED" ]; then
         FINAL_MSG="$FINAL_MSG
-[🗂️ system\\_patched.zip]($SYSTEM_UPLOAD_LINK) _(system + system\\_ext + product)_"
+[🗂 System Patched](${SYSTEM_UPLOAD_LINK}) (system + system ext + product)"
     elif [ "$SYSTEM_ZIP_OK" = true ] && [ "$SYSTEM_UPLOAD_LINK" = "UPLOAD_FAILED" ]; then
         FINAL_MSG="$FINAL_MSG
-⚠️ system\\_patched.zip upload failed"
+⚠️ System zip upload failed"
     fi
 
-    [ -n "$TOOL_UPLOAD_LINK" ] && \
+    if [ -n "$TOOL_UPLOAD_LINK" ]; then
         FINAL_MSG="$FINAL_MSG
-[🔧 OPLUS HyperOS Modder Tool]($TOOL_UPLOAD_LINK)"
+[🔧 OPLUS HyperOS Modder Tool](${TOOL_UPLOAD_LINK})"
+    fi
 
     FINAL_MSG="$FINAL_MSG
 
-_ODM: Xiaomi ODM patched with OPLUS HALs_
-_System: merged my\\_\\* overlays into base system_"
+Xiaomi ODM patched with OPLUS HALs.
+System merged with OPLUS overlays."
 else
     FINAL_MSG="⚠️ *Patcher Finished — All Uploads Failed*
 ⏱ Time: ${ELAPSED_MIN}m ${ELAPSED_SEC}s
