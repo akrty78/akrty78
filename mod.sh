@@ -3118,42 +3118,90 @@ except UnicodeDecodeError:
     with open(fstab_path, 'r', encoding='latin-1') as f:
         lines = f.readlines()
 
-output = []
-changes = 0
-LOGICAL = {'system','system_ext','product','vendor','odm','system_dlkm','vendor_dlkm'}
-
+# Pre-scan: build set of (mount_point, fstype) pairs already in file
+existing_pairs = set()
 for line in lines:
     s = line.strip()
     if not s or s.startswith('#'):
-        output.append(line)
         continue
     cols = s.split()
-    if len(cols) < 5:
+    if len(cols) >= 3:
+        existing_pairs.add((cols[1], cols[2]))
+
+# AVB flag patterns to remove from fs_mgr_flags
+AVB_PATTERNS = [
+    re.compile(r',?avb=vbmeta_system'),
+    re.compile(r',?avb=vbmeta\b'),
+    re.compile(r',?avb_keys=[^,]*'),
+    re.compile(r',?(?<![a-z_])verify(?![a-z_])'),
+    re.compile(r',?(?<![a-z_])avb(?![a-z_=])'),
+]
+
+output = []
+changes = 0
+
+for line in lines:
+    stripped = line.strip()
+
+    # Pass through comments, empty lines unchanged
+    if not stripped or stripped.startswith('#'):
         output.append(line)
         continue
 
-    src, mnt, fs, opts, mgr = cols[0], cols[1], cols[2], cols[3], cols[4]
+    all_tokens = stripped.split()
+    if len(all_tokens) < 5:
+        output.append(line)
+        continue
+
+    # Lines with >5 tokens can't be safely parsed (overlay, long firmware)
+    # Pass through completely unchanged
+    if len(all_tokens) > 5:
+        output.append(line)
+        continue
+
+    # Exactly 5 tokens: src, mnt, fstype, mntopts, fsmgr
+    src, mnt, fstype = all_tokens[0], all_tokens[1], all_tokens[2]
+    fsmgr = all_tokens[4]
+
+    # Only remove AVB from logical partition lines
+    is_logical = 'logical' in fsmgr.split(',')
 
     # OP1: Remove AVB flags
-    orig = mgr
-    mgr = re.sub(r',?avb=vbmeta_system', '', mgr)
-    mgr = re.sub(r',?avb=vbmeta', '', mgr)
-    mgr = re.sub(r',?avb_keys=[^,]*', '', mgr)
-    mgr = re.sub(r',?(?<![a-z_])verify(?![a-z_])', '', mgr)
-    mgr = re.sub(r',?(?<![a-z_])avb(?![a-z_=])', '', mgr)
-    mgr = re.sub(r'^,+|,+$', '', mgr)
-    mgr = re.sub(r',{2,}', ',', mgr)
-    if not mgr: mgr = 'defaults'
-    if mgr != orig: changes += 1
+    new_fsmgr = fsmgr
+    for pat in AVB_PATTERNS:
+        new_fsmgr = pat.sub('', new_fsmgr)
 
-    new_line = f"{src:<56}{mnt:<23}{fs:<8}{opts:<53}{mgr}\n"
-    output.append(new_line)
+    new_fsmgr = re.sub(r'^,+', '', new_fsmgr)
+    new_fsmgr = re.sub(r',+$', '', new_fsmgr)
+    new_fsmgr = re.sub(r',{2,}', ',', new_fsmgr)
+    if not new_fsmgr:
+        new_fsmgr = 'defaults'
 
-    # OP2: ext4 fallback for erofs logical partitions
-    if fs == 'erofs' and src.strip() in LOGICAL:
-        ext4_line = f"{src:<56}{mnt:<23}{'ext4':<8}{'ro,barrier=1,discard':<53}{mgr}\n"
-        output.append(ext4_line)
+    modified = (new_fsmgr != fsmgr)
+
+    if modified:
+        # Replace only the last token in-place, preserving all whitespace
+        last_start = stripped.rfind(fsmgr)
+        if last_start >= 0:
+            reconstructed = stripped[:last_start] + new_fsmgr
+        else:
+            reconstructed = stripped[:-len(fsmgr)] + new_fsmgr
+        trailing = line[len(line.rstrip()):]
+        if not trailing:
+            trailing = '\n'
+        output.append(reconstructed + trailing)
         changes += 1
+    else:
+        # NO changes — pass through original line EXACTLY
+        output.append(line)
+
+    # OP2: ext4 fallback for erofs logical partitions (only if no ext4 exists)
+    if fstype == 'erofs' and is_logical:
+        if (mnt, 'ext4') not in existing_pairs:
+            ext4_fsmgr = new_fsmgr if modified else fsmgr
+            ext4_line = f"{src:<56}{mnt:<23}{'ext4':<8}{'ro,barrier=1,discard':<53}{ext4_fsmgr}\n"
+            output.append(ext4_line)
+            changes += 1
 
 if changes > 0:
     with open(fstab_path, 'w', encoding='utf-8', newline='\n') as f:
