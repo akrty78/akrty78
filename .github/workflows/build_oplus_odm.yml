@@ -1,4 +1,4 @@
-name: OPLUS ODM Builder
+name: Oplus-Manager
 on:
   repository_dispatch:
     types: [build_oplus_odm]
@@ -11,6 +11,7 @@ jobs:
     env:
       OPLUS_URL: ${{ github.event.client_payload.oplus_url }}
       XIAOMI_URL: ${{ github.event.client_payload.xiaomi_url }}
+      MODE: ${{ github.event.client_payload.mode }}
       CHAT_ID: ${{ github.event.client_payload.chat_id }}
       TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
       PIXELDRAIN_KEY: ${{ secrets.PIXELDRAIN_KEY }}
@@ -77,7 +78,7 @@ jobs:
       - name: Run OPLUS ODM Patcher
         run: |
           chmod +x oplus_odm_patcher.sh
-          bash oplus_odm_patcher.sh "$OPLUS_URL" "$XIAOMI_URL"
+          bash oplus_odm_patcher.sh "$OPLUS_URL" "$XIAOMI_URL" "${MODE:-odm_system}"
 
       - name: Notify on Failure
         if: failure()
@@ -85,4 +86,4 @@ jobs:
           curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
             -d chat_id="$CHAT_ID" \
             -d parse_mode="Markdown" \
-            -d text="❌ *ODM Patch Failed*%0A%0AThe GitHub Actions workflow encountered an error.%0ACheck the [workflow logs](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})."
+            -d text="❌ *Oplus-Manager Failed*%0A%0AThe GitHub Actions workflow encountered an error.%0ACheck the [workflow logs](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})."
