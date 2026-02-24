@@ -1,7 +1,7 @@
 #!/bin/bash
 # =========================================================
-#  OPLUS ODM PATCHER — Inject OnePlus HALs into Xiaomi ODM
-#  Usage: ./oplus_odm_patcher.sh <OPLUS_OTA_URL> <XIAOMI_OTA_URL>
+#  OPLUS-MANAGER — Patch ODM, Vendor & System from OPLUS OTA
+#  Usage: ./oplus_odm_patcher.sh <OPLUS_OTA_URL> [XIAOMI_OTA_URL] [MODE]
 # =========================================================
 
 set +e
@@ -32,7 +32,7 @@ tg_progress() {
     [ -z "$TELEGRAM_TOKEN" ] || [ -z "$CHAT_ID" ] && return
     local msg="$1"
     local timestamp=$(date +"%H:%M:%S")
-    local full_text="⚙️ *OPLUS ODM Patcher*
+    local full_text="⚙️ *Oplus-Manager*
 
 $msg
 _Last Update: $timestamp_"
@@ -64,9 +64,18 @@ tg_send() {
 # --- INPUTS ---
 OPLUS_URL="$1"
 XIAOMI_URL="$2"
+MODE="${3:-odm_system}"  # odm_vendor | odm_system | system_only
 
-if [ -z "$OPLUS_URL" ] || [ -z "$XIAOMI_URL" ]; then
-    log_error "Usage: $0 <OPLUS_OTA_URL> <XIAOMI_OTA_URL>"
+log_info "Mode: $MODE"
+
+if [ -z "$OPLUS_URL" ]; then
+    log_error "Usage: $0 <OPLUS_OTA_URL> [XIAOMI_OTA_URL] [MODE]"
+    exit 1
+fi
+
+# Validate: Branches 1 & 2 need Xiaomi URL
+if [ "$MODE" != "system_only" ] && [ -z "$XIAOMI_URL" ]; then
+    log_error "Xiaomi OTA URL required for mode: $MODE"
     exit 1
 fi
 
@@ -265,7 +274,7 @@ log_info "Downloading OPLUS OTA..."
 aria2c -x 16 -s 16 --allow-overwrite=true -d "$OPLUS_DL" -o "oplus_ota.zip" "$OPLUS_URL" 2>&1 | tail -1
 if [ ! -f "$OPLUS_DL/oplus_ota.zip" ]; then
     log_error "Failed to download OPLUS OTA"
-    tg_send "❌ *ODM Patch Failed*\nCould not download OPLUS OTA."
+    tg_send "❌ *Oplus-Manager Failed*\nCould not download OPLUS OTA."
     exit 1
 fi
 log_success "OPLUS OTA downloaded: $(du -h "$OPLUS_DL/oplus_ota.zip" | cut -f1)"
@@ -279,25 +288,41 @@ log_info "Deleted OPLUS OTA zip"
 
 if [ ! -f "payload.bin" ]; then
     log_error "No payload.bin in OPLUS OTA"
-    tg_send "❌ *ODM Patch Failed*\nNo payload.bin found in OPLUS OTA."
+    tg_send "❌ *Oplus-Manager Failed*\nNo payload.bin found in OPLUS OTA."
     exit 1
 fi
 
-log_info "Dumping OPLUS partitions (odm + system + my_*)..."
-tg_progress "📦 Extracting OPLUS partitions..."
-payload-dumper-go -p odm,system,system_ext,product,my_product,my_engineering,my_stock,my_heytap,my_carrier,my_region,my_bigball,my_manifest -o "$OPLUS_DL" payload.bin 2>&1 | tail -3
+# Determine which partitions to extract based on mode
+if [ "$MODE" = "system_only" ]; then
+    log_info "Mode: system_only — dumping system partitions only (no ODM)..."
+    tg_progress "📦 Extracting OPLUS system partitions..."
+    payload-dumper-go -p system,system_ext,product,my_product,my_engineering,my_stock,my_heytap,my_carrier,my_region,my_bigball,my_manifest -o "$OPLUS_DL" payload.bin 2>&1 | tail -3
+elif [ "$MODE" = "odm_vendor" ]; then
+    log_info "Mode: odm_vendor — dumping ODM only (no system partitions)..."
+    tg_progress "📦 Extracting OPLUS ODM..."
+    payload-dumper-go -p odm -o "$OPLUS_DL" payload.bin 2>&1 | tail -3
+else
+    log_info "Mode: odm_system — dumping ODM + system partitions..."
+    tg_progress "📦 Extracting OPLUS partitions..."
+    payload-dumper-go -p odm,system,system_ext,product,my_product,my_engineering,my_stock,my_heytap,my_carrier,my_region,my_bigball,my_manifest -o "$OPLUS_DL" payload.bin 2>&1 | tail -3
+fi
 # DELETE PAYLOAD IMMEDIATELY
 rm -f "$OPLUS_DL/payload.bin"
 log_info "Deleted OPLUS payload.bin"
 
-# --- Locate extracted images ---
-OPLUS_ODM=$(find "$OPLUS_DL" -name "odm.img" -print -quit)
-if [ -z "$OPLUS_ODM" ] || [ ! -f "$OPLUS_ODM" ]; then
-    log_error "Failed to extract OPLUS odm.img"
-    tg_send "❌ *ODM Patch Failed*\nCould not extract OPLUS odm.img from payload."
-    exit 1
+# ODM image (required for odm_vendor and odm_system, not for system_only)
+if [ "$MODE" != "system_only" ]; then
+    OPLUS_ODM=$(find "$OPLUS_DL" -name "odm.img" -print -quit)
+    if [ -z "$OPLUS_ODM" ] || [ ! -f "$OPLUS_ODM" ]; then
+        log_error "Failed to extract OPLUS odm.img"
+        tg_send "❌ *Oplus-Manager Failed*\nCould not extract OPLUS odm.img from payload."
+        exit 1
+    fi
+    log_success "OPLUS odm.img extracted: $(du -h "$OPLUS_ODM" | cut -f1)"
+else
+    OPLUS_ODM=""
+    log_info "system_only mode — skipping ODM extraction"
 fi
-log_success "OPLUS odm.img extracted: $(du -h "$OPLUS_ODM" | cut -f1)"
 
 # System images (optional — failure doesn't block ODM patch)
 OPLUS_SYSTEM_IMG=$(find "$OPLUS_DL" -name "system.img" -print -quit)
@@ -333,7 +358,8 @@ done
 log_info "Found $MY_FOUND my_* partition images"
 log_disk
 
-# --- XIAOMI OTA ---
+# --- XIAOMI OTA (skip for system_only) ---
+if [ "$MODE" != "system_only" ]; then
 log_step "📥 Xiaomi: Download → Extract → Cleanup"
 tg_progress "📥 Downloading Xiaomi OTA..."
 
@@ -341,7 +367,7 @@ log_info "Downloading Xiaomi OTA..."
 aria2c -x 16 -s 16 --allow-overwrite=true -d "$XIAOMI_DL" -o "xiaomi_ota.zip" "$XIAOMI_URL" 2>&1 | tail -1
 if [ ! -f "$XIAOMI_DL/xiaomi_ota.zip" ]; then
     log_error "Failed to download Xiaomi OTA"
-    tg_send "❌ *ODM Patch Failed*\nCould not download Xiaomi OTA."
+    tg_send "❌ *Oplus-Manager Failed*\nCould not download Xiaomi OTA."
     exit 1
 fi
 log_success "Xiaomi OTA downloaded: $(du -h "$XIAOMI_DL/xiaomi_ota.zip" | cut -f1)"
@@ -355,7 +381,7 @@ log_info "Deleted Xiaomi OTA zip"
 
 if [ ! -f "payload.bin" ]; then
     log_error "No payload.bin in Xiaomi OTA"
-    tg_send "❌ *ODM Patch Failed*\nNo payload.bin found in Xiaomi OTA."
+    tg_send "❌ *Oplus-Manager Failed*\nNo payload.bin found in Xiaomi OTA."
     exit 1
 fi
 
@@ -368,7 +394,7 @@ log_info "Deleted Xiaomi payload.bin"
 XIAOMI_ODM=$(find "$XIAOMI_DL" -name "odm.img" -print -quit)
 if [ -z "$XIAOMI_ODM" ] || [ ! -f "$XIAOMI_ODM" ]; then
     log_error "Failed to extract Xiaomi odm.img"
-    tg_send "❌ *ODM Patch Failed*\nCould not extract Xiaomi odm.img from payload."
+    tg_send "❌ *Oplus-Manager Failed*\nCould not extract Xiaomi odm.img from payload."
     exit 1
 fi
 log_success "Xiaomi odm.img extracted: $(du -h "$XIAOMI_ODM" | cut -f1)"
@@ -384,6 +410,17 @@ fi
 
 cd "$WORK_DIR"
 log_disk
+
+else
+    log_info "system_only mode — skipping Xiaomi OTA download"
+    XIAOMI_ODM=""
+    XIAOMI_VENDOR_IMG=""
+fi  # end MODE != system_only
+
+# =========================================================
+#  4-10. ODM/VENDOR PROCESSING (skip for system_only)
+# =========================================================
+if [ "$MODE" != "system_only" ]; then
 
 # =========================================================
 #  4. UNPACK BOTH ODM IMAGES
@@ -471,13 +508,13 @@ unpack_odm() {
 
 unpack_odm "$OPLUS_ODM" "$OPLUS_PROJECT" "OPLUS ODM"
 if [ $? -ne 0 ]; then
-    tg_send "❌ *ODM Patch Failed*\nCould not unpack OPLUS odm.img"
+    tg_send "❌ *Oplus-Manager Failed*\nCould not unpack OPLUS odm.img"
     exit 1
 fi
 
 unpack_odm "$XIAOMI_ODM" "$XIAOMI_PROJECT" "Xiaomi ODM"
 if [ $? -ne 0 ]; then
-    tg_send "❌ *ODM Patch Failed*\nCould not unpack Xiaomi odm.img"
+    tg_send "❌ *Oplus-Manager Failed*\nCould not unpack Xiaomi odm.img"
     exit 1
 fi
 
@@ -1325,7 +1362,7 @@ fi
 
 if [ ! -f "$PATCHED_ODM" ] || [ ! -s "$PATCHED_ODM" ]; then
     log_error "Failed to repack ODM image"
-    tg_send "❌ *ODM Patch Failed*\nCould not repack ODM image."
+    tg_send "❌ *Oplus-Manager Failed*\nCould not repack ODM image."
     exit 1
 fi
 
@@ -1334,7 +1371,7 @@ PATCHED_SIZE=$(stat -c%s "$PATCHED_ODM" 2>/dev/null || echo 0)
 if [ "$PATCHED_SIZE" -lt 1048576 ]; then
     log_error "ODM image is only $(numfmt --to=iec $PATCHED_SIZE) — mkfs.erofs likely aborted!"
     log_error "This usually means --fs-config-file is missing entries for injected files."
-    tg_send "❌ *ODM Patch Failed*\nRepack produced a ${PATCHED_SIZE}B stub image (expected >1MB)."
+    tg_send "❌ *Oplus-Manager Failed*\nRepack produced a ${PATCHED_SIZE}B stub image (expected >1MB)."
     exit 1
 fi
 
@@ -1573,10 +1610,17 @@ else
     log_info "No Xiaomi vendor.img — vendor fstab patch skipped"
 fi
 
+else
+    log_info "system_only mode — skipping ODM/Vendor sections 4-10"
+    INJECT_COUNT=0
+fi  # end MODE != system_only
+
 
 # =========================================================
 #  11. SYSTEM PARTITION MERGE (OPLUS my_* → system)
 # =========================================================
+if [ "$MODE" != "odm_vendor" ]; then
+
 if [ -n "$OPLUS_SYSTEM_IMG" ] && [ -f "$OPLUS_SYSTEM_IMG" ]; then
     if check_disk_threshold 5; then
         log_step "📦 Unpacking system partitions..."
@@ -1869,6 +1913,10 @@ rm -f "$OPLUS_MY_MANIFEST_IMG" "$OPLUS_MY_STOCK_IMG" "$OPLUS_MY_HEYTAP_IMG" \
       "$OPLUS_MY_ENGINEERING_IMG" "$OPLUS_MY_PRODUCT_IMG" 2>/dev/null
 log_disk
 
+else
+    log_info "odm_vendor mode — skipping system merge section 11"
+fi  # end MODE != odm_vendor
+
 # =========================================================
 #  12. CREATE ZIP FILES + UPLOAD
 # =========================================================
@@ -1993,8 +2041,8 @@ ELAPSED_SEC=$((ELAPSED % 60))
 log_step "📤 Sending result..."
 
 if [ "$ODM_UPLOAD_LINK" != "UPLOAD_FAILED" ] || { [ "$SYSTEM_UPLOAD_LINK" != "UPLOAD_FAILED" ] && [ "$SYSTEM_UPLOAD_LINK" != "NOT_CREATED" ]; }; then
-    FINAL_MSG="✅ *OPLUS ODM Patcher Complete*
-
+    FINAL_MSG="✅ *Oplus-Manager Complete*
+⚙️ *Mode:* \`$MODE\`
 📦 *ODM Files Injected:* \`$INJECT_COUNT\`
 ⏱ *Time:* ${ELAPSED_MIN}m ${ELAPSED_SEC}s
 
@@ -2026,17 +2074,18 @@ if [ "$ODM_UPLOAD_LINK" != "UPLOAD_FAILED" ] || { [ "$SYSTEM_UPLOAD_LINK" != "UP
 Xiaomi ODM patched with OPLUS HALs.
 System merged with OPLUS overlays."
 else
-    FINAL_MSG="⚠️ *Patcher Finished — All Uploads Failed*
+    FINAL_MSG="⚠️ *Oplus-Manager — All Uploads Failed*
 ⏱ Time: ${ELAPSED_MIN}m ${ELAPSED_SEC}s
 Check runner logs for details."
 fi
 
 tg_send "$FINAL_MSG"
 
-log_success "=== OPLUS ODM PATCHER COMPLETE ==="
-log_info "Injected: $INJECT_COUNT files | Time: ${ELAPSED_MIN}m ${ELAPSED_SEC}s"
+log_success "=== OPLUS-MANAGER COMPLETE ==="
+log_info "Mode: $MODE | Injected: $INJECT_COUNT files | Time: ${ELAPSED_MIN}m ${ELAPSED_SEC}s"
 [ "$ODM_UPLOAD_LINK" != "UPLOAD_FAILED" ] && log_info "ODM: $ODM_UPLOAD_LINK"
 [ "$SYSTEM_UPLOAD_LINK" != "UPLOAD_FAILED" ] && [ "$SYSTEM_UPLOAD_LINK" != "NOT_CREATED" ] && \
     log_info "System: $SYSTEM_UPLOAD_LINK"
 
 exit 0
+
