@@ -1388,56 +1388,136 @@ except UnicodeDecodeError:
     with open(fstab_path, 'r', encoding='latin-1') as f:
         lines = f.readlines()
 
+# --- Pre-scan: build set of (mount_point, fstype) pairs already in file ---
+existing_pairs = set()
+for line in lines:
+    s = line.strip()
+    if not s or s.startswith('#'):
+        continue
+    cols = s.split()
+    if len(cols) >= 3:
+        existing_pairs.add((cols[1], cols[2]))
+
+# --- Parse a fstab line into 5 columns preserving original whitespace ---
+# Returns (col1, col2, col3, col4, col5, col5_start_idx) or None
+FSTAB_LINE_RE = re.compile(
+    r'^(\S+)'       # col1: src
+    r'(\s+)'        # sep1
+    r'(\S+)'        # col2: mnt_point
+    r'(\s+)'        # sep2
+    r'(\S+)'        # col3: fstype
+    r'(\s+)'        # sep3
+    r'(\S+)'        # col4: mnt_flags (first token)
+    r'(\s+)'        # sep4
+    r'(.+?)\s*$'    # col5: fs_mgr_flags (rest of line)
+)
+
+# AVB flag patterns to remove from fs_mgr_flags
+AVB_PATTERNS = [
+    re.compile(r',?avb=vbmeta_system'),
+    re.compile(r',?avb=vbmeta\b'),
+    re.compile(r',?avb_keys=[^,]*'),
+    re.compile(r',?(?<![a-z_])verify(?![a-z_])'),
+    re.compile(r',?(?<![a-z_])avb(?![a-z_=])'),
+]
+
 output = []
 changes = 0
-# Logical partitions that get ext4 fallback
-LOGICAL_PARTS = {'system', 'system_ext', 'product', 'vendor', 'odm', 'system_dlkm', 'vendor_dlkm'}
 
 for line in lines:
     stripped = line.strip()
-    # Skip comments and empty lines
+
+    # Pass through comments, empty lines, and short lines unchanged
     if not stripped or stripped.startswith('#'):
         output.append(line)
         continue
 
-    cols = stripped.split()
-    if len(cols) < 5:
+    # Try the simple 5-column parse first
+    m = FSTAB_LINE_RE.match(stripped)
+    if not m:
+        # Line doesn't match fstab format — pass through unchanged
         output.append(line)
         continue
 
-    src, mnt, fstype, mntopts, fsmgr = cols[0], cols[1], cols[2], cols[3], cols[4]
+    src = m.group(1)
+    sep1 = m.group(2)
+    mnt = m.group(3)
+    sep2 = m.group(4)
+    fstype = m.group(5)
+    sep3 = m.group(6)
+    col4_token = m.group(7)
+    sep4 = m.group(8)
+    col5_raw = m.group(9)
 
-    # --- OPERATION 1: Remove AVB flags from fs_mgr_flags ---
-    orig_fsmgr = fsmgr
-    # Remove avb=vbmeta_system, avb=vbmeta, avb_keys=<path>
-    fsmgr = re.sub(r',?avb=vbmeta_system', '', fsmgr)
-    fsmgr = re.sub(r',?avb=vbmeta', '', fsmgr)
-    fsmgr = re.sub(r',?avb_keys=[^,]*', '', fsmgr)
-    # Remove standalone verify and avb (word boundaries)
-    fsmgr = re.sub(r',?(?<![a-z_])verify(?![a-z_])', '', fsmgr)
-    fsmgr = re.sub(r',?(?<![a-z_])avb(?![a-z_=])', '', fsmgr)
+    # BUT: col4 (mount options) can contain spaces in some formats.
+    # For overlay lines, col4 is something like "ro,lowerdir=.../path"
+    # which split correctly above. However, fstab columns are typically:
+    #   src  mnt_point  fstype  mnt_flags  fs_mgr_flags
+    # where mnt_flags is comma-separated (no spaces), and fs_mgr_flags is
+    # comma-separated (no spaces). So the simple 5-token parse works IF
+    # there are exactly 5 whitespace-separated tokens.
+
+    # Count total whitespace-separated tokens to detect ambiguity
+    all_tokens = stripped.split()
+    if len(all_tokens) < 5:
+        output.append(line)
+        continue
+
+    # For lines with exactly 5 tokens, parsing is unambiguous
+    # For lines with >5 tokens, we can't safely tell where col4 ends
+    # and col5 begins — pass through unchanged (these lines typically
+    # don't need modification)
+    if len(all_tokens) > 5:
+        output.append(line)
+        continue
+
+    # Now we have exactly 5 tokens: src, mnt, fstype, mntopts, fsmgr
+    fsmgr = all_tokens[4]
+
+    # --- Determine if this is a logical partition line ---
+    is_logical = 'logical' in fsmgr.split(',')
+
+    # --- OPERATION 1: Remove AVB flags (only from fs_mgr_flags) ---
+    new_fsmgr = fsmgr
+    for pat in AVB_PATTERNS:
+        new_fsmgr = pat.sub('', new_fsmgr)
+
     # Clean up dangling commas
-    fsmgr = re.sub(r'^,+', '', fsmgr)
-    fsmgr = re.sub(r',+$', '', fsmgr)
-    fsmgr = re.sub(r',{2,}', ',', fsmgr)
-    if not fsmgr:
-        fsmgr = 'defaults'
+    new_fsmgr = re.sub(r'^,+', '', new_fsmgr)
+    new_fsmgr = re.sub(r',+$', '', new_fsmgr)
+    new_fsmgr = re.sub(r',{2,}', ',', new_fsmgr)
+    if not new_fsmgr:
+        new_fsmgr = 'defaults'
 
-    if fsmgr != orig_fsmgr:
+    modified = (new_fsmgr != fsmgr)
+
+    if modified:
+        # Reconstruct line: replace ONLY the fs_mgr_flags column in the
+        # original line, preserving all original whitespace elsewhere.
+        # Find the last token (fsmgr) in the original stripped line and replace it.
+        last_token_start = stripped.rfind(fsmgr)
+        if last_token_start >= 0:
+            reconstructed = stripped[:last_token_start] + new_fsmgr
+        else:
+            reconstructed = stripped[:-len(fsmgr)] + new_fsmgr
+        # Preserve original line ending
+        trailing = line[len(line.rstrip()):]
+        if not trailing:
+            trailing = '\n'
+        output.append(reconstructed + trailing)
         changes += 1
-
-    # Reconstruct line with proper spacing
-    new_line = f"{src:<56}{mnt:<23}{fstype:<8}{mntopts:<53}{fsmgr}\n"
-    output.append(new_line)
+    else:
+        # NO changes needed — pass through original line EXACTLY
+        output.append(line)
 
     # --- OPERATION 2: Add ext4 fallback for erofs logical partitions ---
-    part_name = src.strip()
-    if fstype == 'erofs' and part_name in LOGICAL_PARTS:
-        ext4_opts = 'ro,barrier=1,discard'
-        ext4_line = f"{src:<56}{mnt:<23}{'ext4':<8}{ext4_opts:<53}{fsmgr}\n"
-        # Only add if not already followed by an ext4 line for same mount
-        output.append(ext4_line)
-        changes += 1
+    if fstype == 'erofs' and is_logical:
+        # Only add if this mount point does NOT already have an ext4 entry
+        if (mnt, 'ext4') not in existing_pairs:
+            ext4_fsmgr = new_fsmgr if modified else fsmgr
+            ext4_line = f"{src:<56}{mnt:<23}{'ext4':<8}{'ro,barrier=1,discard':<53}{ext4_fsmgr}\n"
+            output.append(ext4_line)
+            changes += 1
 
 if changes > 0:
     with open(fstab_path, 'w', encoding='utf-8', newline='\n') as f:
