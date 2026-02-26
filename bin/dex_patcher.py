@@ -19,13 +19,14 @@ Commands:
   verify              check zipalign + java
   framework-sig       ApkSignatureVerifier → getMinimumSignatureSchemeVersionForTargetSdk = 1
   settings-ai         InternalDeviceUtils  → isAiSupported = true
+  settings-region     Settings.apk         → IS_GLOBAL_BUILD = 1 (locale classes)
+  settings-fold-pager Settings.apk         → isSupportFoldScreenSettings = true + displayResourceTilesToScreen = void
   voice-recorder-ai   SoundRecorder        → isAiRecordEnable = true
   services-jar        ActivityManagerService$$ExternalSyntheticLambda31 → run() = void
   provision-gms       Provision.apk        → IS_INTERNATIONAL_BUILD (Lmiui/os/Build;) = 1
   miui-service        miui-services.jar    → IS_INTERNATIONAL_BUILD (Lmiui/os/Build;) = 1
   systemui-volte      MiuiSystemUI.apk     → IS_INTERNATIONAL_BUILD + QuickShare + WA-notif
   miui-framework      miui-framework.jar   → validateTheme = void  +  IS_GLOBAL_BUILD = 1
-  settings-region     Settings.apk         → IS_GLOBAL_BUILD = 1 (locale classes)
 """
 
 import sys, os, re, struct, hashlib, zlib, shutil, zipfile, subprocess, tempfile, traceback
@@ -1335,15 +1336,62 @@ def _miuifreqphrase_patch(dex_name: str, dex: bytearray) -> bool:
 #  COMMAND TABLE  +  ENTRY POINT
 # ════════════════════════════════════════════════════════════════════
 
+# ── Settings.apk — Fold-Pager feature  ──────────────────────────
+def _settings_fold_pager_patch(dex_name: str, dex: bytearray) -> bool:
+    """
+    FOLD-PAGER Phase 1: Two binary method patches in Settings.apk.
+
+    Patch 1 — isSupportFoldScreenSettings → return true
+      Class:  com/android/settings/utils/SettingsFeatures
+      Forces the settings UI to believe fold-screen support is always active.
+      Uses _STUB_TRUE (const/4 v0, 0x1 / return v0) with trim=True for a
+      clean 2-code-unit body, no NOP flood.
+
+    Patch 2 — displayResourceTilesToScreen → return void
+      Class:  com/android/settings/foldSettings/MiuiFoldScreenSettings
+      Neutralises the tile-display method so it no longer populates the
+      screen with stock resource tiles (our injected smali + XML take over).
+      Uses _STUB_VOID (return-void) with trim=True.
+
+    Both patches are guarded by a fast b'...' in-bytes check so the DEX is
+    left untouched when neither class is present (graceful skip).
+    """
+    patched = False
+    raw = bytes(dex)
+
+    # Patch 1: isSupportFoldScreenSettings → const/4 v0, 0x1 / return v0
+    if b'isSupportFoldScreenSettings' in raw:
+        if binary_patch_method(dex,
+                "com/android/settings/utils/SettingsFeatures",
+                "isSupportFoldScreenSettings",
+                stub_regs=1, stub_insns=_STUB_TRUE, trim=True):
+            patched = True
+        else:
+            warn("  [fold-pager] isSupportFoldScreenSettings not found — skipping")
+
+    # Patch 2: displayResourceTilesToScreen → return-void
+    if b'displayResourceTilesToScreen' in raw:
+        if binary_patch_method(dex,
+                "com/android/settings/foldSettings/MiuiFoldScreenSettings",
+                "displayResourceTilesToScreen",
+                stub_regs=0, stub_insns=_STUB_VOID, trim=True):
+            patched = True
+        else:
+            warn("  [fold-pager] displayResourceTilesToScreen not found — skipping")
+
+    return patched
+
+
 PROFILES = {
-    "settings-ai":       _settings_ai_patch,
-    "settings-region":   _settings_region_patch,   # exact 3 classes only
-    "voice-recorder-ai": _recorder_ai_patch,        # AiDeviceUtil::isAiSupportedDevice
-    "provision-gms":     _provision_gms_patch,    # Utils::setGmsAppEnabledStateForCn only
-    "miui-service":      _miui_service_patch,    # global IS_INTERNATIONAL_BUILD sweep
-    "systemui-volte":    _systemui_all_patch,       # VoLTE + QuickShare(const/4) + WA-notif
-    "miui-framework":    _miui_framework_patch,     # validateTheme(trim) + IS_GLOBAL_BUILD
-    "incallui-ai":       _incallui_patch,           # RecorderUtils::isAiRecordEnable
+    "settings-ai":          _settings_ai_patch,
+    "settings-region":      _settings_region_patch,      # exact 3 classes only
+    "settings-fold-pager":  _settings_fold_pager_patch,  # Fold-Pager DEX phase
+    "voice-recorder-ai":    _recorder_ai_patch,          # AiDeviceUtil::isAiSupportedDevice
+    "provision-gms":        _provision_gms_patch,        # Utils::setGmsAppEnabledStateForCn only
+    "miui-service":         _miui_service_patch,         # global IS_INTERNATIONAL_BUILD sweep
+    "systemui-volte":       _systemui_all_patch,         # VoLTE + QuickShare(const/4) + WA-notif
+    "miui-framework":       _miui_framework_patch,       # validateTheme(trim) + IS_GLOBAL_BUILD
+    "incallui-ai":          _incallui_patch,             # RecorderUtils::isAiRecordEnable
 }
 
 def main():
