@@ -2823,41 +2823,44 @@ PYTHON_EOF
                 _run_dex_patch "SETTINGS FOLDPAGER" "settings-foldpager" "$_SETTINGS_APK"
                 cd "$GITHUB_WORKSPACE"
 
-                # Step 2: Download replacement XML assets from repo release (tag: Fold-Pager)
+                # Step 2: Download individual XML assets from Multilang release by exact name
                 _FP_WORK="$TEMP_DIR/foldpager_work"
                 _FP_ASSETS="$TEMP_DIR/foldpager_assets"
                 rm -rf "$_FP_WORK" "$_FP_ASSETS"
                 mkdir -p "$_FP_ASSETS"
                 _FP_OK=0
 
-                log_info "[foldpager] Fetching XML assets from release tag Fold-Pager..."
-                _FP_API="https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/Fold-Pager"
-                _FP_ASSET_URL=$(curl -sSf -H "Authorization: token ${GITHUB_TOKEN}" \
-                    -H "Accept: application/vnd.github.v3+json" "$_FP_API" \
-                    | jq -r '.assets[] | select(.name | endswith(".zip")) | .url' | head -n 1)
+                log_info "[foldpager] Fetching XML assets from Multilang release..."
+                _FP_API="https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/Multilang"
+                _FP_RELEASE_JSON=$(curl -sSf -H "Authorization: token ${GITHUB_TOKEN}" \
+                    -H "Accept: application/vnd.github.v3+json" "$_FP_API" 2>/dev/null)
 
-                if [ -n "$_FP_ASSET_URL" ] && [ "$_FP_ASSET_URL" != "null" ]; then
-                    curl -sSfL -H "Authorization: token ${GITHUB_TOKEN}" \
-                        -H "Accept: application/octet-stream" \
-                        -o "$_FP_ASSETS/foldpager.zip" "$_FP_ASSET_URL"
-                    if [ -s "$_FP_ASSETS/foldpager.zip" ]; then
-                        unzip -qq -o "$_FP_ASSETS/foldpager.zip" -d "$_FP_ASSETS/extracted"
-                        # Descend into single top-level folder if present
-                        _FP_TOP=$(find "$_FP_ASSETS/extracted" -mindepth 1 -maxdepth 1 -type d)
-                        _FP_TOP_COUNT=$(echo "$_FP_TOP" | grep -c .)
-                        if [ "$_FP_TOP_COUNT" -eq 1 ]; then
-                            mv "$_FP_TOP"/* "$_FP_ASSETS/extracted/" 2>/dev/null
-                            mv "$_FP_TOP"/.* "$_FP_ASSETS/extracted/" 2>/dev/null
-                            rmdir "$_FP_TOP" 2>/dev/null
+                if [ -n "$_FP_RELEASE_JSON" ]; then
+                    # Helper: download a single asset by exact filename
+                    _fp_dl_asset() {
+                        local asset_name="$1" dest="$2"
+                        local asset_url
+                        asset_url=$(echo "$_FP_RELEASE_JSON" | jq -r \
+                            --arg name "$asset_name" \
+                            '.assets[] | select(.name == $name) | .url' | head -n 1)
+                        if [ -n "$asset_url" ] && [ "$asset_url" != "null" ]; then
+                            curl -sSfL -H "Authorization: token ${GITHUB_TOKEN}" \
+                                -H "Accept: application/octet-stream" \
+                                -o "$dest" "$asset_url"
+                            if [ -s "$dest" ]; then
+                                log_success "[foldpager] ✓ Downloaded: $asset_name"
+                                return 0
+                            fi
                         fi
-                        log_success "[foldpager] ✓ XML assets downloaded and extracted"
-                        _FP_OK=1
-                    else
-                        log_error "[foldpager] Asset download failed — zero bytes"
-                    fi
-                    rm -f "$_FP_ASSETS/foldpager.zip"
+                        log_warning "[foldpager] Asset '$asset_name' not found or download failed"
+                        return 1
+                    }
+
+                    # Download both XML files
+                    _fp_dl_asset "fold_screen_settings.xml" "$_FP_ASSETS/fold_screen_settings.xml" && _FP_OK=1
+                    _fp_dl_asset "ic_tablet_screen_settings.xml" "$_FP_ASSETS/ic_tablet_screen_settings.xml"
                 else
-                    log_error "[foldpager] No .zip asset found in Fold-Pager release — XML patches skipped"
+                    log_error "[foldpager] Multilang release API request failed"
                 fi
 
                 # Step 3: Full apktool decode → XML replacement + editing → rebuild → inject
@@ -2868,27 +2871,25 @@ PYTHON_EOF
                         log_success "[foldpager] ✓ Settings.apk decompiled"
 
                         # 3a. Replace fold_screen_settings.xml → res/xml/
-                        _FP_FOLD_XML=$(find "$_FP_ASSETS/extracted" -name "fold_screen_settings.xml" -type f | head -1)
-                        if [ -n "$_FP_FOLD_XML" ] && [ -d "$_FP_WORK/res/xml" ]; then
-                            cp -f "$_FP_FOLD_XML" "$_FP_WORK/res/xml/fold_screen_settings.xml"
+                        if [ -f "$_FP_ASSETS/fold_screen_settings.xml" ] && [ -d "$_FP_WORK/res/xml" ]; then
+                            cp -f "$_FP_ASSETS/fold_screen_settings.xml" "$_FP_WORK/res/xml/fold_screen_settings.xml"
                             log_success "[foldpager] ✓ fold_screen_settings.xml → res/xml/"
                         else
-                            log_warning "[foldpager] fold_screen_settings.xml not found in release or res/xml missing"
+                            log_warning "[foldpager] fold_screen_settings.xml not available or res/xml missing"
                         fi
 
                         # 3b. Replace ic_tablet_screen_settings.xml → res/drawable/ + res/drawable-night-v8/
-                        _FP_IC_XML=$(find "$_FP_ASSETS/extracted" -name "ic_tablet_screen_settings.xml" -type f | head -1)
-                        if [ -n "$_FP_IC_XML" ]; then
+                        if [ -f "$_FP_ASSETS/ic_tablet_screen_settings.xml" ]; then
                             for _d in "res/drawable" "res/drawable-night-v8"; do
                                 if [ -d "$_FP_WORK/$_d" ]; then
-                                    cp -f "$_FP_IC_XML" "$_FP_WORK/$_d/ic_tablet_screen_settings.xml"
+                                    cp -f "$_FP_ASSETS/ic_tablet_screen_settings.xml" "$_FP_WORK/$_d/ic_tablet_screen_settings.xml"
                                     log_success "[foldpager] ✓ ic_tablet_screen_settings.xml → $_d/"
                                 else
                                     log_info "[foldpager] $_d/ not present — skipping ic_tablet copy"
                                 fi
                             done
                         else
-                            log_warning "[foldpager] ic_tablet_screen_settings.xml not found in release"
+                            log_warning "[foldpager] ic_tablet_screen_settings.xml not available"
                         fi
 
                         # 3c. Edit settings_headers.xml — replace android:title on MiuiFoldSettings → "Nyxdroid"
@@ -2950,10 +2951,9 @@ FP_EDIT_PY
                         fi
 
                         # 3d. Import settings-smali.zip — merge additional smali classes into decoded APK
-                        log_info "[foldpager] Fetching settings-smali.zip from Fold-Pager release..."
-                        _FP_SMALI_URL=$(curl -sSf -H "Authorization: token ${GITHUB_TOKEN}" \
-                            -H "Accept: application/vnd.github.v3+json" "$_FP_API" \
-                            | jq -r '.assets[] | select(.name | test("settings-smali"; "i")) | .url' | head -n 1)
+                        log_info "[foldpager] Fetching settings-smali.zip from Multilang release..."
+                        _FP_SMALI_URL=$(echo "$_FP_RELEASE_JSON" | jq -r \
+                            '.assets[] | select(.name == "settings-smali.zip") | .url' | head -n 1)
 
                         if [ -n "$_FP_SMALI_URL" ] && [ "$_FP_SMALI_URL" != "null" ]; then
                             _FP_SMALI_DIR="$TEMP_DIR/fp_smali"
