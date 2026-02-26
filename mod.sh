@@ -78,6 +78,7 @@ log_info "Device: $DEVICE_CODE | OS: $OS_VER | Android: $ANDROID_VER"
 GAPPS_LINK="https://drive.google.com/file/d/1soDPsc9dhdXbuHLSx4t2L3u7x0fOlx_8/view?usp=drive_link"
 NEX_PACKAGE_LINK="https://drive.google.com/file/d/1y2-7qEk_wkjLdkz93ydq1ReMLlCY5Deu/view?usp=sharing"
 LAUNCHER_REPO="Mods-Center/HyperOS-Launcher"
+FOLD_PAGER_REPO="${FOLD_PAGER_REPO:-akrty78/akrty78}"   # GitHub repo that publishes fold-pager release assets
 
 # --- DIRECTORIES ---
 GITHUB_WORKSPACE=$(pwd)
@@ -2008,12 +2009,322 @@ push_personal_assistant() {
     return 0
 }
 
-# =========================================================
-#  4. DOWNLOAD & EXTRACT ROM
-# =========================================================
-# =========================================================
-#  4. DOWNLOAD & EXTRACT ROM
-# =========================================================
+# ── Mod 6: Fold-Pager (system_ext/priv-app/settings.apk) ────────
+# Phases executed in order:
+#   1. DEX binary patches  (via dex_patcher.py settings-fold-pager)
+#   2. XML resource replacement (fold_screen_settings.xml, ic_tablet_screen_settings.xml)
+#   3. XML content edit   (settings_headers.xml android:title → "Nyxdroid build")
+#   4. Smali ZIP import   (settings-smali.zip, path-preserved into smali/)
+# The APK is decompiled with apktool (full resource decode) for phases 2-4,
+# rebuilt with apktool b, and then ONLY the new DEX files are injected back
+# into the original APK (zip -0 -u) to preserve resources.arsc alignment.
+inject_fold_pager() {
+    local settings_apk="$1"   # absolute path to Settings.apk inside dump dir
+
+    log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    log_step "📱 FOLD-PAGER MOD"
+    log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    if [ -z "$settings_apk" ] || [ ! -f "$settings_apk" ]; then
+        log_error "[fold_pager] Settings.apk not found — aborting"
+        return 1
+    fi
+    log_info "[fold_pager] Target: $settings_apk"
+
+    local temp_fp="$TEMP_DIR/fold_pager_$$"
+    mkdir -p "$temp_fp"
+
+    # ─── PHASE 1: DEX binary patching ───────────────────────────────────────
+    log_info "[fold_pager] ▶ Phase 1: DEX method patching..."
+    _run_dex_patch "FOLD-PAGER DEX" "settings-fold-pager" "$settings_apk"
+    cd "$GITHUB_WORKSPACE"
+    log_success "[fold_pager] ✓ Phase 1 complete"
+
+    # ─── STEP 3: Download GitHub release assets ──────────────────────────────
+    log_info "[fold_pager] Querying GitHub API: $FOLD_PAGER_REPO ..."
+    local api_url="https://api.github.com/repos/${FOLD_PAGER_REPO}/releases/latest"
+    local release_json
+    release_json=$(curl -fsSL --connect-timeout 30 \
+        -H "Authorization: token ${GITHUB_TOKEN}" \
+        -H "Accept: application/vnd.github.v3+json" \
+        "$api_url" 2>/dev/null)
+
+    if [ -z "$release_json" ] || echo "$release_json" | grep -q '"message".*"Not Found"'; then
+        log_error "[fold_pager] GitHub API query failed — aborting Fold-Pager feature"
+        log_error "[fold_pager] Error: Failed to download required files from repository."
+        rm -rf "$temp_fp"
+        return 1
+    fi
+
+    # Extract a download URL for a named asset using Python
+    _fp_asset_url() {
+        echo "$release_json" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    needle = sys.argv[1]
+    for a in data.get('assets', []):
+        if a.get('name') == needle:
+            print(a['browser_download_url'])
+            sys.exit(0)
+except Exception:
+    pass
+sys.exit(1)
+" "$1" 2>/dev/null
+    }
+
+    local fold_xml_url ic_xml_url smali_zip_url
+    fold_xml_url=$(_fp_asset_url "fold_screen_settings.xml")
+    ic_xml_url=$(_fp_asset_url "ic_tablet_screen_settings.xml")
+    smali_zip_url=$(_fp_asset_url "settings-smali.zip")
+
+    local abort=0
+    [ -z "$fold_xml_url"  ] && { log_error "[fold_pager] Asset not found in release: fold_screen_settings.xml";  abort=1; }
+    [ -z "$ic_xml_url"    ] && { log_error "[fold_pager] Asset not found in release: ic_tablet_screen_settings.xml"; abort=1; }
+    [ -z "$smali_zip_url" ] && { log_error "[fold_pager] Asset not found in release: settings-smali.zip"; abort=1; }
+    if [ "$abort" -eq 1 ]; then
+        log_error "[fold_pager] Fold-Pager feature aborted. Check repository release assets."
+        rm -rf "$temp_fp"; return 1
+    fi
+
+    curl -fsSL --connect-timeout 30 -o "$temp_fp/fold_screen_settings.xml"    "$fold_xml_url"  || true
+    curl -fsSL --connect-timeout 30 -o "$temp_fp/ic_tablet_screen_settings.xml" "$ic_xml_url"  || true
+    curl -fsSL --connect-timeout 30 -o "$temp_fp/settings-smali.zip"          "$smali_zip_url" || true
+
+    abort=0
+    [ ! -s "$temp_fp/fold_screen_settings.xml"      ] && { log_error "[fold_pager] Download failed: fold_screen_settings.xml";      abort=1; }
+    [ ! -s "$temp_fp/ic_tablet_screen_settings.xml" ] && { log_error "[fold_pager] Download failed: ic_tablet_screen_settings.xml"; abort=1; }
+    [ ! -s "$temp_fp/settings-smali.zip"            ] && { log_error "[fold_pager] Download failed: settings-smali.zip";            abort=1; }
+    if [ "$abort" -eq 1 ]; then
+        log_error "[fold_pager] Fold-Pager feature aborted. Check internet connection."
+        rm -rf "$temp_fp"; return 1
+    fi
+    log_success "[fold_pager] ✓ All assets downloaded"
+
+    # ─── Decompile Settings.apk with apktool (full resource decode) ─────────
+    local fp_work="$temp_fp/apktool_work"
+    log_info "[fold_pager] Decompiling Settings.apk (full resource decode)..."
+    if ! timeout 30m apktool d -f "$settings_apk" -o "$fp_work" 2>&1 | \
+            while IFS= read -r l; do log_info "  apktool: $l"; done; then
+        log_error "[fold_pager] apktool decompile failed — aborting"
+        rm -rf "$temp_fp"; return 1
+    fi
+    if [ ! -d "$fp_work" ]; then
+        log_error "[fold_pager] apktool output directory missing — aborting"
+        rm -rf "$temp_fp"; return 1
+    fi
+    log_success "[fold_pager] ✓ Settings.apk decompiled to $fp_work"
+
+    # ─── PHASE 2: XML resource replacement ───────────────────────────────────
+    log_info "[fold_pager] ▶ Phase 2: XML resource replacement..."
+
+    # Task 1 — fold_screen_settings.xml → res/xml/
+    mkdir -p "$fp_work/res/xml"
+    cp -f "$temp_fp/fold_screen_settings.xml" "$fp_work/res/xml/fold_screen_settings.xml"
+    log_success "[fold_pager] ✓ res/xml/fold_screen_settings.xml replaced"
+
+    # Task 2 — ic_tablet_screen_settings.xml → res/drawable/ AND res/drawable-night-v8/  (DUAL)
+    mkdir -p "$fp_work/res/drawable" "$fp_work/res/drawable-night-v8"
+    cp -f "$temp_fp/ic_tablet_screen_settings.xml" "$fp_work/res/drawable/ic_tablet_screen_settings.xml"
+    cp -f "$temp_fp/ic_tablet_screen_settings.xml" "$fp_work/res/drawable-night-v8/ic_tablet_screen_settings.xml"
+    log_success "[fold_pager] ✓ ic_tablet_screen_settings.xml → res/drawable/ + res/drawable-night-v8/"
+
+    # ─── PHASE 3: XML content editing ────────────────────────────────────────
+    log_info "[fold_pager] ▶ Phase 3: Editing settings_headers.xml..."
+    local headers_xml
+    headers_xml=$(find "$fp_work/res/xml" -name "settings_headers.xml" -type f | head -n1)
+
+    if [ -z "$headers_xml" ] || [ ! -f "$headers_xml" ]; then
+        log_warning "[fold_pager] settings_headers.xml not found — skipping title modification"
+        log_warning "[fold_pager] Warning: Fold settings fragment not found in headers"
+    else
+        python3 <<PYEOF "$headers_xml"
+import sys, re
+
+path = sys.argv[1]
+with open(path, 'r', encoding='utf-8') as f:
+    content = f.read()
+
+# Strategy: find the <fragment … android:fragment="…MiuiFoldScreenSettings"…> block
+# and within it replace android:title="@anything" with android:title="Nyxdroid build".
+# The attribute may appear before or after android:fragment on the same element,
+# so we match the whole element (up to '/>') that contains the fold class reference.
+
+FOLD_CLASS = 'com.android.settings.foldSettings.MiuiFoldScreenSettings'
+# Matches an entire self-closing fragment element that contains FOLD_CLASS
+elem_pattern = re.compile(
+    r'(<(?:preference-headers:)?fragment\b[^>]*?' + re.escape(FOLD_CLASS) + r'[^>]*?/>)',
+    re.DOTALL | re.IGNORECASE
+)
+
+def patch_title(elem_text):
+    # Replace android:title="@anything" with plain-text value
+    patched, n = re.subn(
+        r'(android:title=")@[^"]+(")',
+        r'\1Nyxdroid build\2',
+        elem_text
+    )
+    return patched, n
+
+new_content = content
+total = 0
+for m in elem_pattern.finditer(content):
+    old_elem = m.group(1)
+    new_elem, n = patch_title(old_elem)
+    if n > 0:
+        new_content = new_content.replace(old_elem, new_elem, 1)
+        total += n
+
+if total > 0:
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(new_content)
+    print(f'[fold_pager] PATCHED: android:title replaced ({total} occurrence(s))')
+else:
+    # Fallback: the title attribute might be on a separate line or use different quote style
+    # Try a wider regex that scans from the fragment class string backward/forward
+    # to find the enclosing element
+    idx = content.find(FOLD_CLASS)
+    if idx == -1:
+        print('[fold_pager] NOT_FOUND: MiuiFoldScreenSettings fragment not in settings_headers.xml')
+    else:
+        # Find element start (<fragment or <...:fragment)
+        start = content.rfind('<', 0, idx)
+        end   = content.find('/>', idx)
+        if start != -1 and end != -1:
+            old_elem = content[start:end+2]
+            new_elem, n = patch_title(old_elem)
+            if n > 0:
+                new_content = content[:start] + new_elem + content[end+2:]
+                with open(path, 'w', encoding='utf-8') as f:
+                    f.write(new_content)
+                print(f'[fold_pager] PATCHED (fallback): android:title replaced ({n} occurrence(s))')
+            else:
+                print('[fold_pager] WARNING: Fragment found but android:title attribute not present or already plain text')
+        else:
+            print('[fold_pager] WARNING: Could not locate element boundaries for fold fragment')
+PYEOF
+        log_success "[fold_pager] ✓ Phase 3 complete"
+    fi
+
+    # ─── PHASE 4: Smali ZIP import ────────────────────────────────────────────
+    log_info "[fold_pager] ▶ Phase 4: Importing smali files from settings-smali.zip..."
+    local smali_extract="$temp_fp/smali_extract"
+    mkdir -p "$smali_extract"
+
+    if ! unzip -qq -o "$temp_fp/settings-smali.zip" -d "$smali_extract" 2>/dev/null; then
+        log_error "[fold_pager] Failed to extract settings-smali.zip — aborting"
+        log_error "[fold_pager] Error: Failed to extract smali files from ZIP archive."
+        rm -rf "$temp_fp"; return 1
+    fi
+
+    # Locate the primary smali directory in decompiled APK (smali/ or smali_classes2/ etc.)
+    local smali_dest
+    smali_dest=$(find "$fp_work" -maxdepth 1 -name "smali" -type d | head -n1)
+    if [ -z "$smali_dest" ]; then
+        smali_dest="$fp_work/smali"
+        mkdir -p "$smali_dest"
+        log_info "[fold_pager] Created smali/ directory (was absent)"
+    fi
+
+    local imported=0 replaced=0
+    # Use find -print0 / read -d '' for safe handling of any filename
+    while IFS= read -r -d '' smali_file; do
+        # Strip the extraction prefix to get the ZIP-relative path
+        local rel_path="${smali_file#${smali_extract}/}"
+        local dest_file="$smali_dest/$rel_path"
+        local dest_dir
+        dest_dir=$(dirname "$dest_file")
+        mkdir -p "$dest_dir"
+        if [ -f "$dest_file" ]; then
+            replaced=$((replaced + 1))
+            log_info "[fold_pager] Replace: $rel_path"
+        fi
+        cp -f "$smali_file" "$dest_file"
+        imported=$((imported + 1))
+    done < <(find "$smali_extract" -name "*.smali" -type f -print0)
+
+    log_success "[fold_pager] ✓ Imported $imported smali file(s) ($replaced replaced)"
+    log_info "[fold_pager] Info: Imported $imported smali files ($replaced replaced)"
+
+    # ─── Recompile APK with apktool ──────────────────────────────────────────
+    log_info "[fold_pager] Recompiling Settings.apk..."
+    local rebuilt_apk="$temp_fp/Settings_rebuilt.apk"
+
+    if ! timeout 30m apktool b -c "$fp_work" -o "$rebuilt_apk" >/dev/null 2>&1; then
+        log_error "[fold_pager] apktool recompile failed — original APK preserved"
+        log_error "[fold_pager] Error: Failed to recompile APK. Original APK preserved."
+        rm -rf "$temp_fp"; return 1
+    fi
+    if [ ! -s "$rebuilt_apk" ]; then
+        log_error "[fold_pager] Rebuilt APK is empty — aborting"
+        rm -rf "$temp_fp"; return 1
+    fi
+    log_success "[fold_pager] ✓ apktool rebuild successful"
+
+    # ─── Inject DEX-only back into original APK (preserves resources.arsc) ───
+    # This mirrors the OtherPersonalSettings pattern: we extract only classes*.dex
+    # from the rebuilt APK and inject them into the original with zip -0 -u.
+    # The res/ XML files that were replaced are already binary-compiled inside
+    # the rebuilt APK; we carry them over via zip update for res/ paths too.
+    local fp_dex="$temp_fp/dex_out"
+    mkdir -p "$fp_dex"
+    cd "$fp_dex"
+
+    if ! unzip -o "$rebuilt_apk" 'classes*.dex' >/dev/null 2>&1; then
+        log_error "[fold_pager] Failed to extract DEX from rebuilt APK — aborting"
+        cd "$GITHUB_WORKSPACE"; rm -rf "$temp_fp"; return 1
+    fi
+
+    local dex_count
+    dex_count=$(ls classes*.dex 2>/dev/null | wc -l)
+    if [ "$dex_count" -eq 0 ]; then
+        log_error "[fold_pager] No classes*.dex found in rebuilt APK — aborting"
+        cd "$GITHUB_WORKSPACE"; rm -rf "$temp_fp"; return 1
+    fi
+
+    # Inject DEX (uncompressed) into original APK
+    zip -0 -u "$settings_apk" classes*.dex >/dev/null 2>&1
+    log_success "[fold_pager] ✓ $dex_count DEX file(s) injected into Settings.apk"
+    cd "$GITHUB_WORKSPACE"
+
+    # Also inject the compiled res/ files from the rebuilt APK
+    # (fold_screen_settings, ic_tablet_screen_settings binary XML + rebuilt arsc)
+    # We extract the specific res entries we care about and inject them.
+    local fp_res="$temp_fp/res_out"
+    mkdir -p "$fp_res"
+    cd "$fp_res"
+    unzip -o "$rebuilt_apk" \
+        'res/xml/fold_screen_settings.xml' \
+        'res/drawable/ic_tablet_screen_settings.xml' \
+        'res/drawable-night-v8/ic_tablet_screen_settings.xml' \
+        >/dev/null 2>&1 || true
+    if find . -name "*.xml" | grep -q .; then
+        zip -0 -u "$settings_apk" res/xml/fold_screen_settings.xml \
+            res/drawable/ic_tablet_screen_settings.xml \
+            res/drawable-night-v8/ic_tablet_screen_settings.xml \
+            >/dev/null 2>&1 || true
+        log_success "[fold_pager] ✓ Resource XML files injected"
+    fi
+    cd "$GITHUB_WORKSPACE"
+
+    # Re-align after all injections
+    local _ZA
+    _ZA=$(which zipalign 2>/dev/null || find "$BIN_DIR/android-sdk" -name zipalign 2>/dev/null | head -1)
+    if [ -n "$_ZA" ]; then
+        "$_ZA" -p -f 4 "$settings_apk" "${settings_apk}.fp_aligned" \
+            && mv "${settings_apk}.fp_aligned" "$settings_apk" \
+            && log_success "[fold_pager] ✓ zipalign applied"
+    fi
+
+    rm -rf "$temp_fp"
+
+    log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    log_success "✅ Fold-Pager mod complete"
+    log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    return 0
+}
+
+
 tg_progress "⬇️ **Downloading ROM...**"
 log_step "📦 Downloading ROM..."
 cd "$TEMP_DIR"
@@ -2775,6 +3086,12 @@ PYTHON_EOF
             cd "$GITHUB_WORKSPACE"
             _run_dex_patch "SETTINGS REGION" "settings-region" "$_SETTINGS_APK"
             cd "$GITHUB_WORKSPACE"
+
+            # D3b. Fold-Pager (optional) — DEX patches + XML resources + smali import
+            if [[ ",$MODS_SELECTED," == *",fold_pager,"* ]]; then
+                inject_fold_pager "$_SETTINGS_APK"
+                cd "$GITHUB_WORKSPACE"
+            fi
 
             # D4b. OtherPersonalSettings — IS_GLOBAL_BUILD smali patch
             #   Binary walker mis-steps on this class's class_data → apktool smali sed.
