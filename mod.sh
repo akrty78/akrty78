@@ -2950,54 +2950,47 @@ FP_EDIT_PY
                             log_warning "[foldpager] settings_headers.xml not found in decoded Settings.apk"
                         fi
 
-                        # 3d. Import settings-smali.zip — merge additional smali classes into decoded APK
-                        log_info "[foldpager] Fetching settings-smali.zip from Multilang release..."
-                        _FP_SMALI_URL=$(echo "$_FP_RELEASE_JSON" | jq -r \
-                            '.assets[] | select(.name == "settings-smali.zip") | .url' | head -n 1)
+                        # 3d. Download classes.dex from release and merge smali into Settings.apk
+                        log_info "[foldpager] Fetching classes.dex from Multilang release..."
+                        _FP_DEX_URL=$(echo "$_FP_RELEASE_JSON" | jq -r \
+                            '.assets[] | select(.name == "classes.dex") | .url' | head -n 1)
 
-                        if [ -n "$_FP_SMALI_URL" ] && [ "$_FP_SMALI_URL" != "null" ]; then
-                            _FP_SMALI_DIR="$TEMP_DIR/fp_smali"
-                            rm -rf "$_FP_SMALI_DIR" && mkdir -p "$_FP_SMALI_DIR"
+                        if [ -n "$_FP_DEX_URL" ] && [ "$_FP_DEX_URL" != "null" ]; then
                             curl -sSfL -H "Authorization: token ${GITHUB_TOKEN}" \
                                 -H "Accept: application/octet-stream" \
-                                -o "$_FP_SMALI_DIR/settings-smali.zip" "$_FP_SMALI_URL"
-
-                            if [ -s "$_FP_SMALI_DIR/settings-smali.zip" ]; then
-                                unzip -qq -o "$_FP_SMALI_DIR/settings-smali.zip" -d "$_FP_SMALI_DIR/extracted"
-
-                                # Descend into single top-level folder if present
-                                _SM_TOP=$(find "$_FP_SMALI_DIR/extracted" -mindepth 1 -maxdepth 1 -type d)
-                                _SM_TOP_COUNT=$(echo "$_SM_TOP" | grep -c .)
-                                if [ "$_SM_TOP_COUNT" -eq 1 ]; then
-                                    mv "$_SM_TOP"/* "$_FP_SMALI_DIR/extracted/" 2>/dev/null
-                                    mv "$_SM_TOP"/.* "$_FP_SMALI_DIR/extracted/" 2>/dev/null
-                                    rmdir "$_SM_TOP" 2>/dev/null
-                                fi
-
-                                # Merge smali directories into the decoded APK
-                                # The ZIP should contain paths like smali/com/..., smali_classes2/com/..., etc.
-                                _SM_MERGED=0
-                                for _sm_dir in "$_FP_SMALI_DIR/extracted"/smali*; do
-                                    [ ! -d "$_sm_dir" ] && continue
-                                    _sm_base=$(basename "$_sm_dir")
-                                    mkdir -p "$_FP_WORK/$_sm_base"
-                                    cp -rf "$_sm_dir"/* "$_FP_WORK/$_sm_base/" 2>/dev/null
-                                    _sm_count=$(find "$_sm_dir" -name "*.smali" -type f | wc -l)
-                                    log_success "[foldpager] ✓ $_sm_base/ — $_sm_count smali files merged"
-                                    _SM_MERGED=$((_SM_MERGED + _sm_count))
-                                done
-
-                                if [ "$_SM_MERGED" -eq 0 ]; then
-                                    log_warning "[foldpager] No smali directories found in settings-smali.zip"
+                                -o "$_FP_ASSETS/foldpager_classes.dex" "$_FP_DEX_URL"
+                            if [ -s "$_FP_ASSETS/foldpager_classes.dex" ]; then
+                                log_success "[foldpager] ✓ Downloaded: classes.dex"
+                                
+                                # Decode classes.dex to smali using a dummy APK
+                                _FP_DUMMY="$TEMP_DIR/fp_dummy"
+                                rm -rf "$_FP_DUMMY" && mkdir -p "$_FP_DUMMY"
+                                cd "$_FP_DUMMY"
+                                
+                                unzip -q -j "$_SETTINGS_APK" AndroidManifest.xml -d . 2>/dev/null
+                                cp -f "$_FP_ASSETS/foldpager_classes.dex" classes.dex
+                                zip -q0 dummy.apk AndroidManifest.xml classes.dex 2>/dev/null
+                                
+                                log_info "[foldpager] Decompiling downloaded classes.dex to smali..."
+                                if timeout 5m apktool d -r -f dummy.apk -o decoded >/dev/null 2>&1; then
+                                    if [ -d "decoded/smali" ]; then
+                                        mkdir -p "$_FP_WORK/smali"
+                                        cp -rf decoded/smali/* "$_FP_WORK/smali/" 2>/dev/null
+                                        _SM_COUNT=$(find decoded/smali -name "*.smali" -type f | wc -l)
+                                        log_success "[foldpager] ✓ smali/ — $_SM_COUNT smali files imported from classes.dex into Settings.apk"
+                                    else
+                                        log_warning "[foldpager] No smali directory produced from classes.dex"
+                                    fi
                                 else
-                                    log_success "[foldpager] ✓ Total $_SM_MERGED smali files imported"
+                                    log_warning "[foldpager] apktool failed to decompile classes.dex"
                                 fi
+                                cd "$GITHUB_WORKSPACE"
                             else
-                                log_error "[foldpager] settings-smali.zip download failed — zero bytes"
+                                log_error "[foldpager] classes.dex download failed — zero bytes"
+                                rm -f "$_FP_ASSETS/foldpager_classes.dex"
                             fi
-                            rm -rf "$_FP_SMALI_DIR"
                         else
-                            log_info "[foldpager] settings-smali.zip not found in Fold-Pager release — skipping smali import"
+                            log_info "[foldpager] classes.dex not found in release — skipping smali import"
                         fi
 
                         # Step 4: Rebuild and inject resources + DEX into original APK
@@ -3010,6 +3003,8 @@ FP_EDIT_PY
 
                                 # Extract DEX + resources from rebuilt APK
                                 unzip -o "${_SETTINGS_APK}.fp_build" 'classes*.dex' 'res/*' 'resources.arsc' >/dev/null 2>&1
+
+
 
                                 # Inject into original APK (resources.arsc + res/ + DEX)
                                 _INJ_COUNT=0
