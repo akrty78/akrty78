@@ -2974,10 +2974,22 @@ FP_EDIT_PY
                                 log_info "[foldpager] Decompiling downloaded classes.dex to smali..."
                                 if timeout 5m apktool d -r -f dummy.apk -o decoded >/dev/null 2>&1; then
                                     if [ -d "decoded/smali" ]; then
+                                        log_info "[foldpager] Removing existing duplicate smali files across all smali* dirs..."
+                                        find decoded/smali -name "*.smali" -type f | while read -r _new_smali; do
+                                            _rel_path="${_new_smali#decoded/smali/}"
+                                            # Find matching existing paths in all smali* dirs and remove them
+                                            for _target_smali_dir in "$_FP_WORK"/smali*; do
+                                                [ ! -d "$_target_smali_dir" ] && continue
+                                                if [ -f "$_target_smali_dir/$_rel_path" ]; then
+                                                    rm -f "$_target_smali_dir/$_rel_path"
+                                                fi
+                                            done
+                                        done
+
                                         mkdir -p "$_FP_WORK/smali"
                                         cp -rf decoded/smali/* "$_FP_WORK/smali/" 2>/dev/null
                                         _SM_COUNT=$(find decoded/smali -name "*.smali" -type f | wc -l)
-                                        log_success "[foldpager] ✓ smali/ — $_SM_COUNT smali files imported from classes.dex into Settings.apk"
+                                        log_success "[foldpager] ✓ smali/ — $_SM_COUNT smali files imported from classes.dex (duplicates removed)"
                                     else
                                         log_warning "[foldpager] No smali directory produced from classes.dex"
                                     fi
@@ -2995,7 +3007,9 @@ FP_EDIT_PY
 
                         # Step 4: Rebuild and inject resources + DEX into original APK
                         log_info "[foldpager] Rebuilding Settings.apk..."
-                        if timeout 25m apktool b "$_FP_WORK" -o "${_SETTINGS_APK}.fp_build" >/dev/null 2>&1; then
+                        _FP_BUILD_LOG="$TEMP_DIR/fp_apktool_build.log"
+                        rm -f "$_FP_BUILD_LOG"
+                        if timeout 25m apktool b "$_FP_WORK" -o "${_SETTINGS_APK}.fp_build" >"$_FP_BUILD_LOG" 2>&1; then
                             if [ -f "${_SETTINGS_APK}.fp_build" ]; then
                                 _FP_INJ="$TEMP_DIR/fp_inject"
                                 rm -rf "$_FP_INJ" && mkdir -p "$_FP_INJ"
@@ -3042,8 +3056,9 @@ FP_EDIT_PY
                             fi
                             rm -f "${_SETTINGS_APK}.fp_build"
                         else
-                            rm -f "${_SETTINGS_APK}.fp_build"
                             log_warning "[foldpager] apktool rebuild failed — XML patches skipped"
+                            [ -s "$_FP_BUILD_LOG" ] && cat "$_FP_BUILD_LOG"
+                            rm -f "${_SETTINGS_APK}.fp_build"
                         fi
                     else
                         log_warning "[foldpager] apktool decompile failed — XML patches skipped"
