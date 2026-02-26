@@ -1583,16 +1583,49 @@ def _incallui_patch(dex_name: str, dex: bytearray) -> bool:
 #  COMMAND TABLE  +  ENTRY POINT
 # ════════════════════════════════════════════════════════════════════
 
+# ── Settings.apk — Fold-Pager feature  ──────────────────────────────────────
+def _settings_fold_pager_patch(dex_name: str, dex: bytearray) -> bool:
+    """
+    FOLD-PAGER Phase 1: Two binary method patches in Settings.apk.
+    Patch 1 — isSupportFoldScreenSettings → return true
+    Patch 2 — displayResourceTilesToScreen → return void
+    Both are graceful-skip if the target class/method is absent.
+    """
+    patched = False
+    raw = bytes(dex)
+
+    if b'isSupportFoldScreenSettings' in raw:
+        if binary_patch_method(dex,
+                "com/android/settings/utils/SettingsFeatures",
+                "isSupportFoldScreenSettings",
+                stub_regs=1, stub_insns=_STUB_TRUE, trim=True):
+            patched = True
+        else:
+            warn("  [fold-pager] isSupportFoldScreenSettings not found — skipping")
+
+    if b'displayResourceTilesToScreen' in raw:
+        if binary_patch_method(dex,
+                "com/android/settings/foldSettings/MiuiFoldScreenSettings",
+                "displayResourceTilesToScreen",
+                stub_regs=0, stub_insns=_STUB_VOID, trim=True):
+            patched = True
+        else:
+            warn("  [fold-pager] displayResourceTilesToScreen not found — skipping")
+
+    return patched
+
+
 PROFILES = {
-    "settings-ai":       _settings_ai_patch,
-    "settings-region":   _settings_region_patch,   # exact 3 classes only
-    "voice-recorder-ai": _recorder_ai_patch,        # AiDeviceUtil::isAiSupportedDevice
-    "services-jar":      _services_jar_patch,
-    "provision-gms":     _provision_gms_patch,    # Utils::setGmsAppEnabledStateForCn only
-    "miui-service":      _miui_service_patch,    # global IS_INTERNATIONAL_BUILD sweep
-    "systemui-volte":    _systemui_all_patch,       # VoLTE + QuickShare(const/4) + WA-notif
-    "miui-framework":    _miui_framework_patch,     # validateTheme(trim) + IS_GLOBAL_BUILD
-    "incallui-ai":       _incallui_patch,           # RecorderUtils::isAiRecordEnable
+    "settings-ai":          _settings_ai_patch,
+    "settings-region":      _settings_region_patch,      # exact 3 classes only
+    "settings-fold-pager":  _settings_fold_pager_patch,  # Fold-Pager DEX phase
+    "voice-recorder-ai":    _recorder_ai_patch,          # AiDeviceUtil::isAiSupportedDevice
+    "services-jar":         _services_jar_patch,
+    "provision-gms":        _provision_gms_patch,        # Utils::setGmsAppEnabledStateForCn only
+    "miui-service":         _miui_service_patch,         # global IS_INTERNATIONAL_BUILD sweep
+    "systemui-volte":       _systemui_all_patch,         # VoLTE + QuickShare(const/4) + WA-notif
+    "miui-framework":       _miui_framework_patch,       # validateTheme(trim) + IS_GLOBAL_BUILD
+    "incallui-ai":          _incallui_patch,             # RecorderUtils::isAiRecordEnable
 }
 
 def main():
@@ -2037,8 +2070,13 @@ inject_fold_pager() {
     # ─── PHASE 1: DEX binary patching ───────────────────────────────────────
     log_info "[fold_pager] ▶ Phase 1: DEX method patching..."
     _run_dex_patch "FOLD-PAGER DEX" "settings-fold-pager" "$settings_apk"
+    local _fp_dex_rc=$?
     cd "$GITHUB_WORKSPACE"
-    log_success "[fold_pager] ✓ Phase 1 complete"
+    if [ "$_fp_dex_rc" -ne 0 ]; then
+        log_warning "[fold_pager] Phase 1: dex_patcher exited with error (non-fatal — continuing)"
+    else
+        log_success "[fold_pager] ✓ Phase 1 complete"
+    fi
 
     # ─── STEP 3: Download GitHub release assets ──────────────────────────────
     log_info "[fold_pager] Querying GitHub API: $FOLD_PAGER_REPO ..."
