@@ -2870,29 +2870,9 @@ PYTHON_EOF
                     if timeout 25m apktool d -f "$_SETTINGS_APK" -o "$_FP_WORK" >/dev/null 2>&1; then
                         log_success "[foldpager] ✓ Settings.apk decompiled"
 
-                        # 3a. Replace fold_screen_settings.xml → res/xml/
-                        if [ -f "$_FP_ASSETS/fold_screen_settings.xml" ] && [ -d "$_FP_WORK/res/xml" ]; then
-                            cp -f "$_FP_ASSETS/fold_screen_settings.xml" "$_FP_WORK/res/xml/fold_screen_settings.xml"
-                            log_success "[foldpager] ✓ fold_screen_settings.xml → res/xml/"
-                        else
-                            log_warning "[foldpager] fold_screen_settings.xml not available or res/xml missing"
-                        fi
+                        # (Moved XML replacement to Step 4 post-rebuild because they are binary AXML)
 
-                        # 3b. Replace ic_tablet_screen_settings.xml → res/drawable/ + res/drawable-night-v8/
-                        if [ -f "$_FP_ASSETS/ic_tablet_screen_settings.xml" ]; then
-                            for _d in "res/drawable" "res/drawable-night-v8"; do
-                                if [ -d "$_FP_WORK/$_d" ]; then
-                                    cp -f "$_FP_ASSETS/ic_tablet_screen_settings.xml" "$_FP_WORK/$_d/ic_tablet_screen_settings.xml"
-                                    log_success "[foldpager] ✓ ic_tablet_screen_settings.xml → $_d/"
-                                else
-                                    log_info "[foldpager] $_d/ not present — skipping ic_tablet copy"
-                                fi
-                            done
-                        else
-                            log_warning "[foldpager] ic_tablet_screen_settings.xml not available"
-                        fi
-
-                        # 3c. Edit settings_headers.xml — replace android:title on MiuiFoldSettings → "Nyxdroid"
+                        # 3a. Edit settings_headers.xml — replace android:title on MiuiFoldSettings → "Nyxdroid"
                         _FP_HEADERS=$(find "$_FP_WORK" -name "settings_headers.xml" -path "*/res/xml/*" -type f | head -1)
                         if [ -n "$_FP_HEADERS" ]; then
                             python3 - "$_FP_HEADERS" <<'FP_EDIT_PY'
@@ -3029,6 +3009,40 @@ FP_EDIT_PY
                                 if [ -f "resources.arsc" ]; then
                                     zip -0 -u "$_SETTINGS_APK" resources.arsc >/dev/null 2>&1
                                     _INJ_COUNT=$((_INJ_COUNT + 1))
+                                fi
+                                if [ -d "res" ]; then
+                                    # Add all res entries built by apktool
+                                    find res -type f | while read -r _rf; do
+                                        zip -0 -u "$_SETTINGS_APK" "$_rf" >/dev/null 2>&1
+                                    done
+                                    _INJ_COUNT=$((_INJ_COUNT + 1))
+                                fi
+
+                                cd "$GITHUB_WORKSPACE"
+
+                                # Inject binary AXML assets directly into the rebuilt APK
+                                if [ -f "$_FP_ASSETS/fold_screen_settings.xml" ]; then
+                                    # We need to zip it with relative path res/xml/...
+                                    _TMP_RES="$TEMP_DIR/fp_res_xml"
+                                    rm -rf "$_TMP_RES" && mkdir -p "$_TMP_RES/res/xml"
+                                    cp -f "$_FP_ASSETS/fold_screen_settings.xml" "$_TMP_RES/res/xml/"
+                                    cd "$_TMP_RES"
+                                    zip -0 -u "$_SETTINGS_APK" res/xml/fold_screen_settings.xml >/dev/null 2>&1
+                                    cd "$GITHUB_WORKSPACE"
+                                    rm -rf "$_TMP_RES"
+                                    log_success "[foldpager] ✓ Injected binary fold_screen_settings.xml"
+                                fi
+                                if [ -f "$_FP_ASSETS/ic_tablet_screen_settings.xml" ]; then
+                                    _TMP_RES="$TEMP_DIR/fp_res_draw"
+                                    rm -rf "$_TMP_RES" && mkdir -p "$_TMP_RES/res/drawable" "$_TMP_RES/res/drawable-night-v8"
+                                    cp -f "$_FP_ASSETS/ic_tablet_screen_settings.xml" "$_TMP_RES/res/drawable/"
+                                    cp -f "$_FP_ASSETS/ic_tablet_screen_settings.xml" "$_TMP_RES/res/drawable-night-v8/"
+                                    cd "$_TMP_RES"
+                                    zip -0 -u "$_SETTINGS_APK" res/drawable/ic_tablet_screen_settings.xml >/dev/null 2>&1
+                                    zip -0 -u "$_SETTINGS_APK" res/drawable-night-v8/ic_tablet_screen_settings.xml >/dev/null 2>&1
+                                    cd "$GITHUB_WORKSPACE"
+                                    rm -rf "$_TMP_RES"
+                                    log_success "[foldpager] ✓ Injected binary ic_tablet_screen_settings.xml"
                                 fi
                                 if [ -d "res" ]; then
                                     # Add all res entries
