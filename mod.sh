@@ -1639,20 +1639,37 @@ def _settings_region_patch(dex_name: str, dex: bytearray) -> bool:
 # ── Settings.apk Fold-Pager  ─────────────────────────────────────
 def _settings_foldpager_patch(dex_name: str, dex: bytearray) -> bool:
     """
-    Fold-Pager: two binary method stubs in Settings.apk.
+    Fold-Pager: binary method stubs in Settings.apk.
 
     Patch 1 — SettingsFeatures::isSupportFoldScreenSettings → return true
-      Class: com/android/settings/utils/SettingsFeatures
-      Makes the fold screen settings page accessible.
+      Makes the fold screen settings page visible in the Settings menu.
+      Class path is fixed — confirmed present in all known HyperOS builds.
 
     Patch 2 — MiuiFoldScreenSettings::displayResourceTilesToScreen → return void
-      Class: com/android/settings/foldSettings/MiuiFoldScreenSettings
-      Suppresses the default tile display, allowing custom XML layout.
+      Suppresses the default tile-display code path so the XML layout drives
+      the UI instead. The class simple-name is stable across builds but the
+      package path varies (foldSettings vs foldscreen vs foldpager).
+      FIX: scan all class defs for any class whose simple name contains
+      'MiuiFoldScreenSettings' instead of using a hardcoded path.
+
+    Patch 3 — Stub getAvailabilityStatus() on foldpager PreferenceControllers
+      that are NOT the main MiuiFoldScreenSettings fragment.
+      These controllers (e.g. FoldPageController, FoldScreenMixinController) are
+      injected into Settings\'s controller registry at startup.  If their class is
+      loaded from a foreign DEX (injected from a different ROM build), they call
+      resource IDs compiled for that foreign build → Resources.NotFoundException
+      → Settings crash before the home page even renders.
+      FIX: stub getAvailabilityStatus() → AVAILABLE_UNSUPPORTED (3) on every
+      class whose name contains "Fold" and has this method, EXCEPT the main
+      MiuiFoldScreenSettings class (which the binary-patch and XML injection handle).
+
+      AVAILABLE_UNSUPPORTED = 3  (BasePreferenceController constant)
+        → controller silently removed from Settings, no crash, no empty entry.
     """
     patched = False
     raw = bytes(dex)
 
-    # Patch 1: isSupportFoldScreenSettings → return true (0x1)
+    # ── Patch 1: isSupportFoldScreenSettings → return true ───────────────
     if b'SettingsFeatures' in raw:
         if binary_patch_method(dex,
                 "com/android/settings/utils/SettingsFeatures",
@@ -1661,13 +1678,73 @@ def _settings_foldpager_patch(dex_name: str, dex: bytearray) -> bool:
             patched = True
             raw = bytes(dex)
 
-    # Patch 2: displayResourceTilesToScreen → return void
+    # ── Patch 2: displayResourceTilesToScreen → return void ──────────────
+    # Scan all class defs — the package path of MiuiFoldScreenSettings differs
+    # across HyperOS builds (foldSettings / foldscreen / foldpager).
     if b'MiuiFoldScreenSettings' in raw:
-        if binary_patch_method(dex,
-                "com/android/settings/foldSettings/MiuiFoldScreenSettings",
-                "displayResourceTilesToScreen", 0, _STUB_VOID,
-                trim=True):
-            patched = True
+        data = bytes(dex)
+        hdr  = _parse_header(data)
+        found_displayresource = False
+        if hdr:
+            for i in range(hdr['class_defs_size']):
+                base = hdr['class_defs_off'] + i * 32
+                if struct.unpack_from('<I', data, base + 24)[0] == 0:
+                    continue
+                cls_idx = struct.unpack_from('<I', data, base)[0]
+                try:
+                    sidx     = struct.unpack_from('<I', data, hdr['type_ids_off'] + cls_idx * 4)[0]
+                    type_str = _get_str(data, hdr, sidx)
+                    if ('MiuiFoldScreenSettings' in type_str
+                            and not '$' in type_str        # skip inner/anonymous classes
+                            and type_str.startswith('L')):
+                        cls_path = type_str[1:-1]
+                        if binary_patch_method(dex, cls_path,
+                                "displayResourceTilesToScreen", 0, _STUB_VOID,
+                                trim=True):
+                            ok(f"  ✓ displayResourceTilesToScreen → void  ({type_str})")
+                            patched = True
+                            found_displayresource = True
+                            break
+                except Exception:
+                    continue
+        if not found_displayresource:
+            # Method absent in this build — acceptable, not a crash source by itself.
+            info("  displayResourceTilesToScreen: not present in this build — skipped")
+
+    # ── Patch 3: stub getAvailabilityStatus on every Fold*Controller ─────
+    # Prevents crash-at-startup from foldpager PreferenceControllers that were
+    # injected from a foreign ROM build and reference unknown resource IDs.
+    #
+    # _STUB_UNSUPPORTED: const/4 v0, 0x3 ; return v0
+    #   (AVAILABLE_UNSUPPORTED = 3 in BasePreferenceController)
+    _STUB_UNSUPPORTED = bytes([0x12, 0x30, 0x0F, 0x00])  # const/4 v0,3 ; return v0
+    if b'FoldScreen' in raw or b'FoldPage' in raw or b'FoldPager' in raw:
+        data = bytes(dex)
+        hdr  = _parse_header(data)
+        if hdr:
+            for i in range(hdr['class_defs_size']):
+                base = hdr['class_defs_off'] + i * 32
+                if struct.unpack_from('<I', data, base + 24)[0] == 0:
+                    continue
+                cls_idx = struct.unpack_from('<I', data, base)[0]
+                try:
+                    sidx     = struct.unpack_from('<I', data, hdr['type_ids_off'] + cls_idx * 4)[0]
+                    type_str = _get_str(data, hdr, sidx)
+                    # Target: classes whose simple name contains "Fold" and "Controller"
+                    # but are NOT MiuiFoldScreenSettings itself (handled by Patch 2)
+                    simple   = type_str.split('/')[-1].rstrip(';')
+                    if ('Fold' in simple
+                            and 'Controller' in simple
+                            and 'MiuiFoldScreenSettings' not in simple
+                            and type_str.startswith('L')):
+                        cls_path = type_str[1:-1]
+                        if binary_patch_method(dex, cls_path,
+                                "getAvailabilityStatus", 1, _STUB_UNSUPPORTED,
+                                trim=True):
+                            ok(f"  ✓ {simple}::getAvailabilityStatus → UNAVAILABLE (crash-guard)")
+                            patched = True
+                except Exception:
+                    continue
 
     return patched
 
@@ -1755,6 +1832,7 @@ PROFILES = {
     "miui-framework":    _miui_framework_patch,     # validateTheme(trim) + IS_GLOBAL_BUILD
     "incallui-ai":       _incallui_patch,           # RecorderUtils::isAiRecordEnable
     "settings-foldpager": _settings_foldpager_patch,  # Fold-Pager: fold screen + tile display
+    "services-jar":       _services_jar_patch,        # showSystemReadyErrorDialogsIfNeeded NOP
 }
 
 def main():
@@ -3015,36 +3093,78 @@ PYTHON_EOF
                             -o "$_FP_ASSETS/foldpager_classes.dex" "$_FP_DEX_URL"
 
                         if [ -s "$_FP_ASSETS/foldpager_classes.dex" ]; then
+                        if [ -s "$_FP_ASSETS/foldpager_classes.dex" ]; then
                             log_success "[foldpager] ✓ Downloaded: classes.dex"
 
-                            # Find next free DEX slot in Settings.apk.
-                            # classes.dex = slot 1 (always exists). Search for first
-                            # classesN.dex that is NOT already inside the APK zip.
-                            _NEXT_SLOT=""
-                            for _n in 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-                                if ! unzip -l "$_SETTINGS_APK" \
-                                        "classes${_n}.dex" >/dev/null 2>&1; then
-                                    _NEXT_SLOT="${_n}"
-                                    break
-                                fi
-                            done
+                            # ── Duplicate-class conflict guard ───────────────────────────
+                            # PROBLEM: If MiuiFoldScreenSettings already exists in stock DEX,
+                            # ART ClassLoader uses the stock version (lower-numbered slot wins).
+                            # New controller classes from the injected DEX still load but call
+                            # methods that only exist in the injected MiuiFoldScreenSettings,
+                            # not the stock one → NoSuchMethodError at Settings startup.
+                            # Also: injected DEX references resource IDs from a different ROM
+                            # build → Resources.NotFoundException → Settings crash.
+                            # FIX: detect any class overlap and skip injection when found.
+                            log_info "[foldpager] Checking for duplicate class conflict with stock DEX..."
+                            _FP_CONFLICT_INFO=$(python3 - \
+                                "$_SETTINGS_APK" \
+                                "$_FP_ASSETS/foldpager_classes.dex" << 'PYEOF'
+import zipfile, sys, re
 
-                            if [ -z "$_NEXT_SLOT" ]; then
-                                log_error "[foldpager] No free DEX slot (slots 2-15 all occupied)"
+apk  = sys.argv[1]
+dex  = sys.argv[2]
+
+with open(dex, "rb") as f:
+    fp_bytes = f.read()
+
+# Extract class descriptors from the foldpager DEX string table (heuristic: L...;)
+fp_classes = set(re.findall(rb'L([A-Za-z0-9_$/]{4,128});', fp_bytes))
+
+with zipfile.ZipFile(apk) as z:
+    stock_names = sorted(n for n in z.namelist()
+                         if re.match(r'^classes\d*\.dex$', n))
+    for dex_name in stock_names:
+        stock = z.read(dex_name)
+        for cls in fp_classes:
+            if cls in stock:
+                print(f"CONFLICT:{cls.decode(errors='replace')}:{dex_name}")
+                sys.exit(0)
+
+print("OK")
+PYEOF
+)
+                            if echo "$_FP_CONFLICT_INFO" | grep -q "^CONFLICT:"; then
+                                _C_CLASS=$(echo "$_FP_CONFLICT_INFO" | cut -d: -f2)
+                                _C_DEX=$(echo "$_FP_CONFLICT_INFO" | cut -d: -f3)
+                                log_warning "[foldpager] Duplicate class: $_C_CLASS already in stock $_C_DEX"
+                                log_warning "[foldpager] Skipping classes.dex injection — foreign resource IDs + duplicate classes would crash Settings at startup"
+                                log_info "[foldpager] Binary patches (isSupportFoldScreenSettings, FoldController stubs) are sufficient — fold settings entry stable"
                             else
-                                _NEW_DEX_NAME="classes${_NEXT_SLOT}.dex"
-                                log_info "[foldpager] Injecting foldpager DEX as $_NEW_DEX_NAME..."
-                                _FP_DEX_TMP="$TEMP_DIR/fp_dex_slot"
-                                rm -rf "$_FP_DEX_TMP" && mkdir -p "$_FP_DEX_TMP"
-                                cp "$_FP_ASSETS/foldpager_classes.dex" \
-                                   "$_FP_DEX_TMP/$_NEW_DEX_NAME"
-                                cd "$_FP_DEX_TMP"
-                                # -0 = store (no compression) — ART requires DEX to be
-                                # uncompressed inside APK for direct mmap
-                                zip -0 -u "$_SETTINGS_APK" "$_NEW_DEX_NAME" >/dev/null 2>&1
-                                cd "$GITHUB_WORKSPACE"
-                                rm -rf "$_FP_DEX_TMP"
-                                log_success "[foldpager] ✓ Foldpager DEX injected as $_NEW_DEX_NAME"
+                                # No class overlap — safe to inject
+                                _NEXT_SLOT=""
+                                for _n in 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+                                    if ! unzip -l "$_SETTINGS_APK" \
+                                            "classes${_n}.dex" >/dev/null 2>&1; then
+                                        _NEXT_SLOT="${_n}"
+                                        break
+                                    fi
+                                done
+
+                                if [ -z "$_NEXT_SLOT" ]; then
+                                    log_error "[foldpager] No free DEX slot (slots 2-15 all occupied)"
+                                else
+                                    _NEW_DEX_NAME="classes${_NEXT_SLOT}.dex"
+                                    log_info "[foldpager] No conflicts found — injecting as $_NEW_DEX_NAME..."
+                                    _FP_DEX_TMP="$TEMP_DIR/fp_dex_slot"
+                                    rm -rf "$_FP_DEX_TMP" && mkdir -p "$_FP_DEX_TMP"
+                                    cp "$_FP_ASSETS/foldpager_classes.dex" \
+                                       "$_FP_DEX_TMP/$_NEW_DEX_NAME"
+                                    cd "$_FP_DEX_TMP"
+                                    zip -0 -u "$_SETTINGS_APK" "$_NEW_DEX_NAME" >/dev/null 2>&1
+                                    cd "$GITHUB_WORKSPACE"
+                                    rm -rf "$_FP_DEX_TMP"
+                                    log_success "[foldpager] ✓ Foldpager DEX injected as $_NEW_DEX_NAME"
+                                fi
                             fi
                         else
                             log_error "[foldpager] classes.dex download failed — zero bytes"
