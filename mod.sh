@@ -3093,7 +3093,6 @@ PYTHON_EOF
                             -o "$_FP_ASSETS/foldpager_classes.dex" "$_FP_DEX_URL"
 
                         if [ -s "$_FP_ASSETS/foldpager_classes.dex" ]; then
-                        if [ -s "$_FP_ASSETS/foldpager_classes.dex" ]; then
                             log_success "[foldpager] ✓ Downloaded: classes.dex"
 
                             # ── Duplicate-class conflict guard ───────────────────────────
