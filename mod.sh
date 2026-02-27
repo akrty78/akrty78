@@ -2865,70 +2865,13 @@ PYTHON_EOF
 
                 # Step 3: Full apktool decode → XML replacement + editing → rebuild → inject
                 if [ "$_FP_OK" -eq 1 ] && [ -n "$_SETTINGS_APK" ] && [ -f "$_SETTINGS_APK" ]; then
-                    log_info "[foldpager] Decompiling Settings.apk (full resource decode)..."
-                    rm -rf "$_FP_WORK"
-                    if timeout 25m apktool d -f "$_SETTINGS_APK" -o "$_FP_WORK" >/dev/null 2>&1; then
+                        log_info "[foldpager] Decompiling Settings.apk (smali only, resources untouched)..."
+                        rm -rf "$_FP_WORK"
+                        if timeout 25m apktool d -r -f "$_SETTINGS_APK" -o "$_FP_WORK" >/dev/null 2>&1; then
                         log_success "[foldpager] ✓ Settings.apk decompiled"
 
-                        # (Moved XML replacement to Step 4 post-rebuild because they are binary AXML)
-
-                        # 3a. Edit settings_headers.xml — replace android:title on MiuiFoldSettings → "Nyxdroid"
-                        _FP_HEADERS=$(find "$_FP_WORK" -name "settings_headers.xml" -path "*/res/xml/*" -type f | head -1)
-                        if [ -n "$_FP_HEADERS" ]; then
-                            python3 - "$_FP_HEADERS" <<'FP_EDIT_PY'
-import sys, re
-
-path = sys.argv[1]
-with open(path, 'r', encoding='utf-8') as f:
-    content = f.read()
-
-# Find the element block containing MiuiFoldScreenSettings / MiuiFoldSettings
-# and replace the existing android:title="@string/..." (or any value) with "Nyxdroid"
-
-pat = re.compile(
-    r'android:fragment="com\.android\.settings\.foldSettings\.MiuiFold(?:Screen)?Settings"',
-)
-
-if not pat.search(content):
-    print("[INFO] MiuiFoldSettings fragment not found in settings_headers.xml")
-    sys.exit(0)
-
-lines = content.split('\n')
-in_target_block = False
-modified = False
-result_lines = []
-
-for line in lines:
-    if 'MiuiFold' in line and 'fragment=' in line:
-        in_target_block = True
-    # Replace android:title on same line as fragment ref
-    if 'MiuiFold' in line and 'android:title=' in line:
-        line = re.sub(r'android:title="[^"]*"', 'android:title="Nyxdroid"', line)
-        modified = True
-        in_target_block = False
-    # Replace android:title on a separate line within the same element block
-    elif in_target_block and 'android:title=' in line:
-        line = re.sub(r'android:title="[^"]*"', 'android:title="Nyxdroid"', line)
-        modified = True
-        in_target_block = False
-    # Reset block tracking on element close
-    if in_target_block and ('/>' in line or '</header>' in line or '</preference' in line):
-        in_target_block = False
-    result_lines.append(line)
-
-if modified:
-    with open(path, 'w', encoding='utf-8') as f:
-        f.write('\n'.join(result_lines))
-    print("[SUCCESS] ✓ settings_headers.xml: android:title → \"Nyxdroid\"")
-else:
-    print("[WARNING] android:title not found near MiuiFoldSettings fragment")
-FP_EDIT_PY
-                            # Log output from Python editor
-                            [ $? -eq 0 ] && log_success "[foldpager] settings_headers.xml edit complete" \
-                                          || log_warning "[foldpager] settings_headers.xml edit returned non-zero"
-                        else
-                            log_warning "[foldpager] settings_headers.xml not found in decoded Settings.apk"
-                        fi
+                        # (XML replacement moved to Step 4 post-rebuild because they are binary AXML)
+                        # (settings_headers.xml edit skipped because we are using apktool d -r to preserve resources.arsc)
 
                         # 3d. Download classes.dex from release and merge smali into Settings.apk
                         log_info "[foldpager] Fetching classes.dex from Multilang release..."
