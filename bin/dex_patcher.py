@@ -1265,20 +1265,37 @@ def _settings_region_patch(dex_name: str, dex: bytearray) -> bool:
 # ── Settings.apk Fold-Pager  ─────────────────────────────────────
 def _settings_foldpager_patch(dex_name: str, dex: bytearray) -> bool:
     """
-    Fold-Pager: two binary method stubs in Settings.apk.
+    Fold-Pager: binary method stubs in Settings.apk.
 
     Patch 1 — SettingsFeatures::isSupportFoldScreenSettings → return true
-      Class: com/android/settings/utils/SettingsFeatures
-      Makes the fold screen settings page accessible.
+      Makes the fold screen settings page visible in the Settings menu.
+      Class path is fixed — confirmed present in all known HyperOS builds.
 
     Patch 2 — MiuiFoldScreenSettings::displayResourceTilesToScreen → return void
-      Class: com/android/settings/foldSettings/MiuiFoldScreenSettings
-      Suppresses the default tile display, allowing custom XML layout.
+      Suppresses the default tile-display code path so the XML layout drives
+      the UI instead. The class simple-name is stable across builds but the
+      package path varies (foldSettings vs foldscreen vs foldpager).
+      FIX: scan all class defs for any class whose simple name contains
+      'MiuiFoldScreenSettings' instead of using a hardcoded path.
+
+    Patch 3 — Stub getAvailabilityStatus() on foldpager PreferenceControllers
+      that are NOT the main MiuiFoldScreenSettings fragment.
+      These controllers (e.g. FoldPageController, FoldScreenMixinController) are
+      injected into Settings\'s controller registry at startup.  If their class is
+      loaded from a foreign DEX (injected from a different ROM build), they call
+      resource IDs compiled for that foreign build → Resources.NotFoundException
+      → Settings crash before the home page even renders.
+      FIX: stub getAvailabilityStatus() → AVAILABLE_UNSUPPORTED (3) on every
+      class whose name contains "Fold" and has this method, EXCEPT the main
+      MiuiFoldScreenSettings class (which the binary-patch and XML injection handle).
+
+      AVAILABLE_UNSUPPORTED = 3  (BasePreferenceController constant)
+        → controller silently removed from Settings, no crash, no empty entry.
     """
     patched = False
     raw = bytes(dex)
 
-    # Patch 1: isSupportFoldScreenSettings → return true (0x1)
+    # ── Patch 1: isSupportFoldScreenSettings → return true ───────────────
     if b'SettingsFeatures' in raw:
         if binary_patch_method(dex,
                 "com/android/settings/utils/SettingsFeatures",
@@ -1287,13 +1304,73 @@ def _settings_foldpager_patch(dex_name: str, dex: bytearray) -> bool:
             patched = True
             raw = bytes(dex)
 
-    # Patch 2: displayResourceTilesToScreen → return void
+    # ── Patch 2: displayResourceTilesToScreen → return void ──────────────
+    # Scan all class defs — the package path of MiuiFoldScreenSettings differs
+    # across HyperOS builds (foldSettings / foldscreen / foldpager).
     if b'MiuiFoldScreenSettings' in raw:
-        if binary_patch_method(dex,
-                "com/android/settings/foldSettings/MiuiFoldScreenSettings",
-                "displayResourceTilesToScreen", 0, _STUB_VOID,
-                trim=True):
-            patched = True
+        data = bytes(dex)
+        hdr  = _parse_header(data)
+        found_displayresource = False
+        if hdr:
+            for i in range(hdr['class_defs_size']):
+                base = hdr['class_defs_off'] + i * 32
+                if struct.unpack_from('<I', data, base + 24)[0] == 0:
+                    continue
+                cls_idx = struct.unpack_from('<I', data, base)[0]
+                try:
+                    sidx     = struct.unpack_from('<I', data, hdr['type_ids_off'] + cls_idx * 4)[0]
+                    type_str = _get_str(data, hdr, sidx)
+                    if ('MiuiFoldScreenSettings' in type_str
+                            and not '$' in type_str        # skip inner/anonymous classes
+                            and type_str.startswith('L')):
+                        cls_path = type_str[1:-1]
+                        if binary_patch_method(dex, cls_path,
+                                "displayResourceTilesToScreen", 0, _STUB_VOID,
+                                trim=True):
+                            ok(f"  ✓ displayResourceTilesToScreen → void  ({type_str})")
+                            patched = True
+                            found_displayresource = True
+                            break
+                except Exception:
+                    continue
+        if not found_displayresource:
+            # Method absent in this build — acceptable, not a crash source by itself.
+            info("  displayResourceTilesToScreen: not present in this build — skipped")
+
+    # ── Patch 3: stub getAvailabilityStatus on every Fold*Controller ─────
+    # Prevents crash-at-startup from foldpager PreferenceControllers that were
+    # injected from a foreign ROM build and reference unknown resource IDs.
+    #
+    # _STUB_UNSUPPORTED: const/4 v0, 0x3 ; return v0
+    #   (AVAILABLE_UNSUPPORTED = 3 in BasePreferenceController)
+    _STUB_UNSUPPORTED = bytes([0x12, 0x30, 0x0F, 0x00])  # const/4 v0,3 ; return v0
+    if b'FoldScreen' in raw or b'FoldPage' in raw or b'FoldPager' in raw:
+        data = bytes(dex)
+        hdr  = _parse_header(data)
+        if hdr:
+            for i in range(hdr['class_defs_size']):
+                base = hdr['class_defs_off'] + i * 32
+                if struct.unpack_from('<I', data, base + 24)[0] == 0:
+                    continue
+                cls_idx = struct.unpack_from('<I', data, base)[0]
+                try:
+                    sidx     = struct.unpack_from('<I', data, hdr['type_ids_off'] + cls_idx * 4)[0]
+                    type_str = _get_str(data, hdr, sidx)
+                    # Target: classes whose simple name contains "Fold" and "Controller"
+                    # but are NOT MiuiFoldScreenSettings itself (handled by Patch 2)
+                    simple   = type_str.split('/')[-1].rstrip(';')
+                    if ('Fold' in simple
+                            and 'Controller' in simple
+                            and 'MiuiFoldScreenSettings' not in simple
+                            and type_str.startswith('L')):
+                        cls_path = type_str[1:-1]
+                        if binary_patch_method(dex, cls_path,
+                                "getAvailabilityStatus", 1, _STUB_UNSUPPORTED,
+                                trim=True):
+                            ok(f"  ✓ {simple}::getAvailabilityStatus → UNAVAILABLE (crash-guard)")
+                            patched = True
+                except Exception:
+                    continue
 
     return patched
 
@@ -1381,6 +1458,7 @@ PROFILES = {
     "miui-framework":    _miui_framework_patch,     # validateTheme(trim) + IS_GLOBAL_BUILD
     "incallui-ai":       _incallui_patch,           # RecorderUtils::isAiRecordEnable
     "settings-foldpager": _settings_foldpager_patch,  # Fold-Pager: fold screen + tile display
+    "services-jar":       _services_jar_patch,        # showSystemReadyErrorDialogsIfNeeded NOP
 }
 
 def main():
