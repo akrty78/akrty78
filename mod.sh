@@ -87,6 +87,13 @@ IMAGES_DIR="$OUTPUT_DIR/images"
 SUPER_DIR="$OUTPUT_DIR/super"
 TEMP_DIR="$GITHUB_WORKSPACE/temp"
 
+# --- ENGINE INCLUDES ---
+if [ -f "$GITHUB_WORKSPACE/mt_resources.sh" ]; then
+    source "$GITHUB_WORKSPACE/mt_resources.sh"
+else
+    log_warning "mt_resources.sh not found. MT-Resources mods disabled."
+fi
+
 # --- BLOATWARE LIST ---
 BLOAT_LIST="
 com.xiaomi.aiasst.vision com.miui.carlink com.bsp.catchlog com.miui.nextpay
