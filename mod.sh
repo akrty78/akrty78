@@ -1901,102 +1901,32 @@ inject_foldpager_mod() {
     log_info "[foldpager] Importing custom smali from release classes.dex..."
     local classes_dex=$(find "$fp_work/extracted" -name "classes.dex" -type f | head -n 1)
     if [ -n "$classes_dex" ]; then
-        # Decompile the APK safely (-r) to inject smali
-        apktool d -r -f "$settings_apk" -o "$fp_work/Settings_smali" >/dev/null 2>&1
+        # Find the highest classesN.dex. Android dexes are named classes.dex, classes2.dex, classes3.dex...
+        # Let's count how many exist in the APK.
+        local dex_count=$(unzip -l "$settings_apk" | grep -E "classes[0-9]*\.dex" | wc -l)
         
-        # Decode classes.dex
-        mkdir -p "$fp_work/dex_decoded"
-        java -jar "$BIN_DIR/baksmali.jar" d "$classes_dex" -o "$fp_work/dex_decoded" >/dev/null 2>&1
+        local target_dex_name
+        if [ "$dex_count" -eq 1 ]; then
+            # Only classes.dex exists, so we inject classes2.dex
+            target_dex_name="classes2.dex"
+        else
+            # classes.dex = 1
+            # classes2.dex = 2
+            # classes3.dex = 3
+            # If count is 3, next is classes4.dex.
+            target_dex_name="classes$((dex_count + 1)).dex"
+        fi
         
-        # Merge Smali
-        cp -r "$fp_work/dex_decoded/"* "$fp_work/Settings_smali/smali/" 2>/dev/null || true
-        cp -r "$fp_work/dex_decoded/"* "$fp_work/Settings_smali/smali_classes2/" 2>/dev/null || true # Fallback copy
-
-        # Rebuild APK
-        apktool b -c "$fp_work/Settings_smali" -o "$settings_apk" >/dev/null 2>&1
-        log_success "[foldpager] Custom classes.dex smali merged"
+        log_info "[foldpager] Injecting as $target_dex_name"
+        cp "$classes_dex" "$fp_work/$target_dex_name"
+        
+        cd "$fp_work"
+        zip -q -u "$settings_apk" "$target_dex_name"
+        cd - >/dev/null
+        
+        log_success "[foldpager] Custom classes.dex injected as $target_dex_name"
     else
         log_warning "[foldpager] classes.dex not found in release asset"
-    fi
-
-    # Step 4: XML Edit (settings_headers.xml)
-    log_info "[foldpager] Patching settings_headers.xml (Binary patch)..."
-    mkdir -p "$fp_work/bin_xml/res/xml"
-    unzip -qq -o "$settings_apk" res/xml/settings_headers.xml -d "$fp_work/bin_xml"
-    local target_xml="$fp_work/bin_xml/res/xml/settings_headers.xml"
-    
-    if [ -f "$target_xml" ]; then
-        # We use python to do a binary search and replace of the string pool inside the compiled XML
-        # looking for "com.android.settings.foldSettings.MiuiFoldScreenSettings" icon property
-        cat << 'PYEOF' > "$fp_work/patch_bin_xml.py"
-import sys
-
-def patch_binary_xml(file_path):
-    with open(file_path, 'rb') as f:
-        data = bytearray(f.read())
-        
-    # In Android Binary XML, string lengths are stored. We can't easily change length.
-    # But wait, user's previous patch script just injected "Nyxdroid".
-    # Since we can't easily rebuild binary XML with python without a full parser,
-    # let's write a simple python script that edits the decompiled XML, then uses 
-    # a dummy AndroidManifest to compile JUST that XML using aapt2.
-    # Actually, we have apktool. The issue in the log was `apktool b` failed.
-    pass
-PYEOF
-        # Wait, the error was "unzip: cannot find or open ... Settings_temp.apk"
-        # because `apktool b` failed silently and didn't produce the APK.
-        # Let's fix the apktool build by providing a dummy framework or ignoring errors, 
-        # or better yet, using aapt2 directly to compile the single XML file.
-        
-        # Extract the XML using apktool to get the text version
-        apktool d -s -f --no-src -p "$TEMP_DIR/framework" "$settings_apk" -o "$fp_work/Settings_res" >/dev/null 2>&1
-        local text_xml="$fp_work/Settings_res/res/xml/settings_headers.xml"
-        
-        if [ -f "$text_xml" ]; then
-            cat << 'PYEOF' > "$fp_work/patch_xml.py"
-import xml.etree.ElementTree as ET
-import sys
-ET.register_namespace('android', 'http://schemas.android.com/apk/res/android')
-tree = ET.parse(sys.argv[1])
-for elem in tree.iter():
-    frag = elem.get('{http://schemas.android.com/apk/res/android}fragment')
-    if frag == 'com.android.settings.foldSettings.MiuiFoldScreenSettings':
-        elem.set('{http://schemas.android.com/apk/res/android}icon', 'Nyxdroid')
-        # If Nyxdroid resource doesn't exist, this might cause a crash, but it was requested.
-tree.write(sys.argv[1], encoding='utf-8', xml_declaration=True)
-PYEOF
-            python3 "$fp_work/patch_xml.py" "$text_xml"
-            
-            # Using aapt2 to compile the single XML file to avoid apktool b errors
-            # Grab android.jar from somewhere or just use aapt2 compile
-            aapt2 compile "$text_xml" -o "$fp_work/compiled_xml.zip" >/dev/null 2>&1
-            
-            if [ -f "$fp_work/compiled_xml.zip" ]; then
-                unzip -qq -o "$fp_work/compiled_xml.zip" -d "$fp_work/bin_xml2"
-                # aapt2 compile flattens the name, e.g., res_xml_settings_headers.xml.flat
-                # We need to link it to get the final binary XML.
-                # Actually, an easier way is to just let apktool build only the res folder, ignoring missing dependencies.
-                # Or, we can use the old apktool b command but capture the error to see why it fails.
-            fi
-            
-            # Let's try apktool b again but with -c and capturing logs
-            apktool b -c "$fp_work/Settings_res" -o "$fp_work/Settings_temp.apk" >"$fp_work/apktool_build.log" 2>&1
-            
-            if [ -f "$fp_work/Settings_temp.apk" ]; then
-                unzip -qq -o "$fp_work/Settings_temp.apk" res/xml/settings_headers.xml -d "$fp_work/bin_xml"
-                cd "$fp_work/bin_xml" && zip -q -u "$settings_apk" "res/xml/settings_headers.xml" && cd - >/dev/null
-                log_success "[foldpager] settings_headers.xml patched and injected"
-            else
-                log_warning "[foldpager] apktool b failed. Check $fp_work/apktool_build.log"
-                log_warning "[foldpager] Attempting to inject uncompiled XML as fallback..."
-                # Fallback: just inject the text xml and hope Android handles it (it usually doesn't, but let's try)
-                mkdir -p "$fp_work/fallback/res/xml"
-                cp "$text_xml" "$fp_work/fallback/res/xml/"
-                cd "$fp_work/fallback" && zip -q -u "$settings_apk" "res/xml/settings_headers.xml" && cd - >/dev/null
-            fi
-        fi
-    else
-        log_error "[foldpager] settings_headers.xml not found"
     fi
 
     # Step 3a & 3b: XML Replace Engine
@@ -2072,7 +2002,7 @@ push_multilang() {
     local asset_url
     asset_url=$(curl -sSf -H "Authorization: token ${GITHUB_TOKEN}" \
         -H "Accept: application/vnd.github.v3+json" "$api_url" \
-        | jq -r '.assets[] | select(.name | endswith(".zip")) | .url' | head -n 1)
+        | jq -r '.assets[] | select(.name == "multi_lang_os3.zip") | .url' | head -n 1)
 
     if [ -z "$asset_url" ] || [ "$asset_url" == "null" ]; then
         log_error "[multilang] Could not resolve Multilang release asset — skipping"
@@ -2649,8 +2579,13 @@ for part in $LOGICALS; do
 
         # B3. SYSTEM_EXT MOD INJECTION
         if [ "$part" == "system_ext" ] && [ -n "$MODS_SELECTED" ]; then
-            if [[ ",$MODS_SELECTED," == *",foldpager,"* ]]; then
-                inject_foldpager_mod "$DUMP_DIR"
+            if [[ ",$MODS_SELECTED," == *",mt_resources,"* ]] || [[ ",$MODS_SELECTED," == *",enhanced_kbd,"* ]]; then
+                # Route to mt_resources.sh bridge
+                if declare -f process_mt_resources > /dev/null; then
+                    process_mt_resources "$DUMP_DIR"
+                else
+                    log_warning "process_mt_resources function not found, skipping MT-Resources mod."
+                fi
             fi
         fi
 
