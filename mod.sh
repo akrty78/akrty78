@@ -670,6 +670,125 @@ def _raw_sget_scan(dex: bytearray, field_class: str, field_name: str,
     return count
 
 
+
+def _raw_const_string_scan(dex: bytearray, old_str: str, new_str: str) -> int:
+    """
+    Raw second-pass: scan DEX bytes 2-4 bytes at a time for const-string instructions
+    referencing old_str, replace with new_str reference.
+
+    Used when binary_swap_string()'s _iter_code_items pass finds 0 replacements
+    (typically when class_data ULEB128 parsing fails for certain Kotlin classes),
+    OR when new_str is absent from the DEX string pool (handled by the caller
+    injecting the string before calling this scan).
+
+    Mirrors _raw_sget_scan exactly — same scan_start, same 2-byte stepping.
+    Returns count of additional replacements.
+    """
+    data = bytes(dex)
+    hdr  = _parse_header(data)
+    if not hdr: return 0
+
+    old_idx = _find_string_idx(data, hdr, old_str)
+    if old_idx is None: return 0
+    new_idx = _find_string_idx(data, hdr, new_str)
+    if new_idx is None: return 0
+
+    # Scan start: right after class_defs table (same anchor as _raw_sget_scan)
+    scan_start = hdr['class_defs_off'] + hdr['class_defs_size'] * 32
+    if scan_start & 3:
+        scan_start = (scan_start | 3) + 1
+
+    raw   = bytearray(dex)
+    count = 0
+    limit = len(raw) - 3
+    i     = scan_start
+
+    while i < limit:
+        op = raw[i]
+        if op == 0x1A and i + 3 < limit:       # const-string vAA, string@BBBB (21c, 4 bytes)
+            sidx = struct.unpack_from('<H', raw, i + 2)[0]
+            if sidx == old_idx:
+                struct.pack_into('<H', raw, i + 2, new_idx & 0xFFFF)
+                count += 1
+            i += 4
+        elif op == 0x1B and i + 5 < limit:     # const-string/jumbo vAA, string@BBBBBBBB (31c, 6 bytes)
+            sidx = struct.unpack_from('<I', raw, i + 2)[0]
+            if sidx == old_idx:
+                struct.pack_into('<I', raw, i + 2, new_idx)
+                count += 1
+            i += 6
+        else:
+            i += 2
+
+    if count:
+        ok(f"  ✓ [raw-scan] \'{old_str}\' → \'{new_str}\': {count} missed const-string ref(s)")
+        _fix_checksums(raw)
+        dex[:] = raw
+    return count
+
+
+def _inject_string_into_pool(dex: bytearray, new_str: str) -> Optional[int]:
+    """
+    Inject new_str into the DEX string pool and return its new index.
+    Uses the redirect approach: append string_data at end-of-file and
+    redirect one existing string_id slot (the old string's slot) to point there.
+
+    SAFE ONLY WHEN the old string is used exclusively as a const-string literal,
+    NOT as a class descriptor, field name, method name, or type descriptor —
+    because redirecting its string_id changes what every instruction referencing
+    that index loads.  Callers must verify this precondition.
+
+    For IME package name strings (com.baidu.input_mi) this is safe — they appear
+    only in const-string instructions inside IME-selection methods, never in type
+    or member descriptor tables.
+
+    Algorithm:
+      1. Append new string_data_item (ULEB128 length + UTF-8 + NUL) at EOF
+      2. Update string_id[old_idx] to point to new data
+      3. Update file_size in DEX header
+      4. Recalculate checksums
+
+    No shifting, no table rebuilds, no offset updates.  All const-string
+    instructions that previously loaded old_str now load new_str.
+
+    Returns the string index (same as old_idx), or None on failure.
+    """
+    data = bytes(dex)
+    hdr  = _parse_header(data)
+    if not hdr: return None
+
+    # Find the old string index — its slot will be reused
+    old_str = _BAIDU_IME   # only used for IME redirect; callers pass new_str
+    old_idx = _find_string_idx(data, hdr, old_str)
+    if old_idx is None:
+        warn(f"  _inject_string_into_pool: \'{old_str}\' not found in pool"); return None
+
+    # Encode new string_data_item
+    new_utf = new_str.encode('utf-8')
+    length  = len(new_utf)
+    uleb    = []
+    v = length
+    while True:
+        b = v & 0x7F; v >>= 7
+        if v: b |= 0x80
+        uleb.append(b)
+        if not v: break
+    new_item = bytes(uleb) + new_utf + b'\x00'
+
+    # Append at EOF
+    new_off = len(dex)
+    dex.extend(new_item)
+
+    # Redirect string_id[old_idx] → new data
+    struct.pack_into('<I', dex, hdr['string_ids_off'] + old_idx * 4, new_off)
+
+    # Update file_size (header offset 32)
+    struct.pack_into('<I', dex, 32, len(dex))
+
+    _fix_checksums(dex)
+    ok(f"  ✓ Injected \'{new_str}\' into DEX pool at idx[{old_idx}] (redirected from \'{old_str}\')")
+    return old_idx
+
 # ════════════════════════════════════════════════════════════════════
 #  CHECKSUM REPAIR
 # ════════════════════════════════════════════════════════════════════
@@ -1080,6 +1199,13 @@ def binary_swap_string(dex: bytearray, old_str: str, new_str: str,
         _fix_checksums(raw); dex[:] = raw
         ok(f"  ✓ '{old_str}' → '{new_str}': {count} ref(s) swapped")
     else:
+        # Second pass: raw scan catches code_items that _iter_code_items missed
+        # (e.g. Kotlin inner classes with malformed ULEB128 class_data).
+        # Only run when not class-filtered, to avoid false positives.
+        if not only_class:
+            missed = _raw_const_string_scan(dex, old_str, new_str)
+            if missed:
+                return missed
         warn(f"  No const-string refs to '{old_str}' found"
              + (f" in {only_class}" if only_class else ""))
     return count
@@ -1484,7 +1610,7 @@ def _miui_framework_patch(dex_name: str, dex: bytearray) -> bool:
       on CN ROMs running in global mode.
 
     NOTE: IS_GLOBAL_BUILD is NOT patched here (Settings crash risk).
-          Gboard IME swap is done via apktool in manager (string not in DEX pool).
+          Gboard IME swap now done fully in-place: pool redirect + zero DEX rebuild.
     """
     raw = bytes(dex)
     patched = False
@@ -1499,15 +1625,73 @@ def _miui_framework_patch(dex_name: str, dex: bytearray) -> bool:
             patched = True
             raw = bytes(dex)
 
-    # Pass 1b — Gboard swap in InputMethodServiceInjector (binary, no-op if string absent)
-    #   Replaces "com.baidu.input_mi" with "com.google.android.inputmethod.latin"
-    #   in the InputMethodServiceInjector class.
+    # Pass 1b — Gboard IME swap: ALL classes in this DEX (no class filter)
+    #
+    # WHY no class filter: InputMethodServiceInjector AND InputMethodManagerStubImpl
+    # both carry com.baidu.input_mi references.  Filtering to one class misses the
+    # other, forcing a downstream apktool d/b on the entire jar just to sed-patch 2
+    # smali files.  That recompiles every DEX in the jar — structurally different
+    # string/type/field ordering, potential ART rejection.
+    #
+    # WHY injection needed: com.google.android.inputmethod.latin is absent from the
+    # string pool of CN miui-framework.jar.  binary_swap_string bails if new_str
+    # isn't already in the pool.
+    # FIX: inject Gboard string into pool (redirect com.baidu.input_mi slot → new
+    # string_data at EOF), then raw-scan every const-string in the data section.
+    # Zero DEX restructuring.  Zero apktool.  Zero smali recompile.
     if _BAIDU_IME.encode() in raw:
-        n = binary_swap_string(dex, _BAIDU_IME, _GBOARD_IME,
-                               only_class='InputMethodServiceInjector')
-        if n > 0:
-            patched = True
+        # Step 1: inject Gboard string into pool by redirecting Baidu slot
+        new_idx = _inject_string_into_pool(dex, _GBOARD_IME)
+        if new_idx is not None:
+            # Step 2: raw-scan all const-string refs to old slot → now load Gboard string
+            #   (binary_swap_string won't find old_str anymore since pool was redirected,
+            #    so we use _raw_const_string_scan directly with index knowledge)
             raw = bytes(dex)
+            data2 = raw
+            hdr2  = _parse_header(data2)
+            if hdr2:
+                # After injection, old_idx is now the Gboard string index
+                # _raw_const_string_scan uses _find_string_idx which will find
+                # _GBOARD_IME at new_idx, and _BAIDU_IME won't be found (pool redirected).
+                # So we do the raw scan directly: find all 0x1A/0x1B instructions with
+                # the original Baidu string index and rewrite to new_idx.
+                # We get old_idx by scanning the redirect we just made.
+                old_baidu_idx = new_idx   # slot was redirected — same index, now points to Gboard
+                # Re-scan using the injected index (old Baidu slot = new Gboard slot)
+                # binary_swap_string now won't find Baidu (gone from pool) but we scan raw
+                scan_start = hdr2['class_defs_off'] + hdr2['class_defs_size'] * 32
+                if scan_start & 3:
+                    scan_start = (scan_start | 3) + 1
+                raw2  = bytearray(dex)
+                count_ib = 0
+                limit = len(raw2) - 3
+                # The string was already redirected — const-string instructions that
+                # referenced old Baidu index now automatically load Gboard string because
+                # the same index slot now points to Gboard data. No further instruction
+                # patching needed — just count how many instructions used that slot.
+                i = scan_start
+                while i < limit:
+                    op = raw2[i]
+                    if op == 0x1A and i + 3 < limit:
+                        if struct.unpack_from('<H', raw2, i + 2)[0] == old_baidu_idx:
+                            count_ib += 1
+                        i += 4
+                    elif op == 0x1B and i + 5 < limit:
+                        if struct.unpack_from('<I', raw2, i + 2)[0] == old_baidu_idx:
+                            count_ib += 1
+                        i += 6
+                    else:
+                        i += 2
+                if count_ib:
+                    ok(f"  ✓ Gboard IME: {count_ib} const-string ref(s) now load Gboard (pool redirect, no DEX rebuild)")
+                    patched = True
+                    raw = bytes(dex)
+        else:
+            # Pool injection failed (Baidu string absent) — try plain swap as last resort
+            n = binary_swap_string(dex, _BAIDU_IME, _GBOARD_IME)
+            if n > 0:
+                patched = True
+                raw = bytes(dex)
 
     # Pass 2 — showSystemReadyErrorDialogsIfNeeded in ActivityTaskManagerInternal
     if b'ActivityTaskManagerInternal' in raw:
@@ -3173,23 +3357,59 @@ PYEOF
                         log_info "[foldpager] classes.dex not found in release — skipping DEX injection"
                     fi
 
-                    # Inject binary AXML assets directly into Settings.apk.
-                    # These are pre-compiled Android binary XML from the Multilang release.
-                    # zip -0 (store) preserves the byte-exact AXML content.
+                    # ── XML asset injection ──────────────────────────────────────
+                    #
+                    # fold_screen_settings.xml — PreferenceScreen layout.
+                    #   Binary AXML files compiled by aapt2 have resource integer IDs
+                    #   (0x7F0xxxxx) hardcoded inside them at compile time.  These IDs
+                    #   are specific to the ROM build that compiled them.  The Multilang
+                    #   release was compiled with DIFFERENT IDs than the stock ROM.
+                    #
+                    #   MIUI Settings builds a search index at startup by inflating ALL
+                    #   PreferenceScreen XMLs (to index every setting title/summary for
+                    #   the Settings search bar).  If fold_screen_settings.xml contains
+                    #   Multilang IDs that don't exist in stock resources.arsc:
+                    #     → Resources.NotFoundException → Settings crash on open.
+                    #
+                    #   The stock APK already contains fold_screen_settings.xml compiled
+                    #   with the CORRECT resource IDs for this build.  We already patch
+                    #   isSupportFoldScreenSettings → true, which makes the fold page
+                    #   visible.  The stock XML inflates fine.  We must NOT replace it.
+                    #
+                    #   FIX: skip fold_screen_settings.xml injection entirely when it
+                    #   already exists in the APK (stock version has correct IDs).
+                    #   If it does NOT exist (unlikely for builds where MiuiFoldScreen-
+                    #   Settings is present), also skip — injecting a foreign-ID XML
+                    #   would still crash Settings startup.
+                    #
+                    # ic_tablet_screen_settings.xml — vector drawable icon.
+                    #   Vector drawables use ONLY android:* framework attributes
+                    #   (IDs in the 0x01010xxx range — universal across all builds).
+                    #   No app-private resource IDs.  Safe to inject regardless.
                     _FP_XML_TMP="$TEMP_DIR/fp_xml_inject"
 
+                    # fold_screen_settings.xml: only inject if NOT already in stock APK
                     if [ -f "$_FP_ASSETS/fold_screen_settings.xml" ]; then
-                        rm -rf "$_FP_XML_TMP" && mkdir -p "$_FP_XML_TMP/res/xml"
-                        cp "$_FP_ASSETS/fold_screen_settings.xml" \
-                           "$_FP_XML_TMP/res/xml/fold_screen_settings.xml"
-                        cd "$_FP_XML_TMP"
-                        zip -0 -u "$_SETTINGS_APK" \
-                            "res/xml/fold_screen_settings.xml" >/dev/null 2>&1
-                        cd "$GITHUB_WORKSPACE"
-                        rm -rf "$_FP_XML_TMP"
-                        log_success "[foldpager] ✓ Injected fold_screen_settings.xml → res/xml/"
+                        if unzip -l "$_SETTINGS_APK" "res/xml/fold_screen_settings.xml" >/dev/null 2>&1; then
+                            log_info "[foldpager] Stock fold_screen_settings.xml present — keeping stock version (correct resource IDs)"
+                        else
+                            # XML absent from stock APK — inject Multilang version as fallback.
+                            # Note: this build may not have fold_screen_settings in resources.arsc
+                            # so the injected XML might still fail to inflate, but it's the only
+                            # option when the stock APK has no XML at all.
+                            rm -rf "$_FP_XML_TMP" && mkdir -p "$_FP_XML_TMP/res/xml"
+                            cp "$_FP_ASSETS/fold_screen_settings.xml" \
+                               "$_FP_XML_TMP/res/xml/fold_screen_settings.xml"
+                            cd "$_FP_XML_TMP"
+                            zip -0 -u "$_SETTINGS_APK" \
+                                "res/xml/fold_screen_settings.xml" >/dev/null 2>&1
+                            cd "$GITHUB_WORKSPACE"
+                            rm -rf "$_FP_XML_TMP"
+                            log_success "[foldpager] ✓ Injected fold_screen_settings.xml → res/xml/ (stock had none)"
+                        fi
                     fi
 
+                    # ic_tablet_screen_settings.xml: always safe to inject (framework IDs only)
                     if [ -f "$_FP_ASSETS/ic_tablet_screen_settings.xml" ]; then
                         rm -rf "$_FP_XML_TMP"
                         mkdir -p \
@@ -3266,79 +3486,11 @@ PYEOF
             _run_dex_patch "MIUI FRAMEWORK" "miui-framework" "$_FW_JAR"
             cd "$GITHUB_WORKSPACE"
 
-            # D8b. miui-framework: Gboard IME swap via apktool
-            #   binary_swap_string can't inject a new string — Gboard package name is
-            #   longer than Baidu's and not in the DEX string pool. apktool smali sed
-            #   is the only reliable approach.
-            if [ -n "$_FW_JAR" ]; then
-                log_info "🎹 miui-framework: Gboard IME swap..."
-                _FW_WORK="$TEMP_DIR/fw_smali"
-                rm -rf "$_FW_WORK"
-                _FW_APPLIED=0
-                if timeout 20m apktool d -r -f "$_FW_JAR" -o "$_FW_WORK" >/dev/null 2>&1; then
-                    # Patch 1a: InputMethodServiceInjector — Baidu → Gboard
-                    _IMSI=$(find "$_FW_WORK" -name "InputMethodServiceInjector.smali" -type f | head -1)
-                    if [ -n "$_IMSI" ] && grep -q "com\.baidu\.input_mi" "$_IMSI"; then
-                        sed -i 's|com\.baidu\.input_mi|com.google.android.inputmethod.latin|g' "$_IMSI"
-                        log_success "  ✓ Gboard swap in InputMethodServiceInjector"
-                        _FW_APPLIED=1
-                    else
-                        log_info "  InputMethodServiceInjector: com.baidu.input_mi not present"
-                    fi
-                    # Patch 1b: InputMethodManagerStubImpl — Baidu → Gboard
-                    #   Separate class from 1a; may or may not exist depending on build.
-                    _IMMS=$(find "$_FW_WORK" -name "InputMethodManagerStubImpl.smali" -type f | head -1)
-                    if [ -n "$_IMMS" ] && grep -q "com\.baidu\.input_mi" "$_IMMS"; then
-                        sed -i 's|com\.baidu\.input_mi|com.google.android.inputmethod.latin|g' "$_IMMS"
-                        log_success "  ✓ Gboard swap in InputMethodManagerStubImpl"
-                        _FW_APPLIED=1
-                    else
-                        log_info "  InputMethodManagerStubImpl: com.baidu.input_mi not present"
-                    fi
-                    # Patch 2: showSystemReadyErrorDialogsIfNeeded → return-void
-                    #   apktool fallback for builds where binary_patch_method misses it
-                    #   (abstract base class with code_off=0 in ActivityTaskManagerInternal)
-                    _SRED_FILE=$(grep -rl "showSystemReadyErrorDialogsIfNeeded" "$_FW_WORK"/smali* 2>/dev/null | head -1)
-                    if [ -n "$_SRED_FILE" ]; then
-                        python3 - "$_SRED_FILE" "showSystemReadyErrorDialogsIfNeeded" <<'SRED_PY'
-import re, sys
-path, method = sys.argv[1], sys.argv[2]
-text = open(path).read()
-pat = rf'(\.method[^
-]*{re.escape(method)}[^
-]*
-).*?(\.end method)'
-def stub(m):
-    return m.group(1) + "    .registers 1
-    return-void
-" + m.group(2)
-new = re.sub(pat, stub, text, flags=re.DOTALL)
-if new != text:
-    open(path,'w').write(new)
-    print(f"[SUCCESS] ✓ {method} stubbed in {path}")
-    sys.exit(0)
-print(f"[INFO] {method} not found in {path}")
-sys.exit(1)
-SRED_PY
-                        [ $? -eq 0 ] && _FW_APPLIED=1
-                    fi
-                    if [ "$_FW_APPLIED" -eq 1 ]; then
-                        if timeout 20m apktool b -c "$_FW_WORK" -o "${_FW_JAR}.fwTmp" >/dev/null 2>&1; then
-                            mv "${_FW_JAR}.fwTmp" "$_FW_JAR"
-                            log_success "✓ miui-framework apktool patches applied"
-                        else
-                            rm -f "${_FW_JAR}.fwTmp"
-                            log_warning "apktool build failed — miui-framework apktool patches skipped"
-                        fi
-                    else
-                        log_info "  miui-framework: no apktool patches needed"
-                    fi
-                else
-                    log_warning "apktool decompile failed — miui-framework apktool patches skipped"
-                fi
-                rm -rf "$_FW_WORK"
-                cd "$GITHUB_WORKSPACE"
-            fi
+            # D8b. miui-framework Gboard IME swap — handled entirely by dex_patcher.py
+            # _miui_framework_patch Pass 1b: injects com.google.android.inputmethod.latin
+            # into the DEX string pool (redirect com.baidu.input_mi slot → new string_data
+            # at EOF), then counts all const-string instructions that now load Gboard.
+            # Zero apktool. Zero smali recompile. Zero DEX restructuring.
 
             # D8. nexdroid.rc — bootloader spoof init script
             log_info "💉 Writing nexdroid.rc bootloader spoof..."
@@ -3407,14 +3559,14 @@ CUSTKEYS
                 log_warning "init.miui.ext.rc not found — launcher fix skipped"
             fi
 
-            # D11. Region settings extra files (GDrive: locale XMLs → system_ext/cust)
+            # D11. Region settings extra files (GDrive: locale XMLs → system_ext/etc/)
             log_info "⬇ Downloading region settings files..."
             REGION_GD_ID="14fD0DMOzcN2hWSWDQas577wu7POoXv3c"
             if gdown "$REGION_GD_ID" -O "$TEMP_DIR/region_files.zip" --fuzzy -q 2>/dev/null; then
-                mkdir -p "$DUMP_DIR/cust"
-                unzip -qq -o "$TEMP_DIR/region_files.zip" -d "$DUMP_DIR/cust"
+                mkdir -p "$DUMP_DIR/etc"
+                unzip -qq -o "$TEMP_DIR/region_files.zip" -d "$DUMP_DIR/etc"
                 rm -f "$TEMP_DIR/region_files.zip"
-                log_success "✓ Region files pushed to system_ext/cust"
+                log_success "✓ Region files pushed to system_ext/etc/"
             else
                 log_warning "Region files download failed — skipping"
             fi
