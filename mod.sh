@@ -391,7 +391,6 @@ TECHNIQUE: NexBinaryPatch  — binary in-place DEX patch, zero baksmali/smali.
 
 Commands:
   verify              check zipalign + java
-  framework-sig       ApkSignatureVerifier → getMinimumSignatureSchemeVersionForTargetSdk = 1
   settings-ai         InternalDeviceUtils  → isAiSupported = true
   voice-recorder-ai   SoundRecorder        → isAiRecordEnable = true
   services-jar        ActivityManagerService$$ExternalSyntheticLambda31 → run() = void
@@ -419,10 +418,6 @@ def err(m):   _p("ERROR",   m)
 _STUB_TRUE = bytes([0x12, 0x10, 0x0F, 0x00])
 # return-void                    (format 10x = 1 code-unit = 2 bytes)
 _STUB_VOID = bytes([0x0E, 0x00])
-
-# ── IME package names (used by miui-framework + MIUIFrequentPhrase) ────
-_BAIDU_IME  = "com.baidu.input_mi"
-_GBOARD_IME = "com.google.android.inputmethod.latin"
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -669,125 +664,6 @@ def _raw_sget_scan(dex: bytearray, field_class: str, field_name: str,
         dex[:] = raw
     return count
 
-
-
-def _raw_const_string_scan(dex: bytearray, old_str: str, new_str: str) -> int:
-    """
-    Raw second-pass: scan DEX bytes 2-4 bytes at a time for const-string instructions
-    referencing old_str, replace with new_str reference.
-
-    Used when binary_swap_string()'s _iter_code_items pass finds 0 replacements
-    (typically when class_data ULEB128 parsing fails for certain Kotlin classes),
-    OR when new_str is absent from the DEX string pool (handled by the caller
-    injecting the string before calling this scan).
-
-    Mirrors _raw_sget_scan exactly — same scan_start, same 2-byte stepping.
-    Returns count of additional replacements.
-    """
-    data = bytes(dex)
-    hdr  = _parse_header(data)
-    if not hdr: return 0
-
-    old_idx = _find_string_idx(data, hdr, old_str)
-    if old_idx is None: return 0
-    new_idx = _find_string_idx(data, hdr, new_str)
-    if new_idx is None: return 0
-
-    # Scan start: right after class_defs table (same anchor as _raw_sget_scan)
-    scan_start = hdr['class_defs_off'] + hdr['class_defs_size'] * 32
-    if scan_start & 3:
-        scan_start = (scan_start | 3) + 1
-
-    raw   = bytearray(dex)
-    count = 0
-    limit = len(raw) - 3
-    i     = scan_start
-
-    while i < limit:
-        op = raw[i]
-        if op == 0x1A and i + 3 < limit:       # const-string vAA, string@BBBB (21c, 4 bytes)
-            sidx = struct.unpack_from('<H', raw, i + 2)[0]
-            if sidx == old_idx:
-                struct.pack_into('<H', raw, i + 2, new_idx & 0xFFFF)
-                count += 1
-            i += 4
-        elif op == 0x1B and i + 5 < limit:     # const-string/jumbo vAA, string@BBBBBBBB (31c, 6 bytes)
-            sidx = struct.unpack_from('<I', raw, i + 2)[0]
-            if sidx == old_idx:
-                struct.pack_into('<I', raw, i + 2, new_idx)
-                count += 1
-            i += 6
-        else:
-            i += 2
-
-    if count:
-        ok(f"  ✓ [raw-scan] \'{old_str}\' → \'{new_str}\': {count} missed const-string ref(s)")
-        _fix_checksums(raw)
-        dex[:] = raw
-    return count
-
-
-def _inject_string_into_pool(dex: bytearray, new_str: str) -> Optional[int]:
-    """
-    Inject new_str into the DEX string pool and return its new index.
-    Uses the redirect approach: append string_data at end-of-file and
-    redirect one existing string_id slot (the old string's slot) to point there.
-
-    SAFE ONLY WHEN the old string is used exclusively as a const-string literal,
-    NOT as a class descriptor, field name, method name, or type descriptor —
-    because redirecting its string_id changes what every instruction referencing
-    that index loads.  Callers must verify this precondition.
-
-    For IME package name strings (com.baidu.input_mi) this is safe — they appear
-    only in const-string instructions inside IME-selection methods, never in type
-    or member descriptor tables.
-
-    Algorithm:
-      1. Append new string_data_item (ULEB128 length + UTF-8 + NUL) at EOF
-      2. Update string_id[old_idx] to point to new data
-      3. Update file_size in DEX header
-      4. Recalculate checksums
-
-    No shifting, no table rebuilds, no offset updates.  All const-string
-    instructions that previously loaded old_str now load new_str.
-
-    Returns the string index (same as old_idx), or None on failure.
-    """
-    data = bytes(dex)
-    hdr  = _parse_header(data)
-    if not hdr: return None
-
-    # Find the old string index — its slot will be reused
-    old_str = _BAIDU_IME   # only used for IME redirect; callers pass new_str
-    old_idx = _find_string_idx(data, hdr, old_str)
-    if old_idx is None:
-        warn(f"  _inject_string_into_pool: \'{old_str}\' not found in pool"); return None
-
-    # Encode new string_data_item
-    new_utf = new_str.encode('utf-8')
-    length  = len(new_utf)
-    uleb    = []
-    v = length
-    while True:
-        b = v & 0x7F; v >>= 7
-        if v: b |= 0x80
-        uleb.append(b)
-        if not v: break
-    new_item = bytes(uleb) + new_utf + b'\x00'
-
-    # Append at EOF
-    new_off = len(dex)
-    dex.extend(new_item)
-
-    # Redirect string_id[old_idx] → new data
-    struct.pack_into('<I', dex, hdr['string_ids_off'] + old_idx * 4, new_off)
-
-    # Update file_size (header offset 32)
-    struct.pack_into('<I', dex, 32, len(dex))
-
-    _fix_checksums(dex)
-    ok(f"  ✓ Injected \'{new_str}\' into DEX pool at idx[{old_idx}] (redirected from \'{old_str}\')")
-    return old_idx
 
 # ════════════════════════════════════════════════════════════════════
 #  CHECKSUM REPAIR
@@ -1199,13 +1075,6 @@ def binary_swap_string(dex: bytearray, old_str: str, new_str: str,
         _fix_checksums(raw); dex[:] = raw
         ok(f"  ✓ '{old_str}' → '{new_str}': {count} ref(s) swapped")
     else:
-        # Second pass: raw scan catches code_items that _iter_code_items missed
-        # (e.g. Kotlin inner classes with malformed ULEB128 class_data).
-        # Only run when not class-filtered, to avoid false positives.
-        if not only_class:
-            missed = _raw_const_string_scan(dex, old_str, new_str)
-            if missed:
-                return missed
         warn(f"  No const-string refs to '{old_str}' found"
              + (f" in {only_class}" if only_class else ""))
     return count
@@ -1277,34 +1146,12 @@ def run_patches(archive: Path, patch_fn, label: str) -> int:
 #  PATCH PROFILES
 # ════════════════════════════════════════════════════════════════════
 
-# ── framework.jar  ───────────────────────────────────────────────
-def _fw_sig_patch(dex_name: str, dex: bytearray) -> bool:
-    """
-    Patch getMinimumSignatureSchemeVersionForTargetSdk → return 1 (const/4 v0, 0x1).
-
-    MUST use trim=True:
-      trim=False (default) leaves the original insns_size in the code_item header
-      and NOP-pads the remainder, producing:
-          const/4 v0, 0x1 ; return v0 ; nop ; nop ; ...
-      trim=True shrinks insns_size to exactly 2 code-units (4 bytes), giving the
-      clean output the verifier and baksmali both expect:
-          const/4 v0, 0x1
-          return v0
-    """
-    if b'ApkSignatureVerifier' not in bytes(dex): return False
-    return binary_patch_method(dex,
-        "android/util/apk/ApkSignatureVerifier",
-        "getMinimumSignatureSchemeVersionForTargetSdk", 1, _STUB_TRUE,
-        trim=True)
-
 # ── Settings.apk  ────────────────────────────────────────────────
 def _settings_ai_patch(dex_name: str, dex: bytearray) -> bool:
     if b'InternalDeviceUtils' not in bytes(dex): return False
-    # trim=True: shrinks insns_size to stub length — no NOP flood in baksmali output
     return binary_patch_method(dex,
         "com/android/settings/InternalDeviceUtils",
-        "isAiSupported", 1, _STUB_TRUE,
-        trim=True)
+        "isAiSupported", 1, _STUB_TRUE)
 
 # ── SoundRecorder APK  ──────────────────────────────────────────
 def _recorder_ai_patch(dex_name: str, dex: bytearray) -> bool:
@@ -1312,7 +1159,7 @@ def _recorder_ai_patch(dex_name: str, dex: bytearray) -> bool:
     Two-pass:
     1. AiDeviceUtil::isAiSupportedDevice → return true.
        Tries known paths; if class present but path differs, scans all class defs.
-    2. IS_INTERNATIONAL_BUILD (Lmiui/os/Build;) → const/4 1 across entire DEX.
+    2. IS_INTERNATIONAL_BUILD (Lmiui/os/Build;) → const/16 1 across entire DEX.
        Handles region gating that exists alongside the AI method gate.
     Returns True if either pass patched anything.
     """
@@ -1360,7 +1207,7 @@ def _recorder_ai_patch(dex_name: str, dex: bytearray) -> bool:
 
     # Pass 2 — IS_INTERNATIONAL_BUILD region gate
     if b'IS_INTERNATIONAL_BUILD' in raw:
-        if binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD', use_const4=True) > 0:
+        if binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD') > 0:
             patched = True
 
     return patched
@@ -1486,16 +1333,20 @@ def _provision_gms_patch(dex_name: str, dex: bytearray) -> bool:
     STRICT SCOPE: patch exactly ONE sget-boolean of IS_INTERNATIONAL_BUILD
     inside Utils::setGmsAppEnabledStateForCn — no other class, no other method.
 
-    Correct encoding:  const/4 v0, 0x1   →   bytes 12 10
-      opcode 0x12, second byte = (value<<4)|reg = (1<<4)|0 = 0x10
-    Wrong encoding from old _intl_build_patch (no use_const4):
-      const/16 v0, 0x1  →  bytes 13 00 01 00  (opcode 0x13, not 0x15 which is const/high16)
+    Encoding used:  const/16 v0, 0x1  →  bytes 13 00 01 00
+      opcode 0x13 (const/16, format 21s), exactly 4 bytes — same width as sget-boolean.
+      No NOP padding needed. Clean single-instruction replacement.
+
+      WHY NOT const/4 (use_const4=True):
+        const/4 is only 2 bytes (1 code unit). Replacing a 4-byte sget leaves 2 bytes
+        that must be padded with a NOP code unit (0x00 0x00), producing a spurious
+        "nop" line in baksmali output. const/16 fills all 4 bytes cleanly.
 
     Constraints enforced:
       - class filter: 'Utils' must be in type_str (catches com/android/provision/Utils)
       - method filter: exact name 'setGmsAppEnabledStateForCn'
       - first-occurrence only: count is tracked; abort if 0 matches
-      - use_const4=True: guarantees opcode 0x12 output (const/4)
+      - use_const4=False: uses opcode 0x13 (const/16), no NOP padding
     """
     raw = bytes(dex)
     if b'IS_INTERNATIONAL_BUILD' not in raw: return False
@@ -1505,11 +1356,11 @@ def _provision_gms_patch(dex_name: str, dex: bytearray) -> bool:
             'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD',
             only_class='Utils',
             only_method='setGmsAppEnabledStateForCn',
-            use_const4=True)
+            use_const4=False)
     if n == 0:
         warn("  Provision: setGmsAppEnabledStateForCn not found or no IS_INTERNATIONAL_BUILD sget")
         return False
-    ok(f"  ✓ Provision Utils::setGmsAppEnabledStateForCn → const/4 v0, 0x1 ({n} sget)")
+    ok(f"  ✓ Provision Utils::setGmsAppEnabledStateForCn → const/16 v0, 0x1 ({n} sget, no NOP)")
     return True
 
 
@@ -1610,7 +1461,7 @@ def _miui_framework_patch(dex_name: str, dex: bytearray) -> bool:
       on CN ROMs running in global mode.
 
     NOTE: IS_GLOBAL_BUILD is NOT patched here (Settings crash risk).
-          Gboard IME swap now done fully in-place: pool redirect + zero DEX rebuild.
+          Gboard IME swap is done via apktool in manager (string not in DEX pool).
     """
     raw = bytes(dex)
     patched = False
@@ -1625,76 +1476,8 @@ def _miui_framework_patch(dex_name: str, dex: bytearray) -> bool:
             patched = True
             raw = bytes(dex)
 
-    # Pass 1b — Gboard IME swap: ALL classes in this DEX (no class filter)
-    #
-    # WHY no class filter: InputMethodServiceInjector AND InputMethodManagerStubImpl
-    # both carry com.baidu.input_mi references.  Filtering to one class misses the
-    # other, forcing a downstream apktool d/b on the entire jar just to sed-patch 2
-    # smali files.  That recompiles every DEX in the jar — structurally different
-    # string/type/field ordering, potential ART rejection.
-    #
-    # WHY injection needed: com.google.android.inputmethod.latin is absent from the
-    # string pool of CN miui-framework.jar.  binary_swap_string bails if new_str
-    # isn't already in the pool.
-    # FIX: inject Gboard string into pool (redirect com.baidu.input_mi slot → new
-    # string_data at EOF), then raw-scan every const-string in the data section.
-    # Zero DEX restructuring.  Zero apktool.  Zero smali recompile.
-    if _BAIDU_IME.encode() in raw:
-        # Step 1: inject Gboard string into pool by redirecting Baidu slot
-        new_idx = _inject_string_into_pool(dex, _GBOARD_IME)
-        if new_idx is not None:
-            # Step 2: raw-scan all const-string refs to old slot → now load Gboard string
-            #   (binary_swap_string won't find old_str anymore since pool was redirected,
-            #    so we use _raw_const_string_scan directly with index knowledge)
-            raw = bytes(dex)
-            data2 = raw
-            hdr2  = _parse_header(data2)
-            if hdr2:
-                # After injection, old_idx is now the Gboard string index
-                # _raw_const_string_scan uses _find_string_idx which will find
-                # _GBOARD_IME at new_idx, and _BAIDU_IME won't be found (pool redirected).
-                # So we do the raw scan directly: find all 0x1A/0x1B instructions with
-                # the original Baidu string index and rewrite to new_idx.
-                # We get old_idx by scanning the redirect we just made.
-                old_baidu_idx = new_idx   # slot was redirected — same index, now points to Gboard
-                # Re-scan using the injected index (old Baidu slot = new Gboard slot)
-                # binary_swap_string now won't find Baidu (gone from pool) but we scan raw
-                scan_start = hdr2['class_defs_off'] + hdr2['class_defs_size'] * 32
-                if scan_start & 3:
-                    scan_start = (scan_start | 3) + 1
-                raw2  = bytearray(dex)
-                count_ib = 0
-                limit = len(raw2) - 3
-                # The string was already redirected — const-string instructions that
-                # referenced old Baidu index now automatically load Gboard string because
-                # the same index slot now points to Gboard data. No further instruction
-                # patching needed — just count how many instructions used that slot.
-                i = scan_start
-                while i < limit:
-                    op = raw2[i]
-                    if op == 0x1A and i + 3 < limit:
-                        if struct.unpack_from('<H', raw2, i + 2)[0] == old_baidu_idx:
-                            count_ib += 1
-                        i += 4
-                    elif op == 0x1B and i + 5 < limit:
-                        if struct.unpack_from('<I', raw2, i + 2)[0] == old_baidu_idx:
-                            count_ib += 1
-                        i += 6
-                    else:
-                        i += 2
-                if count_ib:
-                    ok(f"  ✓ Gboard IME: {count_ib} const-string ref(s) now load Gboard (pool redirect, no DEX rebuild)")
-                    patched = True
-                    raw = bytes(dex)
-        else:
-            # Pool injection failed (Baidu string absent) — try plain swap as last resort
-            n = binary_swap_string(dex, _BAIDU_IME, _GBOARD_IME)
-            if n > 0:
-                patched = True
-                raw = bytes(dex)
-
-    # Pass 2 — showSystemReadyErrorDialogsIfNeeded in ActivityTaskManagerInternal
-    if b'ActivityTaskManagerInternal' in raw:
+    # Pass 2 — showSystemReadyErrohhhfffrDialogsIfNeeded in ActivityTghaskManagerInternal
+    if b'ActivityTaskManagerIntkkhernal' in raw:
         hdr = _parse_header(raw)
         if hdr:
             for i in range(hdr['class_defs_size']):
@@ -1716,221 +1499,36 @@ def _miui_framework_patch(dex_name: str, dex: bytearray) -> bool:
     return patched
 
 # ── Settings.apk region unlock  ─────────────────────────────────
-
-def _patch_sget_exact_v0(dex: bytearray,
-                         field_class: str, field_name: str,
-                         only_class: str) -> int:
-    """
-    Patch ONLY sget-boolean instructions where the destination register is
-    exactly v0 (register byte == 0x00). All other registers are skipped.
-    This is needed for MiuiSettings where only the `sget-boolean v0, ...`
-    form must be patched — v1, v10 etc. are left untouched.
-    """
-    data = bytes(dex)
-    hdr  = _parse_header(data)
-    if not hdr: return 0
-
-    fids = _find_field_ids(data, hdr, field_class, field_name)
-    if not fids: return 0
-
-    SGET_OPCODES = frozenset([0x60, 0x63, 0x64, 0x65, 0x66])
-    raw   = bytearray(dex)
-    count = 0
-
-    for insns_off, insns_len, type_str, mname in _iter_code_items(data, hdr):
-        if only_class not in type_str: continue
-        i = 0
-        while i < insns_len - 3:
-            op = raw[insns_off + i]
-            if op in SGET_OPCODES:
-                reg      = raw[insns_off + i + 1]
-                field_lo = struct.unpack_from('<H', raw, insns_off + i + 2)[0]
-                if field_lo in fids and reg == 0:   # ← EXACT v0 ONLY
-                    # const/4 v0, 0x1
-                    raw[insns_off + i]     = 0x12
-                    raw[insns_off + i + 1] = 0x10   # (1<<4)|0
-                    raw[insns_off + i + 2] = 0x00
-                    raw[insns_off + i + 3] = 0x00
-                    count += 1
-                i += 4
-            else:
-                i += 2
-
-    if count:
-        _fix_checksums(raw); dex[:] = raw
-        ok(f"  ✓ {field_name} (v0 only): {count} sget → const/4 1 in {only_class}")
-    return count
-
-
 def _settings_region_patch(dex_name: str, dex: bytearray) -> bool:
     """
-    Patch IS_GLOBAL_BUILD → const/4 vX, 0x1 scoped to specific classes.
-    NO global sweep. NO raw scan.
+    Patch IS_GLOBAL_BUILD → const/4 pX, 0x1 scoped to exactly 3 classes.
+    NO global sweep. NO raw scan. Patching only:
 
-    Targets:
-      LocaleController      — all methods, all registers
-      LocaleSettingsTree    — all methods, all registers
-      OtherPersonalSettings — all methods, all registers
-      MiuiSettings          — ONLY sget-boolean v0 (exact register match)
-      GeminiController      — getAvailabilityStatus() → return 1 (full method stub)
+      LocaleController      — all methods (no method filter; the sget may be
+                               in a method other than getAvailabilityStatus)
+      LocaleSettingsTree    — all methods
+      OtherPersonalSettings — all methods (has 2 IS_GLOBAL_BUILD lines in onCreate)
+
+    Global sweep was used previously and patched 57 sgets in Settings.apk,
+    flipping region flags in unrelated classes and crashing the app.
+    Class-filtered approach patches only the 3 intended classes.
+
+    The improved _iter_code_items (using _skip_uleb128 instead of break in
+    the field-skip loop) ensures OtherPersonalSettings::onCreate is not
+    silently skipped due to ULEB128 mis-stepping on its instance fields.
     """
+    if b'IS_GLOBAL_BUILD' not in bytes(dex): return False
     n = 0
-
-    # IS_GLOBAL_BUILD sget patches — only if field present in this DEX file
-    if b'IS_GLOBAL_BUILD' in bytes(dex):
-        n += binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
-                                        only_class='LocaleController',
-                                        use_const4=True)
-        n += binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
-                                        only_class='LocaleSettingsTree',
-                                        use_const4=True)
-        n += binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
-                                        only_class='OtherPersonalSettings',
-                                        use_const4=True)
-
-    # MiuiSettings — exact v0 register only (do NOT touch v1, v10, etc.)
-    if b'MiuiSettings' in bytes(dex):
-        n += _patch_sget_exact_v0(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
-                                  only_class='MiuiSettings')
-
-    # GeminiController::getAvailabilityStatus() → return 1
-    if b'GeminiController' in bytes(dex):
-        # Scan all class defs for any class ending with /GeminiController;
-        data = bytes(dex)
-        hdr  = _parse_header(data)
-        if hdr:
-            for i in range(hdr['class_defs_size']):
-                base = hdr['class_defs_off'] + i * 32
-                if struct.unpack_from('<I', data, base + 24)[0] == 0: continue
-                cls_idx = struct.unpack_from('<I', data, base)[0]
-                try:
-                    sidx     = struct.unpack_from('<I', data, hdr['type_ids_off'] + cls_idx * 4)[0]
-                    type_str = _get_str(data, hdr, sidx)
-                    if type_str.endswith('/GeminiController;') and type_str.startswith('L'):
-                        cls_path = type_str[1:-1]
-                        if binary_patch_method(dex, cls_path,
-                                'getAvailabilityStatus', 1, _STUB_TRUE,
-                                trim=True):
-                            ok(f"  ✓ GeminiController::getAvailabilityStatus → return 1")
-                            n += 1
-                            break
-                except Exception:
-                    continue
-
+    n += binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
+                                    only_class='LocaleController',
+                                    use_const4=True)
+    n += binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
+                                    only_class='LocaleSettingsTree',
+                                    use_const4=True)
+    n += binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
+                                    only_class='OtherPersonalSettings',
+                                    use_const4=True)
     return n > 0
-
-
-# ── Settings.apk Fold-Pager  ─────────────────────────────────────
-def _settings_foldpager_patch(dex_name: str, dex: bytearray) -> bool:
-    """
-    Fold-Pager: binary method stubs in Settings.apk.
-
-    Patch 1 — SettingsFeatures::isSupportFoldScreenSettings → return true
-      Makes the fold screen settings page visible in the Settings menu.
-      Class path is fixed — confirmed present in all known HyperOS builds.
-
-    Patch 2 — MiuiFoldScreenSettings::displayResourceTilesToScreen → return void
-      Suppresses the default tile-display code path so the XML layout drives
-      the UI instead. The class simple-name is stable across builds but the
-      package path varies (foldSettings vs foldscreen vs foldpager).
-      FIX: scan all class defs for any class whose simple name contains
-      'MiuiFoldScreenSettings' instead of using a hardcoded path.
-
-    Patch 3 — Stub getAvailabilityStatus() on foldpager PreferenceControllers
-      that are NOT the main MiuiFoldScreenSettings fragment.
-      These controllers (e.g. FoldPageController, FoldScreenMixinController) are
-      injected into Settings\'s controller registry at startup.  If their class is
-      loaded from a foreign DEX (injected from a different ROM build), they call
-      resource IDs compiled for that foreign build → Resources.NotFoundException
-      → Settings crash before the home page even renders.
-      FIX: stub getAvailabilityStatus() → AVAILABLE_UNSUPPORTED (3) on every
-      class whose name contains "Fold" and has this method, EXCEPT the main
-      MiuiFoldScreenSettings class (which the binary-patch and XML injection handle).
-
-      AVAILABLE_UNSUPPORTED = 3  (BasePreferenceController constant)
-        → controller silently removed from Settings, no crash, no empty entry.
-    """
-    patched = False
-    raw = bytes(dex)
-
-    # ── Patch 1: isSupportFoldScreenSettings → return true ───────────────
-    if b'SettingsFeatures' in raw:
-        if binary_patch_method(dex,
-                "com/android/settings/utils/SettingsFeatures",
-                "isSupportFoldScreenSettings", 1, _STUB_TRUE,
-                trim=True):
-            patched = True
-            raw = bytes(dex)
-
-    # ── Patch 2: displayResourceTilesToScreen → return void ──────────────
-    # Scan all class defs — the package path of MiuiFoldScreenSettings differs
-    # across HyperOS builds (foldSettings / foldscreen / foldpager).
-    if b'MiuiFoldScreenSettings' in raw:
-        data = bytes(dex)
-        hdr  = _parse_header(data)
-        found_displayresource = False
-        if hdr:
-            for i in range(hdr['class_defs_size']):
-                base = hdr['class_defs_off'] + i * 32
-                if struct.unpack_from('<I', data, base + 24)[0] == 0:
-                    continue
-                cls_idx = struct.unpack_from('<I', data, base)[0]
-                try:
-                    sidx     = struct.unpack_from('<I', data, hdr['type_ids_off'] + cls_idx * 4)[0]
-                    type_str = _get_str(data, hdr, sidx)
-                    if ('MiuiFoldScreenSettings' in type_str
-                            and not '$' in type_str        # skip inner/anonymous classes
-                            and type_str.startswith('L')):
-                        cls_path = type_str[1:-1]
-                        if binary_patch_method(dex, cls_path,
-                                "displayResourceTilesToScreen", 0, _STUB_VOID,
-                                trim=True):
-                            ok(f"  ✓ displayResourceTilesToScreen → void  ({type_str})")
-                            patched = True
-                            found_displayresource = True
-                            break
-                except Exception:
-                    continue
-        if not found_displayresource:
-            # Method absent in this build — acceptable, not a crash source by itself.
-            info("  displayResourceTilesToScreen: not present in this build — skipped")
-
-    # ── Patch 3: stub getAvailabilityStatus on every Fold*Controller ─────
-    # Prevents crash-at-startup from foldpager PreferenceControllers that were
-    # injected from a foreign ROM build and reference unknown resource IDs.
-    #
-    # _STUB_UNSUPPORTED: const/4 v0, 0x3 ; return v0
-    #   (AVAILABLE_UNSUPPORTED = 3 in BasePreferenceController)
-    _STUB_UNSUPPORTED = bytes([0x12, 0x30, 0x0F, 0x00])  # const/4 v0,3 ; return v0
-    if b'FoldScreen' in raw or b'FoldPage' in raw or b'FoldPager' in raw:
-        data = bytes(dex)
-        hdr  = _parse_header(data)
-        if hdr:
-            for i in range(hdr['class_defs_size']):
-                base = hdr['class_defs_off'] + i * 32
-                if struct.unpack_from('<I', data, base + 24)[0] == 0:
-                    continue
-                cls_idx = struct.unpack_from('<I', data, base)[0]
-                try:
-                    sidx     = struct.unpack_from('<I', data, hdr['type_ids_off'] + cls_idx * 4)[0]
-                    type_str = _get_str(data, hdr, sidx)
-                    # Target: classes whose simple name contains "Fold" and "Controller"
-                    # but are NOT MiuiFoldScreenSettings itself (handled by Patch 2)
-                    simple   = type_str.split('/')[-1].rstrip(';')
-                    if ('Fold' in simple
-                            and 'Controller' in simple
-                            and 'MiuiFoldScreenSettings' not in simple
-                            and type_str.startswith('L')):
-                        cls_path = type_str[1:-1]
-                        if binary_patch_method(dex, cls_path,
-                                "getAvailabilityStatus", 1, _STUB_UNSUPPORTED,
-                                trim=True):
-                            ok(f"  ✓ {simple}::getAvailabilityStatus → UNAVAILABLE (crash-guard)")
-                            patched = True
-                except Exception:
-                    continue
-
-    return patched
 
 
 # ── InCallUI.apk  ────────────────────────────────────────────────
@@ -1979,28 +1577,6 @@ def _incallui_patch(dex_name: str, dex: bytearray) -> bool:
     warn("  RecorderUtils::isAiRecordEnable not found in any class")
     return False
 
-# ── MIUIFrequentPhrase.apk — Gboard redirect  ────────────────────
-# _BAIDU_IME and _GBOARD_IME moved to top of file (after _STUB_VOID)
-
-def _miuifreqphrase_patch(dex_name: str, dex: bytearray) -> bool:
-    """
-    Binary const-string swap inside two classes:
-      InputMethodBottomManager  (com/miui/inputmethod/)
-      InputProvider             (com/miui/provider/)
-    Only the string literal reference is changed — no method restructuring,
-    no register changes, no class renames. Zero apktool, zero timeout risk.
-    """
-    if _BAIDU_IME.encode() not in bytes(dex): return False
-    n = 0
-    n += binary_swap_string(dex, _BAIDU_IME, _GBOARD_IME,
-                            only_class='InputMethodBottomManager')
-    n += binary_swap_string(dex, _BAIDU_IME, _GBOARD_IME,
-                            only_class='InputProvider')
-    if n == 0:
-        # Fallback: swap all refs in DEX (covers different packaging)
-        n += binary_swap_string(dex, _BAIDU_IME, _GBOARD_IME)
-    return n > 0
-
 
 # ════════════════════════════════════════════════════════════════════
 #  COMMAND TABLE  +  ENTRY POINT
@@ -2010,13 +1586,12 @@ PROFILES = {
     "settings-ai":       _settings_ai_patch,
     "settings-region":   _settings_region_patch,   # exact 3 classes only
     "voice-recorder-ai": _recorder_ai_patch,        # AiDeviceUtil::isAiSupportedDevice
+    "services-jar":      _services_jar_patch,
     "provision-gms":     _provision_gms_patch,    # Utils::setGmsAppEnabledStateForCn only
     "miui-service":      _miui_service_patch,    # global IS_INTERNATIONAL_BUILD sweep
     "systemui-volte":    _systemui_all_patch,       # VoLTE + QuickShare(const/4) + WA-notif
     "miui-framework":    _miui_framework_patch,     # validateTheme(trim) + IS_GLOBAL_BUILD
     "incallui-ai":       _incallui_patch,           # RecorderUtils::isAiRecordEnable
-    "settings-foldpager": _settings_foldpager_patch,  # Fold-Pager: fold screen + tile display
-    "services-jar":       _services_jar_patch,        # showSystemReadyErrorDialogsIfNeeded NOP
 }
 
 def main():
@@ -2280,6 +1855,147 @@ inject_security_mod() {
 }
 
 # ── Mod 4: Multi-Language Overlays ───────────────────────────
+# ── Mod 3: Fold-Pager (Settings Mod) ─────────────────────────
+inject_foldpager_mod() {
+    local dump_dir="$1"
+    local settings_apk=$(find "$dump_dir/priv-app" -name "Settings.apk" -type f | head -n 1)
+    if [ -z "$settings_apk" ]; then
+        log_error "[foldpager] Settings.apk not found in dump"
+        return 1
+    fi
+
+    log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    log_step "📱 FOLD-PAGER INJECTION"
+    log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    local fp_work="$TEMP_DIR/foldpager_work"
+    rm -rf "$fp_work"
+    mkdir -p "$fp_work"
+
+    # Download release asset
+    local api_url="https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/Multilang"
+    local asset_url=$(curl -s "$api_url" | jq -r '.assets[] | select(.name | endswith(".zip")) | .browser_download_url' | head -n 1)
+    if [ -z "$asset_url" ] || [ "$asset_url" == "null" ]; then
+        log_error "[foldpager] Could not resolve Multilang release asset"
+        return 1
+    fi
+
+    log_info "[foldpager] Downloading release asset..."
+    wget -q -O "$fp_work/release.zip" "$asset_url" || return 1
+    unzip -qq -o "$fp_work/release.zip" -d "$fp_work/extracted"
+
+    # Step 1 & 2: Smali Patches
+    log_info "[foldpager] Applying Smali Patches via apk-modder..."
+    "$GITHUB_WORKSPACE/apk-modder.sh" "$settings_apk" "com.android.settings.utils.SettingsFeatures" "isSupportFoldScreenSettings" "true"
+    "$GITHUB_WORKSPACE/apk-modder.sh" "$settings_apk" "com.android.settings.foldSettings.MiuiFoldScreenSettings" "displayResourceTilesToScreen" "void"
+
+    # Step 5: DEX Import
+    log_info "[foldpager] Importing custom smali from release classes.dex..."
+    local classes_dex=$(find "$fp_work/extracted" -name "classes.dex" -type f | head -n 1)
+    if [ -n "$classes_dex" ]; then
+        # Decompile the APK safely (-r) to inject smali
+        apktool d -r -f "$settings_apk" -o "$fp_work/Settings_smali" >/dev/null 2>&1
+        
+        # Decode classes.dex
+        mkdir -p "$fp_work/dex_decoded"
+        java -jar "$BIN_DIR/baksmali.jar" d "$classes_dex" -o "$fp_work/dex_decoded" >/dev/null 2>&1
+        
+        # Merge Smali
+        cp -r "$fp_work/dex_decoded/"* "$fp_work/Settings_smali/smali/" 2>/dev/null || true
+        cp -r "$fp_work/dex_decoded/"* "$fp_work/Settings_smali/smali_classes2/" 2>/dev/null || true # Fallback copy
+
+        # Rebuild APK
+        apktool b -c "$fp_work/Settings_smali" -o "$settings_apk" >/dev/null 2>&1
+        log_success "[foldpager] Custom classes.dex smali merged"
+    else
+        log_warning "[foldpager] classes.dex not found in release asset"
+    fi
+
+    # Step 4: XML Edit (settings_headers.xml)
+    log_info "[foldpager] Patching settings_headers.xml..."
+    apktool d -s -f "$settings_apk" -o "$fp_work/Settings_res" >/dev/null 2>&1
+    local target_xml="$fp_work/Settings_res/res/xml/settings_headers.xml"
+    
+    if [ -f "$target_xml" ]; then
+        cat << 'PYEOF' > "$fp_work/patch_xml.py"
+import xml.etree.ElementTree as ET
+import sys
+ET.register_namespace('android', 'http://schemas.android.com/apk/res/android')
+tree = ET.parse(sys.argv[1])
+for elem in tree.iter():
+    frag = elem.get('{http://schemas.android.com/apk/res/android}fragment')
+    if frag == 'com.android.settings.foldSettings.MiuiFoldScreenSettings':
+        elem.set('{http://schemas.android.com/apk/res/android}icon', 'Nyxdroid')
+tree.write(sys.argv[1], encoding='utf-8', xml_declaration=True)
+PYEOF
+        python3 "$fp_work/patch_xml.py" "$target_xml"
+        # Recompile to get binary XML
+        apktool b -c "$fp_work/Settings_res" -o "$fp_work/Settings_temp.apk" >/dev/null 2>&1
+        mkdir -p "$fp_work/bin_xml/res/xml"
+        unzip -qq -o "$fp_work/Settings_temp.apk" res/xml/settings_headers.xml -d "$fp_work/bin_xml"
+        cd "$fp_work/bin_xml" && zip -q -u "$settings_apk" "res/xml/settings_headers.xml" && cd - >/dev/null
+        log_success "[foldpager] settings_headers.xml patched"
+    else
+        log_error "[foldpager] settings_headers.xml not found"
+    fi
+
+    # Step 3a & 3b: XML Replace Engine
+    log_info "[foldpager] Replacing XML and Drawable assets..."
+    local fold_xml=$(find "$fp_work/extracted" -name "fold_screen_settings.xml" -type f | head -n 1)
+    local tablet_xml=$(find "$fp_work/extracted" -name "ic_tablet_screen_settings.xml" -type f | head -n 1)
+    
+    mkdir -p "$fp_work/assets_bin/res/xml"
+    mkdir -p "$fp_work/assets_bin/res/drawable"
+    mkdir -p "$fp_work/assets_bin/res/drawable-night-v8"
+    
+    [ -n "$fold_xml" ] && cp "$fold_xml" "$fp_work/assets_bin/res/xml/"
+    [ -n "$tablet_xml" ] && cp "$tablet_xml" "$fp_work/assets_bin/res/drawable/"
+    [ -n "$tablet_xml" ] && cp "$tablet_xml" "$fp_work/assets_bin/res/drawable-night-v8/"
+    
+    cd "$fp_work/assets_bin"
+    zip -q -u -r "$settings_apk" res/
+    cd - >/dev/null
+    
+    log_success "[foldpager] XML replacements injected"
+    log_success "✅ Fold-Pager mod injected successfully"
+}
+
+# ── Mod 4: Wallpaper Pack ────────────────────────────────────
+inject_wallpaper_pack() {
+    local dump_dir="$1"
+    local pack_src="$GITHUB_WORKSPACE/Wallpaper_pack"
+    
+    if [ ! -d "$pack_src" ]; then
+        log_warning "[wallpaper_pack] No packs found in $pack_src. Skipping."
+        return 0
+    fi
+    
+    log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    log_step "🖼 WALLPAPER PACK INJECTION"
+    log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    local dest_dir="$dump_dir/media/wallpaper_group"
+    mkdir -p "$dest_dir"
+    
+    for pack in "$pack_src"/*/; do
+        [ -d "$pack" ] || continue
+        local pack_name=$(basename "$pack")
+        
+        # Determine next NN prefix
+        local next_num=1
+        if ls "$dest_dir" 2>/dev/null | grep -q '^[0-9][0-9]_'; then
+            local max_num=$(ls "$dest_dir" 2>/dev/null | grep -o '^[0-9][0-9]' | sort -n | tail -1)
+            next_num=$((10#$max_num + 1))
+        fi
+        local prefix=$(printf "%02d" $next_num)
+        
+        local final_dest="$dest_dir/${prefix}_$pack_name"
+        mkdir -p "$final_dest"
+        cp -r "$pack"/* "$final_dest/"
+        log_success "[wallpaper_pack] Injected: ${prefix}_$pack_name"
+    done
+}
+
 push_multilang() {
     # Downloads the multilang ZIP from the same private repo's Multilang tag,
     # extracts it, and installs ALL .apk files found under any overlay/ directory
@@ -2859,14 +2575,23 @@ for part in $LOGICALS; do
             if [[ ",$MODS_SELECTED," == *",multilang,"* ]]; then
                 push_multilang "$DUMP_DIR"
             fi
-            # Personal Assistant APK — always push when multilang is selected
             if [[ ",$MODS_SELECTED," == *",multilang,"* ]]; then
                 push_personal_assistant "$DUMP_DIR"
+            fi
+            if [[ ",$MODS_SELECTED," == *",wallpaper_pack,"* ]]; then
+                inject_wallpaper_pack "$DUMP_DIR"
             fi
 
             log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             log_success "✅ MOD INJECTION COMPLETE"
             log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        fi
+
+        # B3. SYSTEM_EXT MOD INJECTION
+        if [ "$part" == "system_ext" ] && [ -n "$MODS_SELECTED" ]; then
+            if [[ ",$MODS_SELECTED," == *",foldpager,"* ]]; then
+                inject_foldpager_mod "$DUMP_DIR"
+            fi
         fi
 
         # C. MIUI BOOSTER - DEVICE LEVEL OVERRIDE (COMPLETE METHOD REPLACEMENT)
@@ -3201,262 +2926,59 @@ PYTHON_EOF
             _run_dex_patch "SETTINGS REGION" "settings-region" "$_SETTINGS_APK"
             cd "$GITHUB_WORKSPACE"
 
-            # D3c. Fold-Pager (optional — DEX + XML patches for fold screen settings)
-            if [[ ",$MODS_SELECTED," == *",foldpager,"* ]]; then
-                log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                log_step "📐 FOLD-PAGER: Settings.apk XML + DEX"
-                log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-                # Step 1: Binary DEX patches (isSupportFoldScreenSettings + displayResourceTilesToScreen)
-                _run_dex_patch "SETTINGS FOLDPAGER" "settings-foldpager" "$_SETTINGS_APK"
-                cd "$GITHUB_WORKSPACE"
-
-                # Step 2: Download individual XML assets from Multilang release by exact name
-                _FP_WORK="$TEMP_DIR/foldpager_work"
-                _FP_ASSETS="$TEMP_DIR/foldpager_assets"
-                rm -rf "$_FP_WORK" "$_FP_ASSETS"
-                mkdir -p "$_FP_ASSETS"
-                _FP_OK=0
-
-                log_info "[foldpager] Fetching XML assets from Multilang release..."
-                _FP_API="https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/Multilang"
-                _FP_RELEASE_JSON=$(curl -sSf -H "Authorization: token ${GITHUB_TOKEN}" \
-                    -H "Accept: application/vnd.github.v3+json" "$_FP_API" 2>/dev/null)
-
-                if [ -n "$_FP_RELEASE_JSON" ]; then
-                    # Helper: download a single asset by exact filename
-                    _fp_dl_asset() {
-                        local asset_name="$1" dest="$2"
-                        local asset_url
-                        asset_url=$(echo "$_FP_RELEASE_JSON" | jq -r \
-                            --arg name "$asset_name" \
-                            '.assets[] | select(.name == $name) | .url' | head -n 1)
-                        if [ -n "$asset_url" ] && [ "$asset_url" != "null" ]; then
-                            curl -sSfL -H "Authorization: token ${GITHUB_TOKEN}" \
-                                -H "Accept: application/octet-stream" \
-                                -o "$dest" "$asset_url"
-                            if [ -s "$dest" ]; then
-                                log_success "[foldpager] ✓ Downloaded: $asset_name"
-                                return 0
+            # D4b. OtherPersonalSettings — IS_GLOBAL_BUILD smali patch
+            #   Binary walker mis-steps on this class's class_data → apktool smali sed.
+            #   CRITICAL: after apktool b, inject ONLY patched DEX back into the
+            #   original APK (zip -0 -u). Avoids apktool re-compressing resources.arsc
+            #   which breaks the R+ 4-byte alignment requirement (error -124).
+            log_info "🔧 OtherPersonalSettings: patching IS_GLOBAL_BUILD..."
+            _OPS_WORK="$TEMP_DIR/ops_work"
+            _OPS_DEX="$TEMP_DIR/ops_dex"
+            rm -rf "$_OPS_WORK" "$_OPS_DEX"
+            if timeout 25m apktool d -r -f "$_SETTINGS_APK" -o "$_OPS_WORK" >/dev/null 2>&1; then
+                _OPS_FILES=$(find "$_OPS_WORK" -name "OtherPersonalSettings.smali" -type f)
+                _OPS_NEED=0
+                for _f in $_OPS_FILES; do
+                    grep -q "IS_GLOBAL_BUILD" "$_f" && _OPS_NEED=1 && break
+                done
+                if [ "$_OPS_NEED" -eq 1 ]; then
+                    for _f in $_OPS_FILES; do
+                        sed -i                             's|sget-boolean p1, Lmiui/os/Build;->IS_GLOBAL_BUILD:Z|const/4 p1, 0x1|g'                             "$_f"
+                    done
+                    log_success "  ✓ IS_GLOBAL_BUILD replaced in OtherPersonalSettings.smali"
+                    if timeout 25m apktool b -c "$_OPS_WORK" -o "${_SETTINGS_APK}.apkbuild" >/dev/null 2>&1; then
+                        # Extract ONLY the patched DEX files from apktool output
+                        mkdir -p "$_OPS_DEX"
+                        cd "$_OPS_DEX"
+                        unzip -o "${_SETTINGS_APK}.apkbuild" 'classes*.dex' >/dev/null 2>&1
+                        _DEX_COUNT=$(ls classes*.dex 2>/dev/null | wc -l)
+                        if [ "$_DEX_COUNT" -gt 0 ]; then
+                            # Inject DEX-only into original APK — resources.arsc untouched
+                            zip -0 -u "$_SETTINGS_APK" classes*.dex >/dev/null 2>&1
+                            cd "$GITHUB_WORKSPACE"
+                            # Re-align after DEX injection (DEX entries may shift offsets)
+                            _ZA=$(which zipalign 2>/dev/null ||                                   find "$BIN_DIR/android-sdk" -name zipalign 2>/dev/null | head -1)
+                            if [ -n "$_ZA" ]; then
+                                "$_ZA" -p -f 4 "$_SETTINGS_APK" "${_SETTINGS_APK}.aligned"                                     && mv "${_SETTINGS_APK}.aligned" "$_SETTINGS_APK"                                     && log_success "  ✓ zipalign applied"
                             fi
+                            log_success "✓ OtherPersonalSettings: DEX injected, resources.arsc preserved"
+                        else
+                            cd "$GITHUB_WORKSPACE"
+                            log_warning "No DEX found in apktool output — OtherPersonalSettings skipped"
                         fi
-                        log_warning "[foldpager] Asset '$asset_name' not found or download failed"
-                        return 1
-                    }
-
-                    # Download both XML files
-                    _fp_dl_asset "fold_screen_settings.xml" "$_FP_ASSETS/fold_screen_settings.xml" && _FP_OK=1
-                    _fp_dl_asset "ic_tablet_screen_settings.xml" "$_FP_ASSETS/ic_tablet_screen_settings.xml"
+                        rm -f "${_SETTINGS_APK}.apkbuild"
+                    else
+                        rm -f "${_SETTINGS_APK}.apkbuild"
+                        log_warning "apktool rebuild failed — OtherPersonalSettings patch skipped"
+                    fi
                 else
-                    log_error "[foldpager] Multilang release API request failed"
+                    log_info "  OtherPersonalSettings: IS_GLOBAL_BUILD not present"
                 fi
-
-                # Step 3: Inject foldpager DEX as next free classesN.dex slot + inject XML assets
-                #
-                # WHY no apktool d/b here:
-                #   classes.dex from the Multilang release contains NEW foldpager classes
-                #   (fragments, adapters, preference controllers) that do not exist in the
-                #   stock Settings.apk. Android's multidex ClassLoader loads all classesN.dex
-                #   files into the same class space — new classes in a new slot can reference
-                #   any stock class. No smali roundtrip is needed or correct.
-                #
-                #   apktool b on 8000+ smali files takes 45-90+ minutes or stalls entirely.
-                #   It also re-encodes resources.arsc which breaks the R+ 4-byte alignment
-                #   requirement (error -124). Neither problem occurs with direct zip injection.
-                if [ "$_FP_OK" -eq 1 ] && [ -n "$_SETTINGS_APK" ] && [ -f "$_SETTINGS_APK" ]; then
-
-                    # Download classes.dex from Multilang release
-                    log_info "[foldpager] Fetching classes.dex from Multilang release..."
-                    _FP_DEX_URL=$(echo "$_FP_RELEASE_JSON" | jq -r \
-                        '.assets[] | select(.name == "classes.dex") | .url' | head -n 1)
-
-                    if [ -n "$_FP_DEX_URL" ] && [ "$_FP_DEX_URL" != "null" ]; then
-                        curl -sSfL \
-                            -H "Authorization: token ${GITHUB_TOKEN}" \
-                            -H "Accept: application/octet-stream" \
-                            -o "$_FP_ASSETS/foldpager_classes.dex" "$_FP_DEX_URL"
-
-                        if [ -s "$_FP_ASSETS/foldpager_classes.dex" ]; then
-                            log_success "[foldpager] ✓ Downloaded: classes.dex"
-
-                            # ── Duplicate-class conflict guard ───────────────────────────
-                            # PROBLEM: If MiuiFoldScreenSettings already exists in stock DEX,
-                            # ART ClassLoader uses the stock version (lower-numbered slot wins).
-                            # New controller classes from the injected DEX still load but call
-                            # methods that only exist in the injected MiuiFoldScreenSettings,
-                            # not the stock one → NoSuchMethodError at Settings startup.
-                            # Also: injected DEX references resource IDs from a different ROM
-                            # build → Resources.NotFoundException → Settings crash.
-                            # FIX: detect any class overlap and skip injection when found.
-                            log_info "[foldpager] Checking for duplicate class conflict with stock DEX..."
-                            _FP_CONFLICT_INFO=$(python3 - \
-                                "$_SETTINGS_APK" \
-                                "$_FP_ASSETS/foldpager_classes.dex" << 'PYEOF'
-import zipfile, sys, re
-
-apk  = sys.argv[1]
-dex  = sys.argv[2]
-
-with open(dex, "rb") as f:
-    fp_bytes = f.read()
-
-# Extract class descriptors from the foldpager DEX string table (heuristic: L...;)
-fp_classes = set(re.findall(rb'L([A-Za-z0-9_$/]{4,128});', fp_bytes))
-
-with zipfile.ZipFile(apk) as z:
-    stock_names = sorted(n for n in z.namelist()
-                         if re.match(r'^classes\d*\.dex$', n))
-    for dex_name in stock_names:
-        stock = z.read(dex_name)
-        for cls in fp_classes:
-            if cls in stock:
-                print(f"CONFLICT:{cls.decode(errors='replace')}:{dex_name}")
-                sys.exit(0)
-
-print("OK")
-PYEOF
-)
-                            if echo "$_FP_CONFLICT_INFO" | grep -q "^CONFLICT:"; then
-                                _C_CLASS=$(echo "$_FP_CONFLICT_INFO" | cut -d: -f2)
-                                _C_DEX=$(echo "$_FP_CONFLICT_INFO" | cut -d: -f3)
-                                log_warning "[foldpager] Duplicate class: $_C_CLASS already in stock $_C_DEX"
-                                log_warning "[foldpager] Skipping classes.dex injection — foreign resource IDs + duplicate classes would crash Settings at startup"
-                                log_info "[foldpager] Binary patches (isSupportFoldScreenSettings, FoldController stubs) are sufficient — fold settings entry stable"
-                            else
-                                # No class overlap — safe to inject
-                                _NEXT_SLOT=""
-                                for _n in 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-                                    if ! unzip -l "$_SETTINGS_APK" \
-                                            "classes${_n}.dex" >/dev/null 2>&1; then
-                                        _NEXT_SLOT="${_n}"
-                                        break
-                                    fi
-                                done
-
-                                if [ -z "$_NEXT_SLOT" ]; then
-                                    log_error "[foldpager] No free DEX slot (slots 2-15 all occupied)"
-                                else
-                                    _NEW_DEX_NAME="classes${_NEXT_SLOT}.dex"
-                                    log_info "[foldpager] No conflicts found — injecting as $_NEW_DEX_NAME..."
-                                    _FP_DEX_TMP="$TEMP_DIR/fp_dex_slot"
-                                    rm -rf "$_FP_DEX_TMP" && mkdir -p "$_FP_DEX_TMP"
-                                    cp "$_FP_ASSETS/foldpager_classes.dex" \
-                                       "$_FP_DEX_TMP/$_NEW_DEX_NAME"
-                                    cd "$_FP_DEX_TMP"
-                                    zip -0 -u "$_SETTINGS_APK" "$_NEW_DEX_NAME" >/dev/null 2>&1
-                                    cd "$GITHUB_WORKSPACE"
-                                    rm -rf "$_FP_DEX_TMP"
-                                    log_success "[foldpager] ✓ Foldpager DEX injected as $_NEW_DEX_NAME"
-                                fi
-                            fi
-                        else
-                            log_error "[foldpager] classes.dex download failed — zero bytes"
-                            rm -f "$_FP_ASSETS/foldpager_classes.dex"
-                        fi
-                    else
-                        log_info "[foldpager] classes.dex not found in release — skipping DEX injection"
-                    fi
-
-                    # ── XML asset injection ──────────────────────────────────────
-                    #
-                    # fold_screen_settings.xml — PreferenceScreen layout.
-                    #   Binary AXML files compiled by aapt2 have resource integer IDs
-                    #   (0x7F0xxxxx) hardcoded inside them at compile time.  These IDs
-                    #   are specific to the ROM build that compiled them.  The Multilang
-                    #   release was compiled with DIFFERENT IDs than the stock ROM.
-                    #
-                    #   MIUI Settings builds a search index at startup by inflating ALL
-                    #   PreferenceScreen XMLs (to index every setting title/summary for
-                    #   the Settings search bar).  If fold_screen_settings.xml contains
-                    #   Multilang IDs that don't exist in stock resources.arsc:
-                    #     → Resources.NotFoundException → Settings crash on open.
-                    #
-                    #   The stock APK already contains fold_screen_settings.xml compiled
-                    #   with the CORRECT resource IDs for this build.  We already patch
-                    #   isSupportFoldScreenSettings → true, which makes the fold page
-                    #   visible.  The stock XML inflates fine.  We must NOT replace it.
-                    #
-                    #   FIX: skip fold_screen_settings.xml injection entirely when it
-                    #   already exists in the APK (stock version has correct IDs).
-                    #   If it does NOT exist (unlikely for builds where MiuiFoldScreen-
-                    #   Settings is present), also skip — injecting a foreign-ID XML
-                    #   would still crash Settings startup.
-                    #
-                    # ic_tablet_screen_settings.xml — vector drawable icon.
-                    #   Vector drawables use ONLY android:* framework attributes
-                    #   (IDs in the 0x01010xxx range — universal across all builds).
-                    #   No app-private resource IDs.  Safe to inject regardless.
-                    _FP_XML_TMP="$TEMP_DIR/fp_xml_inject"
-
-                    # fold_screen_settings.xml: unconditionally replace with Multilang version
-                    if [ -f "$_FP_ASSETS/fold_screen_settings.xml" ]; then
-                        rm -rf "$_FP_XML_TMP" && mkdir -p "$_FP_XML_TMP/res/xml"
-                        cp "$_FP_ASSETS/fold_screen_settings.xml" \
-                           "$_FP_XML_TMP/res/xml/fold_screen_settings.xml"
-                        cd "$_FP_XML_TMP"
-                        zip -0 -u "$_SETTINGS_APK" \
-                            "res/xml/fold_screen_settings.xml" >/dev/null 2>&1
-                        cd "$GITHUB_WORKSPACE"
-                        rm -rf "$_FP_XML_TMP"
-                        log_success "[foldpager] ✓ Injected/Replaced fold_screen_settings.xml → res/xml/"
-                    fi
-
-                    # ic_tablet_screen_settings.xml: always safe to inject (framework IDs only)
-                    if [ -f "$_FP_ASSETS/ic_tablet_screen_settings.xml" ]; then
-                        rm -rf "$_FP_XML_TMP"
-                        mkdir -p \
-                            "$_FP_XML_TMP/res/drawable" \
-                            "$_FP_XML_TMP/res/drawable-night-v8"
-                        cp "$_FP_ASSETS/ic_tablet_screen_settings.xml" \
-                           "$_FP_XML_TMP/res/drawable/ic_tablet_screen_settings.xml"
-                        cp "$_FP_ASSETS/ic_tablet_screen_settings.xml" \
-                           "$_FP_XML_TMP/res/drawable-night-v8/ic_tablet_screen_settings.xml"
-                        cd "$_FP_XML_TMP"
-                        zip -0 -u "$_SETTINGS_APK" \
-                            "res/drawable/ic_tablet_screen_settings.xml" \
-                            "res/drawable-night-v8/ic_tablet_screen_settings.xml" \
-                            >/dev/null 2>&1
-                        cd "$GITHUB_WORKSPACE"
-                        rm -rf "$_FP_XML_TMP"
-                        log_success "[foldpager] ✓ Injected ic_tablet_screen_settings.xml → res/drawable/ + drawable-night-v8/"
-                    fi
-
-                    # Zipalign after all zip -u operations.
-                    # Required so resources.arsc and uncompressed entries stay 4-byte
-                    # aligned for ART and PackageManager mmap.
-                    _ZA=$(which zipalign 2>/dev/null || \
-                          find "$BIN_DIR/android-sdk" -name zipalign \
-                               2>/dev/null | sort -r | head -1)
-                    if [ -n "$_ZA" ]; then
-                        if "$_ZA" -p -f 4 \
-                                "$_SETTINGS_APK" \
-                                "${_SETTINGS_APK}.fp_aligned" 2>/dev/null; then
-                            mv "${_SETTINGS_APK}.fp_aligned" "$_SETTINGS_APK"
-                            log_success "[foldpager] ✓ zipalign applied"
-                        else
-                            rm -f "${_SETTINGS_APK}.fp_aligned"
-                            log_warning "[foldpager] zipalign failed — APK may be misaligned"
-                        fi
-                    else
-                        log_warning "[foldpager] zipalign not found — alignment skipped"
-                    fi
-
-                fi
-
-                rm -rf "$_FP_WORK" "$_FP_ASSETS"
-                cd "$GITHUB_WORKSPACE"
-
-                log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                log_success "✅ FOLD-PAGER COMPLETE"
-                log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            else
+                log_warning "apktool decompile failed — OtherPersonalSettings skipped"
             fi
-
-            # D4b. OtherPersonalSettings IS_GLOBAL_BUILD — HANDLED BY BINARY PATCHER
-            # _settings_region_patch (called above via _run_dex_patch "SETTINGS REGION")
-            # already patches OtherPersonalSettings::IS_GLOBAL_BUILD in-place via
-            # binary_patch_sget_to_true(..., only_class='OtherPersonalSettings', use_const4=True).
-            # It covers all registers (not just p1) and all sget variants.
-            # No apktool d/b needed — that approach took 25+ min on 8000+ smali files.
+            rm -rf "$_OPS_WORK" "$_OPS_DEX"
+            cd "$GITHUB_WORKSPACE"
 
             # D4. Provision GMS support
             _run_dex_patch "PROVISION GMS" "provision-gms" \
@@ -3478,11 +3000,79 @@ PYEOF
             _run_dex_patch "MIUI FRAMEWORK" "miui-framework" "$_FW_JAR"
             cd "$GITHUB_WORKSPACE"
 
-            # D8b. miui-framework Gboard IME swap — handled entirely by dex_patcher.py
-            # _miui_framework_patch Pass 1b: injects com.google.android.inputmethod.latin
-            # into the DEX string pool (redirect com.baidu.input_mi slot → new string_data
-            # at EOF), then counts all const-string instructions that now load Gboard.
-            # Zero apktool. Zero smali recompile. Zero DEX restructuring.
+            # D8b. miui-framework: Gboard IME swap via apktool
+            #   binary_swap_string can't inject a new string — Gboard package name is
+            #   longer than Baidu's and not in the DEX string pool. apktool smali sed
+            #   is the only reliable approach.
+            if [ -n "$_FW_JAR" ]; then
+                log_info "🎹 miui-framework: Gboard IME swap..."
+                _FW_WORK="$TEMP_DIR/fw_smali"
+                rm -rf "$_FW_WORK"
+                _FW_APPLIED=0
+                if timeout 20m apktool d -r -f "$_FW_JAR" -o "$_FW_WORK" >/dev/null 2>&1; then
+                    # Patch 1a: InputMethodServiceInjector — Baidu → Gboard
+                    _IMSI=$(find "$_FW_WORK" -name "InputMethodServiceInjector.smali" -type f | head -1)
+                    if [ -n "$_IMSI" ] && grep -q "com\.baidu\.input_mi" "$_IMSI"; then
+                        sed -i 's|com\.baidu\.input_mi|com.google.android.inputmethod.latin|g' "$_IMSI"
+                        log_success "  ✓ Gboard swap in InputMethodServiceInjector"
+                        _FW_APPLIED=1
+                    else
+                        log_info "  InputMethodServiceInjector: com.baidu.input_mi not present"
+                    fi
+                    # Patch 1b: InputMethodManagerStubImpl — Baidu → Gboard
+                    #   Separate class from 1a; may or may not exist depending on build.
+                    _IMMS=$(find "$_FW_WORK" -name "InputMethodManagerStubImpl.smali" -type f | head -1)
+                    if [ -n "$_IMMS" ] && grep -q "com\.baidu\.input_mi" "$_IMMS"; then
+                        sed -i 's|com\.baidu\.input_mi|com.google.android.inputmethod.latin|g' "$_IMMS"
+                        log_success "  ✓ Gboard swap in InputMethodManagerStubImpl"
+                        _FW_APPLIED=1
+                    else
+                        log_info "  InputMethodManagerStubImpl: com.baidu.input_mi not present"
+                    fi
+                    # Patch 2: showSystemReadyErrorDialogsIfNeeded → return-void
+                    #   apktool fallback for builds where binary_patch_method misses it
+                    #   (abstract base class with code_off=0 in ActivityTaskManagerInternal)
+                    _SRED_FILE=$(grep -rl "showSystemReadyErrorDialogsIfNeeded" "$_FW_WORK"/smali* 2>/dev/null | head -1)
+                    if [ -n "$_SRED_FILE" ]; then
+                        python3 - "$_SRED_FILE" "showSystemReadyErrorDialogsIfNeeded" <<'SRED_PY'
+import re, sys
+path, method = sys.argv[1], sys.argv[2]
+text = open(path).read()
+pat = rf'(\.method[^
+]*{re.escape(method)}[^
+]*
+).*?(\.end method)'
+def stub(m):
+    return m.group(1) + "    .registers 1
+    return-void
+" + m.group(2)
+new = re.sub(pat, stub, text, flags=re.DOTALL)
+if new != text:
+    open(path,'w').write(new)
+    print(f"[SUCCESS] ✓ {method} stubbed in {path}")
+    sys.exit(0)
+print(f"[INFO] {method} not found in {path}")
+sys.exit(1)
+SRED_PY
+                        [ $? -eq 0 ] && _FW_APPLIED=1
+                    fi
+                    if [ "$_FW_APPLIED" -eq 1 ]; then
+                        if timeout 20m apktool b -c "$_FW_WORK" -o "${_FW_JAR}.fwTmp" >/dev/null 2>&1; then
+                            mv "${_FW_JAR}.fwTmp" "$_FW_JAR"
+                            log_success "✓ miui-framework apktool patches applied"
+                        else
+                            rm -f "${_FW_JAR}.fwTmp"
+                            log_warning "apktool build failed — miui-framework apktool patches skipped"
+                        fi
+                    else
+                        log_info "  miui-framework: no apktool patches needed"
+                    fi
+                else
+                    log_warning "apktool decompile failed — miui-framework apktool patches skipped"
+                fi
+                rm -rf "$_FW_WORK"
+                cd "$GITHUB_WORKSPACE"
+            fi
 
             # D8. nexdroid.rc — bootloader spoof init script
             log_info "💉 Writing nexdroid.rc bootloader spoof..."
@@ -3551,14 +3141,14 @@ CUSTKEYS
                 log_warning "init.miui.ext.rc not found — launcher fix skipped"
             fi
 
-            # D11. Region settings extra files (GDrive: locale XMLs → system_ext/etc/)
+            # D11. Region settings extra files (GDrive: locale XMLs → system_ext/cust)
             log_info "⬇ Downloading region settings files..."
             REGION_GD_ID="14fD0DMOzcN2hWSWDQas577wu7POoXv3c"
             if gdown "$REGION_GD_ID" -O "$TEMP_DIR/region_files.zip" --fuzzy -q 2>/dev/null; then
-                mkdir -p "$DUMP_DIR/etc"
-                unzip -qq -o "$TEMP_DIR/region_files.zip" -d "$DUMP_DIR/etc"
+                mkdir -p "$DUMP_DIR/cust"
+                unzip -qq -o "$TEMP_DIR/region_files.zip" -d "$DUMP_DIR/cust"
                 rm -f "$TEMP_DIR/region_files.zip"
-                log_success "✓ Region files pushed to system_ext/etc/"
+                log_success "✓ Region files pushed to system_ext/cust"
             else
                 log_warning "Region files download failed — skipping"
             fi
