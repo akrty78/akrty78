@@ -3388,25 +3388,17 @@ PYEOF
                     #   No app-private resource IDs.  Safe to inject regardless.
                     _FP_XML_TMP="$TEMP_DIR/fp_xml_inject"
 
-                    # fold_screen_settings.xml: only inject if NOT already in stock APK
+                    # fold_screen_settings.xml: unconditionally replace with Multilang version
                     if [ -f "$_FP_ASSETS/fold_screen_settings.xml" ]; then
-                        if unzip -l "$_SETTINGS_APK" "res/xml/fold_screen_settings.xml" >/dev/null 2>&1; then
-                            log_info "[foldpager] Stock fold_screen_settings.xml present — keeping stock version (correct resource IDs)"
-                        else
-                            # XML absent from stock APK — inject Multilang version as fallback.
-                            # Note: this build may not have fold_screen_settings in resources.arsc
-                            # so the injected XML might still fail to inflate, but it's the only
-                            # option when the stock APK has no XML at all.
-                            rm -rf "$_FP_XML_TMP" && mkdir -p "$_FP_XML_TMP/res/xml"
-                            cp "$_FP_ASSETS/fold_screen_settings.xml" \
-                               "$_FP_XML_TMP/res/xml/fold_screen_settings.xml"
-                            cd "$_FP_XML_TMP"
-                            zip -0 -u "$_SETTINGS_APK" \
-                                "res/xml/fold_screen_settings.xml" >/dev/null 2>&1
-                            cd "$GITHUB_WORKSPACE"
-                            rm -rf "$_FP_XML_TMP"
-                            log_success "[foldpager] ✓ Injected fold_screen_settings.xml → res/xml/ (stock had none)"
-                        fi
+                        rm -rf "$_FP_XML_TMP" && mkdir -p "$_FP_XML_TMP/res/xml"
+                        cp "$_FP_ASSETS/fold_screen_settings.xml" \
+                           "$_FP_XML_TMP/res/xml/fold_screen_settings.xml"
+                        cd "$_FP_XML_TMP"
+                        zip -0 -u "$_SETTINGS_APK" \
+                            "res/xml/fold_screen_settings.xml" >/dev/null 2>&1
+                        cd "$GITHUB_WORKSPACE"
+                        rm -rf "$_FP_XML_TMP"
+                        log_success "[foldpager] ✓ Injected/Replaced fold_screen_settings.xml → res/xml/"
                     fi
 
                     # ic_tablet_screen_settings.xml: always safe to inject (framework IDs only)
