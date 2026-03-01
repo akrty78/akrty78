@@ -1,0 +1,14 @@
+{
+  "apk_path": "product/app/MiuiFrequentPhrase/MiuiFrequentPhrase.apk",
+  "out_apk_path": "product/app/MiuiFrequentPhrase/MiuiFrequentPhrase.apk",
+  "inject_arsc": [
+    {
+      "type": "color",
+      "name": "input_bottom_background_color",
+      "package_id": 127,
+      "configs": [
+        { "qualifiers": "", "value_type": "ref", "value": "@android:color/system_neutral1_50" }
+      ]
+    }
+  ]
+}
