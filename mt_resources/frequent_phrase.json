@@ -1,27 +1,38 @@
 {
-  "name": "MiuiFrequentPhrase",
-  "description": "Applies background color patches to the MiuiFrequentPhrase module.",
-  "operations": [
+  "apk_path": "product/app/MIUIFrequentPhrase/MIUIFrequentPhrase.apk",
+  "out_apk_path": "product/app/MIUIFrequentPhrase/MIUIFrequentPhrase.apk.tmp",
+  "inject_arsc": [
     {
-      "apk_path": "product/app/MIUIFrequentPhrase/MIUIFrequentPhrase.apk",
-      "arsc_inject": [
+      "package_id": 127,
+      "type": "color",
+      "name": "input_bottom_background_color",
+      "configs": [
         {
-          "package_id": 127,
-          "type": "color",
-          "name": "input_bottom_background_color",
-          "configs": [
-            { "qualifiers": "", "value_type": "ref", "value": "0x0106001F" },
-            { "qualifiers": "-night", "value_type": "ref", "value": "0x01060028" }
-          ]
+          "qualifiers": "",
+          "value_type": "ref",
+          "value": "0x0106001F"
         },
         {
-          "package_id": 127,
-          "type": "color",
-          "name": "input_bottom_background_color_old",
-          "configs": [
-            { "qualifiers": "", "value_type": "ref", "value": "0x0106001F" },
-            { "qualifiers": "-night", "value_type": "ref", "value": "0x01060028" }
-          ]
+          "qualifiers": "-night",
+          "value_type": "ref",
+          "value": "0x01060028"
+        }
+      ]
+    },
+    {
+      "package_id": 127,
+      "type": "color",
+      "name": "input_bottom_background_color_old",
+      "configs": [
+        {
+          "qualifiers": "",
+          "value_type": "ref",
+          "value": "0x0106001F"
+        },
+        {
+          "qualifiers": "-night",
+          "value_type": "ref",
+          "value": "0x01060028"
         }
       ]
     }
