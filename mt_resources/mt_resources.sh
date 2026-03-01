@@ -44,8 +44,9 @@ process_mt_resources() {
     # Execute JSON files placed by the bot, but only if their target APK exists in this partition
     for config_json in "$json_dir"/*.json; do
         if [ -f "$config_json" ]; then
-            # Extract apk_path from JSON
+            # Extract apk_path and out_apk_path from JSON (strictly matching the exact keys)
             local target_apk=$(grep -oP '"apk_path"\s*:\s*"\K[^"]+' "$config_json")
+            local out_apk=$(grep -oP '"out_apk_path"\s*:\s*"\K[^"]+' "$config_json")
             
             if [ -n "$target_apk" ] && [ -f "$GITHUB_WORKSPACE/$target_apk" ]; then
                 log_info "[MTCli] Found target $target_apk. Triggering MTCli for: $(basename "$config_json")"
@@ -54,6 +55,13 @@ process_mt_resources() {
                     rm -f "$part_name"
                     return 1
                 }
+                
+                # If out_apk_path was specified and generated, overwrite the original APK
+                if [ -n "$out_apk" ] && [ -f "$GITHUB_WORKSPACE/$out_apk" ]; then
+                    mv -f "$GITHUB_WORKSPACE/$out_apk" "$GITHUB_WORKSPACE/$target_apk"
+                    log_success "[MTCli] Applied MTCli patches to $target_apk"
+                fi
+                
                 processed_any=1
             fi
         fi
