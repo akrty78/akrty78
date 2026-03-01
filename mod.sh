@@ -88,8 +88,8 @@ SUPER_DIR="$OUTPUT_DIR/super"
 TEMP_DIR="$GITHUB_WORKSPACE/temp"
 
 # --- ENGINE INCLUDES ---
-if [ -f "$GITHUB_WORKSPACE/mt_resources.sh" ]; then
-    source "$GITHUB_WORKSPACE/mt_resources.sh"
+if [ -f "$GITHUB_WORKSPACE/mt_resources/mt_resources.sh" ]; then
+    source "$GITHUB_WORKSPACE/mt_resources/mt_resources.sh"
 else
     log_warning "mt_resources.sh not found. MT-Resources mods disabled."
 fi
@@ -2036,14 +2036,9 @@ push_multilang() {
     mkdir -p "$overlay_dst"
     local pushed=0
     while IFS= read -r -d '' apk; do
-        # Only install APKs that live inside a directory named 'overlay'
-        local parent_dir
-        parent_dir=$(basename "$(dirname "$apk")")
-        if [ "$parent_dir" == "overlay" ]; then
-            cp -f "$apk" "$overlay_dst/"
-            log_success "[multilang] ✓ $(basename "$apk")"
-            pushed=$((pushed + 1))
-        fi
+        cp -f "$apk" "$overlay_dst/"
+        log_success "[multilang] ✓ $(basename "$apk")"
+        pushed=$((pushed + 1))
     done < <(find "$ml_work/extracted" -name "*.apk" -print0)
 
     rm -rf "$ml_work"
