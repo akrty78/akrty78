@@ -2584,15 +2584,20 @@ for part in $LOGICALS; do
             log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         fi
 
-        # B3. SYSTEM_EXT MOD INJECTION
+        B3_MODS=false
+        if [[ ",$MODS_SELECTED," == *",mt_resources,"* ]] || [[ ",$MODS_SELECTED," == *",enhanced_kbd,"* ]]; then
+            # Route to mt_resources.sh bridge
+            if declare -f process_mt_resources > /dev/null; then
+                process_mt_resources "$DUMP_DIR"
+            else
+                log_warning "process_mt_resources function not found, skipping MT-Resources mod."
+            fi
+        fi
+
+        # B4. SYSTEM_EXT SPECIFIC MODS
         if [ "$part" == "system_ext" ] && [ -n "$MODS_SELECTED" ]; then
-            if [[ ",$MODS_SELECTED," == *",mt_resources,"* ]] || [[ ",$MODS_SELECTED," == *",enhanced_kbd,"* ]]; then
-                # Route to mt_resources.sh bridge
-                if declare -f process_mt_resources > /dev/null; then
-                    process_mt_resources "$DUMP_DIR"
-                else
-                    log_warning "process_mt_resources function not found, skipping MT-Resources mod."
-                fi
+            if [[ ",$MODS_SELECTED," == *",fold_pager,"* ]]; then
+                inject_foldpager_mod "$DUMP_DIR"
             fi
         fi
 
