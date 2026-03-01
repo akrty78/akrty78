@@ -25,8 +25,9 @@ mtcli_run() {
 process_mt_resources() {
     local DUMP_DIR="$1"
     local json_dir="$(dirname "${BASH_SOURCE[0]}")"
+    local part_name=$(basename "$DUMP_DIR" | sed 's/_dump//')
 
-    log_info "[MTCli] Processing MT-Resources pipeline..."
+    log_info "[MTCli] Processing MT-Resources for partition: $part_name"
 
     # Check if a custom config directory exists
     if [ ! -d "$json_dir" ]; then
@@ -34,23 +35,35 @@ process_mt_resources() {
         return 0
     fi
 
-    # Execute all JSON files placed by the bot
-    # We must CD into the dump directory so relative paths like "product/app/..." work.
-    cd "$DUMP_DIR" || return 1
+    # Create a temporary symlink in the workspace so MTCli can resolve paths like "product/app/..."
+    cd "$GITHUB_WORKSPACE" || return 1
+    ln -sfn "$DUMP_DIR" "$part_name"
 
+    local processed_any=0
+
+    # Execute JSON files placed by the bot, but only if their target APK exists in this partition
     for config_json in "$json_dir"/*.json; do
         if [ -f "$config_json" ]; then
-            log_info "[MTCli] Triggering MTCli for: $(basename "$config_json")"
-            mtcli_run "$config_json" || {
-                log_error "[MTCli] Pipeline failed for $config_json"
-                cd - > /dev/null
-                return 1
-            }
+            # Extract apk_path from JSON
+            local target_apk=$(grep -oP '"apk_path"\s*:\s*"\K[^"]+' "$config_json")
+            
+            if [ -n "$target_apk" ] && [ -f "$GITHUB_WORKSPACE/$target_apk" ]; then
+                log_info "[MTCli] Found target $target_apk. Triggering MTCli for: $(basename "$config_json")"
+                mtcli_run "$config_json" || {
+                    log_error "[MTCli] Pipeline failed for $config_json"
+                    rm -f "$part_name"
+                    return 1
+                }
+                processed_any=1
+            fi
         fi
     done
 
-    cd - > /dev/null
+    # Clean up symlink
+    rm -f "$part_name"
 
-    log_info "[MTCli] MT-Resources injection completed."
+    if [ "$processed_any" -eq 1 ]; then
+        log_info "[MTCli] MT-Resources injection strictly completed for $part_name."
+    fi
     return 0
 }
