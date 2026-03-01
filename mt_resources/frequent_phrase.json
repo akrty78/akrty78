@@ -7,7 +7,17 @@
       "name": "input_bottom_background_color",
       "package_id": 127,
       "configs": [
-        { "qualifiers": "", "value_type": "ref", "value": "@android:color/system_neutral1_50" }
+        { "qualifiers": "", "value_type": "ref", "value": "@android:color/system_neutral1_50" },
+        { "qualifiers": "-night", "value_type": "ref", "value": "@android:color/system_neutral1_900" }
+      ]
+    },
+    {
+      "type": "color",
+      "name": "input_bottom_background_color_old",
+      "package_id": 127,
+      "configs": [
+        { "qualifiers": "", "value_type": "ref", "value": "@android:color/system_neutral1_50" },
+        { "qualifiers": "-night", "value_type": "ref", "value": "@android:color/system_neutral1_900" }
       ]
     }
   ]
