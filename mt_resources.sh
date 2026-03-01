@@ -7,10 +7,10 @@
 # ==============================================================================
 
 # Ensure mtcli is available
-MTCli_JAR="$BIN_DIR/mtcli-all.jar"
+MTCli_JAR="$BIN_DIR/mtcli.jar"
 
 if [ ! -f "$MTCli_JAR" ]; then
-    log_error "[MTCli] mtcli-all.jar not found in $BIN_DIR. Aborting MT-Resources module."
+    log_error "[MTCli] mtcli.jar not found in $BIN_DIR. Aborting MT-Resources module."
     return 1
 fi
 
