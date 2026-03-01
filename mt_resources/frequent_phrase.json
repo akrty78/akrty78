@@ -1,6 +1,6 @@
 {
-  "apk_path": "product/app/MiuiFrequentPhrase/MiuiFrequentPhrase.apk",
-  "out_apk_path": "product/app/MiuiFrequentPhrase/MiuiFrequentPhrase.apk",
+  "apk_path": "product/app/MIUIFrequentPhrase/MIUIFrequentPhrase.apk",
+  "out_apk_path": "product/app/MIUIFrequentPhrase/MIUIFrequentPhrase.apk",
   "inject_arsc": [
     {
       "type": "color",
