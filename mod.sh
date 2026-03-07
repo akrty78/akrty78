@@ -1971,7 +1971,7 @@ inject_wallpaper_pack() {
     log_step "🖼 WALLPAPER PACK INJECTION"
     log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-    local dest_dir="$dump_dir/media/wallpaper_group"
+    local dest_dir="$dump_dir/media/wallpaper/wallpaper_group"
     mkdir -p "$dest_dir"
     
     for pack in "$pack_src"/*/; do
@@ -3147,8 +3147,8 @@ CUSTKEYS
             log_info "⬇ Downloading region settings files..."
             REGION_GD_ID="14fD0DMOzcN2hWSWDQas577wu7POoXv3c"
             if gdown "$REGION_GD_ID" -O "$TEMP_DIR/region_files.zip" --fuzzy -q 2>/dev/null; then
-                mkdir -p "$DUMP_DIR/cust"
-                unzip -qq -o "$TEMP_DIR/region_files.zip" -d "$DUMP_DIR/cust"
+                mkdir -p "$DUMP_DIR/etc/cust"
+                unzip -qq -o "$TEMP_DIR/region_files.zip" -d "$DUMP_DIR/etc/cust"
                 rm -f "$TEMP_DIR/region_files.zip"
                 log_success "✓ Region files pushed to system_ext/cust"
             else
