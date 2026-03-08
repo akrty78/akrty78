@@ -106,11 +106,9 @@ EOF
 
     # FIX 7: Clone input to output immediately if different so zip inj doesn't lose APK contents
     local INPUT_EXT="${OUTPUT##*.}"
-    local INPUT_EXT_LOWER=$(echo "$INPUT_EXT" | tr '[:upper:]' '[:lower:]')
+    local INPUT_EXT_LOWER=$(echo "${INPUT##*.}" | tr '[:upper:]' '[:lower:]')
     local IS_ARCHIVE=0
-    if [ "$INPUT_EXT_LOWER" = "apk" ] || [ "$INPUT_EXT_LOWER" = "jar" ] || [ "$INPUT_EXT_LOWER" = "zip" ]; then
-        IS_ARCHIVE=1
-    fi
+    [ "$INPUT_EXT_LOWER" = "apk" ] || [ "$INPUT_EXT_LOWER" = "zip" ] || [ "$INPUT_EXT_LOWER" = "jar" ] && IS_ARCHIVE=1
 
     if [ "$OUTPUT" != "$INPUT" ] && [ "$IS_ARCHIVE" -eq 1 ] && [ "$SMALI_ONLY" -eq 0 ]; then
         cp "$INPUT" "$OUTPUT"
@@ -481,9 +479,14 @@ EOF
                             # For regex, we use sed to allow backreferences (\1, \2) in the replacement
                             # We only support single-line replacements for regex mode currently
                             local repl="${new_lines[0]}"
-                            # Escape for sed s command
-                            local esc_match=$(printf '%s' "$match" | sed 's/[&/\]/\\&/g')
-                            local esc_repl=$(printf '%s' "$repl" | sed 's/[&/\]/\\&/g')
+                            # Escape only | and & for replacement (preserving \1 backreferences)
+                            local esc_repl=$(printf '%s' "$repl" | sed -e 's/[&|]/\\&/g' -e 's/\([[:digit:]]\)/\\\1/g') # FIX 2: Escape backreferences
+                            # Escape | for match
+                            local esc_match=$(printf '%s' "$match" | sed 's/[|]/\\|/g') # FIX 2: Escape only |
+                            # Auto-adjust regex anchor to handle baksmali indentation
+                            if [[ "$esc_match" == ^* ]]; then
+                                esc_match="^[[:space:]]*${esc_match:1}"
+                            fi
                             sed -i -E "${tl}s|${esc_match}|${esc_repl}|" "$tmp_file"
                         else
                             local awk_repl=""
@@ -526,10 +529,16 @@ EOF
 
         local count
         if [ "$method" = "*" ]; then
-            count=$(grep -c "const-string.*\"$(printf '%s' "$old_val" | sed 's/[&/\]/\\&/g')\"" "$file" 2>/dev/null || echo 0)
+            count=$(awk -v old="$old_val" '
+            index($0, "const-string") != 0 && index($0, "\"" old "\"") != 0 { count++ }
+            END { print count+0 }
+            ' "$file")
         else
             _find_method_awk "$file" "$method" || { OP_MSG="method not found: $method"; return 1; }
-            count=$(sed -n "${_MT_METHOD_START},${_MT_METHOD_END}p" "$file" | grep -c "const-string.*\"$(printf '%s' "$old_val" | sed 's/[&/\]/\\&/g')\"" 2>/dev/null || echo 0)
+            count=$(awk -v s="$_MT_METHOD_START" -v e="$_MT_METHOD_END" -v old="$old_val" '
+            NR>=s && NR<=e && index($0, "const-string") != 0 && index($0, "\"" old "\"") != 0 { count++ }
+            END { print count+0 }
+            ' "$file")
         fi
 
         if [ "$DRY_RUN" -eq 1 ]; then OP_MSG="OK (dry-run, $count occurrences)"; return 0; fi
@@ -617,9 +626,10 @@ EOF
     op_add_method_annotation() {
         local file="$1" method="$2" patch_json="$3"
         _find_method_awk "$file" "$method" || { OP_MSG="method not found: $method"; return 1; }
-        local ann_type=$(echo "$patch_json" | jq -r '.annotation[]' | head -1 | grep -oP 'L[^;]+;' || true)
+        # FIX 3: Replace grep -oP with awk for annotation type extraction
+        local ann_type=$(echo "$patch_json" | jq -r '.annotation[]' | head -1 | awk 'match($0, /L[^;]+;/) {print substr($0, RSTART, RLENGTH)}' || true)
         if [ -n "$ann_type" ]; then
-            if [ "$(sed -n "${_MT_METHOD_START},${_MT_METHOD_END}p" "$file" | grep -c "$ann_type" || true)" -gt 0 ]; then
+            if [ "$(awk -v s="$_MT_METHOD_START" -v e="$_MT_METHOD_END" -v at="$ann_type" 'NR>=s && NR<=e && index($0, at) {count++} END{print count}' "$file")" -gt 0 ]; then
                 OP_MSG="⚠ annotation $ann_type already exists — skipped"; return 0
             fi
         fi
@@ -690,10 +700,11 @@ EOF
         if ! grep -q "${fname}:${ftype}" "$file"; then OP_MSG="field not found: $fname:$ftype"; return 1; fi
         if [ "$DRY_RUN" -eq 1 ]; then OP_MSG="OK (dry-run)"; return 0; fi
 
-        local esc_fname=$(printf '%s' "$fname" | sed 's/[&/\]/\\&/g')
+        local esc_fname=$(printf '%s' "$fname" | sed 's/[.[\*^$]/\\&/g')
         local esc_fval=$(printf '%s' "$fval" | sed 's/[&/\]/\\&/g')
+        local esc_ftype=$(printf '%s' "$ftype" | sed 's/\[/\\\[/g; s/\]/\\\]/g') # FIX 4: Escape ftype brackets for sed BRE
         # FIX 14
-        sed "s|\(${esc_fname}:${ftype} = \).*|\1${esc_fval}|" "$file" > "${file}.tmp"
+        sed "s|\(${esc_fname}:${esc_ftype} = \).*|\1${esc_fval}|" "$file" > "${file}.tmp"
         mv "${file}.tmp" "$file"
         OP_MSG="✓"
     }
@@ -707,8 +718,9 @@ EOF
         if ! grep -q "${old_name}:${ftype}" "$file"; then OP_MSG="field not found: $old_name:$ftype"; return 1; fi
         if [ "$DRY_RUN" -eq 1 ]; then OP_MSG="OK (dry-run)"; return 0; fi
 
+        local esc_ftype=$(printf '%s' "$ftype" | sed 's/\[/\\\[/g; s/\]/\\\]/g') # FIX 4: Escape ftype brackets for sed BRE
         # FIX 14
-        sed "s|->${old_name}:${ftype}|->${new_name}:${ftype}|g; s| ${old_name}:${ftype}| ${new_name}:${ftype}|g" "$file" > "${file}.tmp"
+        sed "s|->${old_name}:${esc_ftype}|->${new_name}:${ftype}|g; s| ${old_name}:${esc_ftype}| ${new_name}:${ftype}|g" "$file" > "${file}.tmp"
         mv "${file}.tmp" "$file"
         OP_MSG="✓"
     }
