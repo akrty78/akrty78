@@ -489,8 +489,8 @@ EOF
                             # For regex, we use sed to allow backreferences (\1, \2) in the replacement
                             # We only support single-line replacements for regex mode currently
                             local repl="${new_lines[0]}"
-                            # Escape only | and & for replacement (preserving \1 backreferences)
-                            local esc_repl=$(printf '%s' "$repl" | sed -e 's/[&|]/\\&/g' -e 's/\([[:digit:]]\)/\\\1/g') # FIX 2: Escape backreferences
+                            # Escape only | and & for sed replacement — preserve \1 backreferences as-is
+                            local esc_repl=$(printf '%s' "$repl" | sed 's/[&|]/\\&/g')
                             # Escape | for match
                             local esc_match=$(printf '%s' "$match" | sed 's/[|]/\\|/g') # FIX 2: Escape only |
                             # Auto-adjust regex anchor to handle baksmali indentation
@@ -900,7 +900,7 @@ process_mt_smali() {
                         _info "[MT-Smali] Found target $target_apk. Triggering engine for job $i in $(basename "$config_json")"
                         
                         if _run_mt_smali_cli -i "$GITHUB_WORKSPACE/$target_apk" "$JOB_STAGE/job_$i.json" --verbose; then
-                            if [ -n "$out_apk" ] && [ -f "$GITHUB_WORKSPACE/$out_apk" ]; then
+                            if [ -n "$out_apk" ] && [ "$out_apk" != "$target_apk" ] && [ -f "$GITHUB_WORKSPACE/$out_apk" ]; then
                                 mv -f "$GITHUB_WORKSPACE/$out_apk" "$GITHUB_WORKSPACE/$target_apk"
                                 _ok "[MT-Smali] Applied patches to $target_apk"
                             fi
