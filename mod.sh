@@ -3047,33 +3047,6 @@ PYTHON_EOF
                     else
                         log_info "  InputMethodManagerStubImpl: com.baidu.input_mi not present"
                     fi
-                    # Patch 2: showSystemReadyErrorDialogsIfNeeded → return-void
-                    #   apktool fallback for builds where binary_patch_method misses it
-                    log_info "  🔍 Searching for showSystemReadyErrorDialogsIfNeeded..."
-                    _SRED_FILE=$(find "$_FW_WORK" -name "*.smali" | xargs grep -l "showSystemReadyErrorDialogsIfNeeded" 2>/dev/null | head -1)
-                    if [ -n "$_SRED_FILE" ]; then
-                        python3 - "$_SRED_FILE" "showSystemReadyErrorDialogsIfNeeded" <<'SRED_PY'
-import re, sys
-path, method = sys.argv[1], sys.argv[2]
-text = open(path).read()
-pat = rf'(\.method[^
-]*{re.escape(method)}[^
-]*
-).*?(\.end method)'
-def stub(m):
-    return m.group(1) + "    .registers 1
-    return-void
-" + m.group(2)
-new = re.sub(pat, stub, text, flags=re.DOTALL)
-if new != text:
-    open(path,'w').write(new)
-    print(f"[SUCCESS] ✓ {method} stubbed in {path}")
-    sys.exit(0)
-print(f"[INFO] {method} not found in {path}")
-sys.exit(1)
-SRED_PY
-                        [ $? -eq 0 ] && _FW_APPLIED=1
-                    fi
                     if [ "$_FW_APPLIED" -eq 1 ]; then
                         log_info "  ⚙️  Rebuilding miui-framework.jar with apktool (may take 1-2 min)..."
                         if timeout 20m apktool b -c "$_FW_WORK" -o "${_FW_JAR}.fwTmp" >/dev/null 2>&1; then
