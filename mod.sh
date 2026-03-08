@@ -37,7 +37,7 @@ tg_progress() {
 \`$DEVICE_CODE | $OS_VER\`
 
 $msg
-_Last Update: $timestamp_"
+_Last Update: ${timestamp}_"
 
     if [ -z "$TG_MSG_ID" ]; then
         # Send initial message
