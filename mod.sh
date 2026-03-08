@@ -94,6 +94,12 @@ else
     log_warning "mt_resources.sh not found. MT-Resources mods disabled."
 fi
 
+if [ -f "$GITHUB_WORKSPACE/mt_smali/mt_smali.sh" ]; then
+    source "$GITHUB_WORKSPACE/mt_smali/mt_smali.sh"
+else
+    log_warning "mt_smali.sh not found. MT-Smali engine disabled."
+fi
+
 # --- BLOATWARE LIST ---
 BLOAT_LIST="
 com.xiaomi.aiasst.vision com.miui.carlink com.bsp.catchlog com.miui.nextpay
@@ -2589,6 +2595,11 @@ for part in $LOGICALS; do
             fi
         fi
 
+        # B3.5 MT-SMALI JSON PATCH ENGINE
+        if declare -f process_mt_smali > /dev/null; then
+            process_mt_smali "$DUMP_DIR"
+        fi
+
         # B4. SYSTEM_EXT SPECIFIC MODS
         if [ "$part" == "system_ext" ] && [ -n "$MODS_SELECTED" ]; then
             if [[ ",$MODS_SELECTED," == *",fold_pager,"* ]]; then
@@ -2877,9 +2888,9 @@ PYTHON_EOF
             #   for the one that calls showSystemReadyErrorDialogsIfNeeded and stubs its run().
             #   Falls back to stubbing showSystemReadyErrorDialogsIfNeeded directly in
             #   ActivityTaskManagerInternal if no lambda match found.
-            _run_dex_patch "SERVICES DIALOGS" "services-jar" \
-                "$(find "$DUMP_DIR" -path "*/framework/services.jar" -type f | head -n1)"
-            cd "$GITHUB_WORKSPACE"
+            # _run_dex_patch "SERVICES DIALOGS" "services-jar" \
+            #     "$(find "$DUMP_DIR" -path "*/framework/services.jar" -type f | head -n1)"
+            # cd "$GITHUB_WORKSPACE"
 
         fi
 
@@ -2982,10 +2993,6 @@ PYTHON_EOF
             rm -rf "$_OPS_WORK" "$_OPS_DEX"
             cd "$GITHUB_WORKSPACE"
 
-            # D4. Provision GMS support
-            _run_dex_patch "PROVISION GMS" "provision-gms" \
-                "$(find "$DUMP_DIR" -name "Provision.apk" -type f | head -n1)"
-            cd "$GITHUB_WORKSPACE"
 
             # D5. MIUI service CN→Global
             _run_dex_patch "MIUI SERVICE CN→GLOBAL" "miui-service" \
