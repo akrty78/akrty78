@@ -183,30 +183,36 @@ EOF
         local method_sig="$2"
         _MT_METHOD_START=0
         _MT_METHOD_END=0
-
-        # FIX 4: while loop to strip ALL flags instead of hardcoded 5 gsub limits
-        # FIX 11: local declaration separate from assignment, explicit -n check
+    
+        # If no parenthesis in sig, treat as name-only (match first method with that name)
+        local match_mode="exact"
+        [[ "$method_sig" != *"("* ]] && match_mode="name_only"
+    
         local result
-        result=$(awk -v sig="$method_sig" '
+        result=$(awk -v sig="$method_sig" -v mode="$match_mode" '
         /^\.method / {
             line = $0
             sub(/^\.method +/, "", line)
-            # keep stripping first word if it is a known flag
             while (match(line, /^(public|private|protected|static|final|synchronized|bridge|varargs|native|abstract|strictfp|synthetic|constructor|declared-synchronized) +/)) {
                 sub(/^(public|private|protected|static|final|synchronized|bridge|varargs|native|abstract|strictfp|synthetic|constructor|declared-synchronized) +/, "", line)
             }
             sub(/^ +| +$/, "", line)
-            if (line == sig) {
-                start = NR
-                searching = 1
+            matched = 0
+            if (mode == "exact") {
+                matched = (line == sig)
+            } else {
+                # name_only: match method name before the first (
+                split(line, parts, "(")
+                matched = (parts[1] == sig)
             }
+            if (matched) { start = NR; searching = 1 }
         }
         searching && /^\.end method/ {
             print start " " NR
             exit
         }
         ' "$smali_file")
-
+    
         if [ -n "$result" ]; then
             _MT_METHOD_START=$(echo "$result" | awk '{print $1}')
             _MT_METHOD_END=$(echo "$result" | awk '{print $2}')
