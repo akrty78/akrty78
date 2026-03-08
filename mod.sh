@@ -3049,8 +3049,8 @@ PYTHON_EOF
                     fi
                     # Patch 2: showSystemReadyErrorDialogsIfNeeded → return-void
                     #   apktool fallback for builds where binary_patch_method misses it
-                    #   (abstract base class with code_off=0 in ActivityTaskManagerInternal)
-                    _SRED_FILE=$(grep -rl "showSystemReadyErrorDialogsIfNeeded" "$_FW_WORK"/smali* 2>/dev/null | head -1)
+                    log_info "  🔍 Searching for showSystemReadyErrorDialogsIfNeeded..."
+                    _SRED_FILE=$(find "$_FW_WORK" -name "*.smali" | xargs grep -l "showSystemReadyErrorDialogsIfNeeded" 2>/dev/null | head -1)
                     if [ -n "$_SRED_FILE" ]; then
                         python3 - "$_SRED_FILE" "showSystemReadyErrorDialogsIfNeeded" <<'SRED_PY'
 import re, sys
@@ -3075,6 +3075,7 @@ SRED_PY
                         [ $? -eq 0 ] && _FW_APPLIED=1
                     fi
                     if [ "$_FW_APPLIED" -eq 1 ]; then
+                        log_info "  ⚙️  Rebuilding miui-framework.jar with apktool (may take 1-2 min)..."
                         if timeout 20m apktool b -c "$_FW_WORK" -o "${_FW_JAR}.fwTmp" >/dev/null 2>&1; then
                             mv "${_FW_JAR}.fwTmp" "$_FW_JAR"
                             log_success "✓ miui-framework apktool patches applied"
