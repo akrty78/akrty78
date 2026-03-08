@@ -2525,11 +2525,20 @@ for part in $LOGICALS; do
         # A. DEBLOATER
         log_info "🗑️  Running debloater..."
         echo "$BLOAT_LIST" | tr ' ' '\n' | grep -v "^\s*$" > "$TEMP_DIR/bloat_target_list.txt"
-        # Touch log first so wc -l never fails on missing file
         touch "$TEMP_DIR/removed_bloat.log"
-        find "$DUMP_DIR" -type f -name "*.apk" | while read apk_file; do
-            pkg_name=$(aapt dump badging "$apk_file" 2>/dev/null | grep "package: name=" | cut -d"'" -f2)
-            if [ ! -z "$pkg_name" ]; then
+        
+        local apk_list=$(find "$DUMP_DIR" -type f -name "*.apk")
+        local total_apks=$(echo "$apk_list" | wc -l)
+        local current=0
+        
+        echo "$apk_list" | while read -r apk_file; do
+            current=$((current + 1))
+            [ $((current % 50)) -eq 0 ] && log_info "  ...scanning APKs ($current/$total_apks)"
+            
+            # Use timeout to prevent aapt hang on corrupt files
+            pkg_name=$(timeout 10s aapt dump badging "$apk_file" 2>/dev/null | grep "package: name=" | cut -d"'" -f2 || true)
+            
+            if [ -n "$pkg_name" ]; then
                 if grep -Fxq "$pkg_name" "$TEMP_DIR/bloat_target_list.txt"; then
                     rm -rf "$(dirname "$apk_file")"
                     echo "$pkg_name" >> "$TEMP_DIR/removed_bloat.log"
@@ -2892,7 +2901,6 @@ PYTHON_EOF
             #     "$(find "$DUMP_DIR" -path "*/framework/services.jar" -type f | head -n1)"
             # cd "$GITHUB_WORKSPACE"
             :
-
         fi
 
         # ── product partition ────────────────────────────────────────
