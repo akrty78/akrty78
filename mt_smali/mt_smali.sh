@@ -116,6 +116,10 @@ EOF
 
     # ── Step 1: baksmali — Explode DEX to smali ───────────────────
     rm -rf "$MTCLI_TMP" && mkdir -p "$MTCLI_TMP"
+    # Immediately copy patch file inside MTCLI_TMP so it survives the rm above
+    # (fixes race: process_mt_smali may have staged job JSON inside MTCLI_TMP)
+    cp "$PATCH_FILE" "$MTCLI_TMP/patch_job.json"
+    PATCH_FILE="$MTCLI_TMP/patch_job.json"
     local SMALI_DIR="$MTCLI_TMP/smali_out"
     local DEX_PATH=""
 
