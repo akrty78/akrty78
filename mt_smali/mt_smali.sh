@@ -884,16 +884,18 @@ process_mt_smali() {
             
             if [ "$is_array" = "yes" ]; then
                 local len=$(jq 'length' "$config_json")
-                mkdir -p "$MTCLI_TMP"
+                # Use a SEPARATE staging dir for job JSONs — _run_mt_smali_cli wipes $MTCLI_TMP on entry
+                local JOB_STAGE="/tmp/mt_smali_jobs_$$"
+                rm -rf "$JOB_STAGE" && mkdir -p "$JOB_STAGE"
                 for ((i=0; i<len; i++)); do
-                    jq ".[$i]" "$config_json" > "$MTCLI_TMP/job_$i.json"
-                    local target_apk=$(jq -r '.apk_path // empty' "$MTCLI_TMP/job_$i.json")
-                    local out_apk=$(jq -r '.out_apk_path // empty' "$MTCLI_TMP/job_$i.json")
+                    jq ".[$i]" "$config_json" > "$JOB_STAGE/job_$i.json"
+                    local target_apk=$(jq -r '.apk_path // empty' "$JOB_STAGE/job_$i.json")
+                    local out_apk=$(jq -r '.out_apk_path // empty' "$JOB_STAGE/job_$i.json")
                     
                     if [ -n "$target_apk" ] && [ -f "$GITHUB_WORKSPACE/$target_apk" ]; then
                         _info "[MT-Smali] Found target $target_apk. Triggering engine for job $i in $(basename "$config_json")"
                         
-                        if _run_mt_smali_cli -i "$GITHUB_WORKSPACE/$target_apk" "$MTCLI_TMP/job_$i.json" --verbose; then
+                        if _run_mt_smali_cli -i "$GITHUB_WORKSPACE/$target_apk" "$JOB_STAGE/job_$i.json" --verbose; then
                             if [ -n "$out_apk" ] && [ -f "$GITHUB_WORKSPACE/$out_apk" ]; then
                                 mv -f "$GITHUB_WORKSPACE/$out_apk" "$GITHUB_WORKSPACE/$target_apk"
                                 _ok "[MT-Smali] Applied patches to $target_apk"
@@ -901,11 +903,13 @@ process_mt_smali() {
                             processed_any=1
                         else
                             _err "[MT-Smali] Pipeline failed for job $i in $config_json"
+                            rm -rf "$JOB_STAGE"
                             rm -f "$part_name"
                             return 1
                         fi
                     fi
                 done
+                rm -rf "$JOB_STAGE"
             else
                 local target_apk=$(jq -r '.apk_path // empty' "$config_json")
                 local out_apk=$(jq -r '.out_apk_path // empty' "$config_json")
