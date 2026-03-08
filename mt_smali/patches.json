@@ -1,0 +1,21 @@
+[
+    {
+        "_documentation": "=========================================================================================\nMT_SMALI PATCH ENGINE CONFIGURATION\nThis file defines an array of smali patching jobs. Each object represents an APK to process.\n\nAVAILABLE OPERATIONS:\n- return_void         : Replaces method body with a void return.\n- return_true         : Replaces method body with return true (0x1).\n- return_false        : Replaces method body with return false (0x0).\n- return_minus1       : Replaces method body with return -1.\n- return_null         : Replaces method body with return null (0x0).\n- return_empty_string : Replaces method body with return \"\" (empty string).\n- return_int          : Replaces method body with return <value>.\n- replace_body        : Completely replaces method body with custom <registers> and <lines> array.\n- replace_line        : Replaces a specific line matching <match> with <replacement> array.\n- delete_line         : Deletes a specific line matching <match>.\n- insert_before       : Inserts <lines> array before a line matching <match>.\n- insert_after        : Inserts <lines> array after a line matching <match>.\n- replace_string      : Replaces <old_value> string with <new_value> string in const-string definitions.\n- set_flags           : Adds/removes modifiers (public, private, static, etc.) from a method.\n- add_method_annotation    : Injects new annotations to a method.\n- remove_method_annotation : Removes existing annotations from a method.\n- add_class_annotation     : Injects new class-level annotations.\n- remove_class_annotation  : Removes existing class-level annotations.\n- replace_field_value : Changes the static initializer value of a specific field.\n- rename_field        : Renames a field and updates all references in the file.\n\nMATCH MODES for line operations:\n- exact    : Default. Exact string match.\n- contains : Substring match.\n- regex    : Regular expression match. Supports backreferences (\\1, \\2) in replacement strings.\n\nOCCURRENCES for line operations:\n- first    : Default. Targets the first matched line in the method.\n- last     : Targets the last matched line in the method.\n- all      : Targets all matched lines in the method.\n=========================================================================================",
+        "apk_path": "system_ext/priv-app/Provision/Provision.apk",
+        "out_apk_path": "system_ext/priv-app/Provision/Provision.apk",
+        "patches": [
+            {
+                "_comment": "Enable Default Google Services by forcing IS_INTERNATIONAL_BUILD to true",
+                "class": "Lcom/android/provision/Utils;",
+                "method": "setGmsAppEnabledStateForCn",
+                "op": "replace_line",
+                "match": "^sget-boolean v([0-9]+), Lmiui/os/Build;->IS_INTERNATIONAL_BUILD:Z$",
+                "match_mode": "regex",
+                "occurrence": "first",
+                "replacement": [
+                    "const/4 v\\1, 0x1"
+                ]
+            }
+        ]
+    }
+]
