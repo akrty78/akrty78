@@ -2527,9 +2527,9 @@ for part in $LOGICALS; do
         echo "$BLOAT_LIST" | tr ' ' '\n' | grep -v "^\s*$" > "$TEMP_DIR/bloat_target_list.txt"
         touch "$TEMP_DIR/removed_bloat.log"
         
-        local apk_list=$(find "$DUMP_DIR" -type f -name "*.apk")
-        local total_apks=$(echo "$apk_list" | wc -l)
-        local current=0
+        apk_list=$(find "$DUMP_DIR" -type f -name "*.apk")
+        total_apks=$(echo "$apk_list" | wc -l)
+        current=0
         
         echo "$apk_list" | while read -r apk_file; do
             current=$((current + 1))
