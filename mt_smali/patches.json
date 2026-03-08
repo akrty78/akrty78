@@ -7,7 +7,7 @@
             {
                 "_comment": "Enable Default Google Services by forcing IS_INTERNATIONAL_BUILD to true",
                 "class": "Lcom/android/provision/Utils;",
-                "method": "setGmsAppEnabledStateForCn",
+                "method": "setGmsAppEnabledStateForCn(Landroid/content/Context;)V",
                 "op": "replace_line",
                 "match": "^sget-boolean v([0-9]+), Lmiui/os/Build;->IS_INTERNATIONAL_BUILD:Z$",
                 "match_mode": "regex",
