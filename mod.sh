@@ -1179,45 +1179,6 @@ def _recorder_ai_patch(dex_name: str, dex: bytearray) -> bool:
     patched = False
     raw = bytes(dex)
 
-    # Pass 1 — AiDeviceUtil::isAiSupportedDevice
-    if b'AiDeviceUtil' in raw:
-        for cls in (
-            "com/miui/soundrecorder/utils/AiDeviceUtil",
-            "com/miui/soundrecorder/AiDeviceUtil",
-            "com/miui/recorder/utils/AiDeviceUtil",
-            "com/miui/recorder/AiDeviceUtil",
-        ):
-            if binary_patch_method(dex, cls, "isAiSupportedDevice",
-                                   stub_regs=1, stub_insns=_STUB_TRUE):
-                patched = True
-                raw = bytes(dex)
-                break
-
-        if not patched:
-            # Package path unknown — scan every class def for AiDeviceUtil
-            info("  AiDeviceUtil: scanning all class defs...")
-            data = bytes(dex)
-            hdr  = _parse_header(data)
-            if hdr:
-                for i in range(hdr['class_defs_size']):
-                    base = hdr['class_defs_off'] + i * 32
-                    if struct.unpack_from('<I', data, base + 24)[0] == 0:
-                        continue
-                    cls_idx = struct.unpack_from('<I', data, base)[0]
-                    try:
-                        sidx     = struct.unpack_from('<I', data, hdr['type_ids_off'] + cls_idx * 4)[0]
-                        type_str = _get_str(data, hdr, sidx)
-                        if ('AiDeviceUtil' in type_str
-                                and type_str.startswith('L')
-                                and type_str.endswith(';')):
-                            if binary_patch_method(dex, type_str[1:-1], "isAiSupportedDevice",
-                                                   stub_regs=1, stub_insns=_STUB_TRUE):
-                                patched = True
-                                raw = bytes(dex)
-                                break
-                    except Exception:
-                        continue
-
     # Pass 2 — IS_INTERNATIONAL_BUILD region gate
     if b'IS_INTERNATIONAL_BUILD' in raw:
         if binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD') > 0:
@@ -1544,53 +1505,6 @@ def _settings_region_patch(dex_name: str, dex: bytearray) -> bool:
     return n > 0
 
 
-# ── InCallUI.apk  ────────────────────────────────────────────────
-def _incallui_patch(dex_name: str, dex: bytearray) -> bool:
-    """
-    STRICT SCOPE: RecorderUtils::isAiRecordEnable → return true.
-    - Try known package first; if not found, scan all class defs for any class
-      whose simple name is 'RecorderUtils' (package may differ between builds).
-    - Do NOT touch other classes or instructions.
-    """
-    if b'RecorderUtils' not in bytes(dex):
-        return False
-
-    # Try known path first
-    if binary_patch_method(dex,
-            "com/android/incallui/RecorderUtils",
-            "isAiRecordEnable",
-            stub_regs=1, stub_insns=_STUB_TRUE):
-        return True
-
-    # Package path unknown — scan all class defs
-    info("  RecorderUtils: scanning all class defs for exact class name...")
-    data = bytes(dex)
-    hdr  = _parse_header(data)
-    if not hdr:
-        warn("  Cannot parse DEX header"); return False
-
-    for i in range(hdr['class_defs_size']):
-        base = hdr['class_defs_off'] + i * 32
-        if struct.unpack_from('<I', data, base + 24)[0] == 0:
-            continue
-        cls_idx = struct.unpack_from('<I', data, base)[0]
-        try:
-            sidx     = struct.unpack_from('<I', data, hdr['type_ids_off'] + cls_idx * 4)[0]
-            type_str = _get_str(data, hdr, sidx)
-            # Match exact simple class name: ends with /RecorderUtils;
-            if type_str.endswith('/RecorderUtils;') and type_str.startswith('L'):
-                cls_path = type_str[1:-1]
-                info(f"  Found: {type_str} — trying isAiRecordEnable")
-                if binary_patch_method(dex, cls_path, "isAiRecordEnable",
-                                       stub_regs=1, stub_insns=_STUB_TRUE):
-                    return True
-        except Exception:
-            continue
-
-    warn("  RecorderUtils::isAiRecordEnable not found in any class")
-    return False
-
-
 # ════════════════════════════════════════════════════════════════════
 #  COMMAND TABLE  +  ENTRY POINT
 # ════════════════════════════════════════════════════════════════════
@@ -1604,7 +1518,6 @@ PROFILES = {
     "miui-service":      _miui_service_patch,    # global IS_INTERNATIONAL_BUILD sweep
     "systemui-volte":    _systemui_all_patch,       # VoLTE + QuickShare(const/4) + WA-notif
     "miui-framework":    _miui_framework_patch,     # validateTheme(trim) + IS_GLOBAL_BUILD
-    "incallui-ai":       _incallui_patch,           # RecorderUtils::isAiRecordEnable
 }
 
 def main():
@@ -2906,22 +2819,8 @@ PYTHON_EOF
         # ── product partition ────────────────────────────────────────
         if [ "$part" == "product" ]; then
 
-            # D2. AI Voice Recorder — exact path: product/data-app/...
-            _RECORDER_APK=$(find "$DUMP_DIR" \
-                -path "*/data-app/MIUISoundRecorderTargetSdk30/MIUISoundRecorderTargetSdk30.apk" \
-                -type f | head -n1)
-            if [ -z "$_RECORDER_APK" ]; then
-                _RECORDER_APK=$(find "$DUMP_DIR" \
-                    \( -name "MIUISoundRecorder*.apk" -o -name "SoundRecorder.apk" \) \
-                    -type f | head -n1)
-            fi
-            _run_dex_patch "VOICE RECORDER AI" "voice-recorder-ai" "$_RECORDER_APK"
-            cd "$GITHUB_WORKSPACE"
-
-            # D3b. InCallUI — AI recording gate: RecorderUtils::isAiRecordEnable → true
-            _run_dex_patch "INCALLUI AI" "incallui-ai" \
-                "$(find "$DUMP_DIR" -path "*/priv-app/InCallUI/InCallUI.apk" -type f | head -n1)"
-            cd "$GITHUB_WORKSPACE"
+            # D2. AI Voice Recorder — now handled via mt_smali patches.json
+            # D3b. InCallUI — now handled via mt_smali patches.json
 
         fi
 
