@@ -584,6 +584,28 @@ EOF
         _do_line_op_range "$file" 1 "$total" "$match" "$mode" "$occ" "$op" "$pjson" "file"
     }
 
+    # ── append_to_class: insert lines before the last line (.end class) ──
+    # No text matching, no scanning — just appends before EOF.
+    op_append_to_class() {
+        local file="$1" patch_json="$2"
+        local nl_count=$(echo "$patch_json" | jq '.lines | length')
+        [ "$nl_count" -eq 0 ] && { OP_MSG="'lines' array is empty"; return 1; }
+        local total=$(wc -l < "$file")
+        local ins="\n"
+        for ((i=0; i<nl_count; i++)); do
+            local line=$(echo "$patch_json" | jq -r ".lines[$i]")
+            ins="${ins}${line}\n"
+        done
+        ins="${ins}\n"
+        if [ "$DRY_RUN" -eq 1 ]; then
+            OP_MSG="✓ (dry-run, would append $nl_count lines)"
+            return 0
+        fi
+        awk -v ln="$total" -v ins="$ins" 'NR==ln{printf "%s", ins}{print}' "$file" > "${file}.tmp"
+        mv "${file}.tmp" "$file"
+        OP_MSG="✓ ($nl_count lines appended before .end class)"
+    }
+
     op_replace_string() {
         local file="$1" method="$2" patch_json="$3"
         local old_val=$(echo "$patch_json" | jq -r '.old_value')
@@ -875,6 +897,7 @@ EOF
             replace_field_value)      op_replace_field_value "$SMALI_FILE" "$PATCH_JSON" || rc=1 ;;
             rename_field)             op_rename_field "$SMALI_FILE" "$PATCH_JSON" || rc=1 ;;
             replace_class_file)       op_replace_class_file "$SMALI_FILE" "$PATCH_JSON" || rc=1 ;;
+            append_to_class)          op_append_to_class "$SMALI_FILE" "$PATCH_JSON" || rc=1 ;;
             *) _err "$LABEL Unknown op: $P_OP"; rc=1; OP_MSG="unknown op" ;;
         esac
 
