@@ -481,6 +481,7 @@ EOF
 
     _do_line_op_range() {
         local file="$1" start="$2" end="$3" match="$4" mode="$5" occ="$6" op="$7" pjson="$8"
+        local scope="${9:-method}"  # 'method' (default) or 'file'
         local -a new_lines=()
         if [ "$op" != "delete" ]; then
             local key="lines"
@@ -495,13 +496,16 @@ EOF
         while IFS= read -r line; do
             line_num=$((line_num + 1))
             [ "$line_num" -lt "$start" ] || [ "$line_num" -gt "$end" ] && continue
-            if [[ "$line" =~ ^[[:space:]]*\.annotation ]]; then in_annotation=1; continue; fi
-            if [ "$in_annotation" -eq 1 ]; then
-                [[ "$line" =~ ^[[:space:]]*\.end[[:space:]]+annotation ]] && in_annotation=0
-                continue
+            # Skip annotation blocks and smali directives ONLY for method-scoped scans
+            if [ "$scope" = "method" ]; then
+                if [[ "$line" =~ ^[[:space:]]*\.annotation ]]; then in_annotation=1; continue; fi
+                if [ "$in_annotation" -eq 1 ]; then
+                    [[ "$line" =~ ^[[:space:]]*\.end[[:space:]]+annotation ]] && in_annotation=0
+                    continue
+                fi
+                [[ "$line" =~ ^[[:space:]]*\.(method|end[[:space:]]+method|registers|locals|line|prologue|epilogue|param|local|restart|end[[:space:]]+local|catch|catchall) ]] && continue
             fi
-            [[ "$line" =~ ^[[:space:]]*\.(method|end[[:space:]]+method|registers|locals|line|prologue|epilogue|param|local|restart|end[[:space:]]+local|catch|catchall) ]] && continue
-            
+
             local trimmed=$(echo "$line" | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//')
             local matched=0
             case "$mode" in
@@ -577,7 +581,7 @@ EOF
     _do_line_op_file() {
         local file="$1" match="$2" mode="$3" occ="$4" op="$5" pjson="$6"
         local total=$(wc -l < "$file")
-        _do_line_op_range "$file" 1 "$total" "$match" "$mode" "$occ" "$op" "$pjson"
+        _do_line_op_range "$file" 1 "$total" "$match" "$mode" "$occ" "$op" "$pjson" "file"
     }
 
     op_replace_string() {
