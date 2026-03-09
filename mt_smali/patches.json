@@ -327,5 +327,41 @@
                 "source_file": "mt_smali/smali/MiuiGuaranteeCard.smali"
             }
         ]
+    },
+    {
+        "_comment": "InCallUI — RecorderUtils::isAiRecordEnable → return true (migrated from dex_patcher)",
+        "apk_path": "product/priv-app/InCallUI/InCallUI.apk",
+        "out_apk_path": "product/priv-app/InCallUI/InCallUI.apk",
+        "patches": [
+            {
+                "class": "Lcom/android/incallui/recorder/RecorderUtils;",
+                "method": "isAiRecordEnable",
+                "op": "return_true"
+            }
+        ]
+    },
+    {
+        "_comment": "SoundRecorder — AiDeviceUtil::isAiSupportedDevice → return true (migrated from dex_patcher)",
+        "apk_path": "product/data-app/MIUISoundRecorderTargetSdk30/MIUISoundRecorderTargetSdk30.apk",
+        "out_apk_path": "product/data-app/MIUISoundRecorderTargetSdk30/MIUISoundRecorderTargetSdk30.apk",
+        "patches": [
+            {
+                "class": "Lcom/android/soundrecorder/ai/airecorder/util/AiDeviceUtil;",
+                "method": "isAiSupportedDevice",
+                "op": "return_true"
+            }
+        ]
+    },
+    {
+        "_comment": "MIUIContactsT — BusinessHallUtil::i(Context)Z → return true",
+        "apk_path": "product/priv-app/MIUIContactsT/MIUIContactsT.apk",
+        "out_apk_path": "product/priv-app/MIUIContactsT/MIUIContactsT.apk",
+        "patches": [
+            {
+                "class": "Lcom/android/contacts/businesshall/utils/BusinessHallUtil;",
+                "method": "i(Landroid/content/Context;)Z",
+                "op": "return_true"
+            }
+        ]
     }
 ]
