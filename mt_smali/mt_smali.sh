@@ -131,31 +131,81 @@ EOF
         _die "Input is a directory but --no-baksmali not set" || return 1
     else
         if [ "$IS_ARCHIVE" -eq 1 ]; then
-            _info "Extracting $DEX_NAME from $(basename "$INPUT")..."
-            DEX_PATH="$MTCLI_TMP/$DEX_NAME"
-            unzip -p "$INPUT" "$DEX_NAME" > "$DEX_PATH" 2>/dev/null \
-                || { _die "Failed to extract $DEX_NAME from $INPUT"; return 1; }
+            # Auto-detect which DEX contains the target class(es)
+            # List all DEX files in APK: classes.dex, classes2.dex, classes3.dex ...
+            local dex_list
+            dex_list=$(unzip -l "$INPUT" | grep -oE 'classes[0-9]*\.dex' | sort -V | uniq)
+            [ -z "$dex_list" ] && { _die "No classes*.dex found in $INPUT"; return 1; }
+
+            # Extract class paths from patch JSON to check against smali output
+            local target_classes
+            target_classes=$(jq -r '.patches[].class // empty' "$PATCH_FILE" 2>/dev/null \
+                | sed 's|^L||; s|;$||; s|$|.smali|')
+
+            local found_dex=""
+            local tmp_probe="$MTCLI_TMP/dex_probe"
+
+            for candidate_dex in $dex_list; do
+                _info "Probing $candidate_dex for target classes..."
+                local cand_path="$MTCLI_TMP/$candidate_dex"
+                unzip -p "$INPUT" "$candidate_dex" > "$cand_path" 2>/dev/null
+                [ ! -s "$cand_path" ] && continue
+                rm -rf "$tmp_probe" && mkdir -p "$tmp_probe"
+                java -jar "$BAKSMALI_JAR" d -a "$API_LEVEL" -o "$tmp_probe" "$cand_path" >/dev/null 2>&1 || continue
+                local hit=0
+                while IFS= read -r rel_path; do
+                    [ -f "$tmp_probe/$rel_path" ] && { hit=1; break; }
+                done <<< "$target_classes"
+                if [ "$hit" -eq 1 ]; then
+                    found_dex="$candidate_dex"
+                    DEX_PATH="$cand_path"
+                    # Reuse the already-disassembled smali
+                    mkdir -p "$SMALI_DIR"
+                    cp -r "$tmp_probe/." "$SMALI_DIR/"
+                    _ok "Disassembly complete: $(find "$SMALI_DIR" -name '*.smali' | wc -l) classes"
+                    rm -rf "$tmp_probe"
+                    break
+                fi
+                rm -rf "$tmp_probe"
+            done
+
+            if [ -z "$found_dex" ]; then
+                _warn "No DEX matched target classes — falling back to classes.dex"
+                found_dex="classes.dex"
+                DEX_PATH="$MTCLI_TMP/classes.dex"
+                unzip -p "$INPUT" "classes.dex" > "$DEX_PATH" 2>/dev/null \
+                    || { _die "Failed to extract classes.dex from $INPUT"; return 1; }
+                [ ! -s "$DEX_PATH" ] && { _die "Extracted DEX is empty"; return 1; }
+                _info "Disassembling classes.dex (API $API_LEVEL)..."
+                mkdir -p "$SMALI_DIR"
+                java -jar "$BAKSMALI_JAR" d -a "$API_LEVEL" -o "$SMALI_DIR" "$DEX_PATH" \
+                    || { _die "baksmali failed"; return 1; }
+                _ok "Disassembly complete: $(find "$SMALI_DIR" -name '*.smali' | wc -l) classes"
+            fi
+
+            DEX_NAME="$found_dex"
+            _info "Using DEX: $DEX_NAME"
+
         elif [ "$INPUT_EXT_LOWER" = "dex" ]; then
             DEX_PATH="$INPUT"
+            _info "Disassembling $DEX_NAME (API $API_LEVEL)..."
+            mkdir -p "$SMALI_DIR"
+            java -jar "$BAKSMALI_JAR" d -a "$API_LEVEL" -o "$SMALI_DIR" "$DEX_PATH" \
+                || { _die "baksmali failed"; return 1; }
+            _ok "Disassembly complete: $(find "$SMALI_DIR" -name '*.smali' | wc -l) classes"
         else
             DEX_PATH="$MTCLI_TMP/$DEX_NAME"
             unzip -p "$INPUT" "$DEX_NAME" > "$DEX_PATH" 2>/dev/null \
                 || { _die "Cannot extract DEX and unknown file type: $INPUT_EXT"; return 1; }
+            [ ! -s "$DEX_PATH" ] && { _die "Extracted DEX is empty — corrupt archive?"; return 1; }
+            _info "Disassembling $DEX_NAME (API $API_LEVEL)..."
+            mkdir -p "$SMALI_DIR"
+            java -jar "$BAKSMALI_JAR" d -a "$API_LEVEL" -o "$SMALI_DIR" "$DEX_PATH" \
+                || { _die "baksmali failed"; return 1; }
+            _ok "Disassembly complete: $(find "$SMALI_DIR" -name '*.smali' | wc -l) classes"
         fi
 
-        [ ! -s "$DEX_PATH" ] && { _die "Extracted DEX is empty — corrupt archive?"; return 1; }
-
-        if [ "$BACKUP" -eq 1 ]; then
-            cp "$DEX_PATH" "${DEX_PATH}.bak"
-            _info "Backup: ${DEX_PATH}.bak"
-        fi
-
-        _info "Disassembling $DEX_NAME (API $API_LEVEL)..."
-        mkdir -p "$SMALI_DIR"
-        java -jar "$BAKSMALI_JAR" d -a "$API_LEVEL" -o "$SMALI_DIR" "$DEX_PATH" \
-            || { _die "baksmali failed — DEX may be corrupt"; return 1; }
-        _ok "Disassembly complete: $(find "$SMALI_DIR" -name '*.smali' | wc -l) classes"
-    fi
+    fi  # end if NO_BAKSMALI / elif dir / else
 
     # ══════════════════════════════════════════════════════════════════
     # PATCH ENGINE — Core Functions
