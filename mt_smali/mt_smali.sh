@@ -735,6 +735,28 @@ EOF
         OP_MSG="✓"
     }
 
+    op_replace_class_file() {
+        local file="$1" patch_json="$2"
+        local source_file=$(echo "$patch_json" | jq -r '.source_file // empty')
+        if [ -n "$source_file" ]; then
+            local abs="$GITHUB_WORKSPACE/$source_file"
+            [ ! -f "$abs" ] && { OP_MSG="source_file not found: $abs"; return 1; }
+            if [ "$DRY_RUN" -eq 1 ]; then OP_MSG="OK (dry-run)"; return 0; fi
+            # Apply env var substitution (__NEXDROID_VERSION__ → $NEXDROID_VERSION)
+            sed "s/__NEXDROID_VERSION__/${NEXDROID_VERSION:-1.05}/g" "$abs" > "$file"
+        else
+            local line_count=$(echo "$patch_json" | jq '.lines | length')
+            [ "$line_count" -eq 0 ] && { OP_MSG="'lines' or 'source_file' required"; return 1; }
+            if [ "$DRY_RUN" -eq 1 ]; then OP_MSG="OK (dry-run)"; return 0; fi
+            > "${file}.tmp"
+            local i; for ((i=0; i<line_count; i++)); do
+                echo "$patch_json" | jq -r ".lines[$i]" >> "${file}.tmp"
+            done
+            mv "${file}.tmp" "$file"
+        fi
+        OP_MSG="✓"
+    }
+
     # ══════════════════════════════════════════════════════════════════
     # MAIN DISPATCH
     # ══════════════════════════════════════════════════════════════════
@@ -798,6 +820,7 @@ EOF
             remove_class_annotation)  op_remove_class_annotation "$SMALI_FILE" "$PATCH_JSON" || rc=1 ;;
             replace_field_value)      op_replace_field_value "$SMALI_FILE" "$PATCH_JSON" || rc=1 ;;
             rename_field)             op_rename_field "$SMALI_FILE" "$PATCH_JSON" || rc=1 ;;
+            replace_class_file)       op_replace_class_file "$SMALI_FILE" "$PATCH_JSON" || rc=1 ;;
             *) _err "$LABEL Unknown op: $P_OP"; rc=1; OP_MSG="unknown op" ;;
         esac
 
