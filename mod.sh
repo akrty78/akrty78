@@ -1159,12 +1159,7 @@ def run_patches(archive: Path, patch_fn, label: str) -> int:
 #  PATCH PROFILES
 # ════════════════════════════════════════════════════════════════════
 
-# ── Settings.apk  ────────────────────────────────────────────────
-def _settings_ai_patch(dex_name: str, dex: bytearray) -> bool:
-    if b'InternalDeviceUtils' not in bytes(dex): return False
-    return binary_patch_method(dex,
-        "com/android/settings/InternalDeviceUtils",
-        "isAiSupported", 1, _STUB_TRUE)
+# ── Settings.apk isAiSupported — now handled via mt_smali patches.json ──
 
 # ── SoundRecorder APK  ──────────────────────────────────────────
 def _recorder_ai_patch(dex_name: str, dex: bytearray) -> bool:
@@ -1510,7 +1505,7 @@ def _settings_region_patch(dex_name: str, dex: bytearray) -> bool:
 # ════════════════════════════════════════════════════════════════════
 
 PROFILES = {
-    "settings-ai":       _settings_ai_patch,
+    # "settings-ai" — removed, now handled via mt_smali patches.json
     "settings-region":   _settings_region_patch,   # exact 3 classes only
     "voice-recorder-ai": _recorder_ai_patch,        # AiDeviceUtil::isAiSupportedDevice
     "services-jar":      _services_jar_patch,
@@ -2840,10 +2835,8 @@ PYTHON_EOF
                 fi
             fi
 
-            # D3. Settings AI + Region unlock (IS_GLOBAL_BUILD in locale classes)
+            # D3. Settings AI — now handled via mt_smali patches.json
             _SETTINGS_APK="$(find "$DUMP_DIR" -name "Settings.apk" -type f | head -n1)"
-            _run_dex_patch "SETTINGS AI"     "settings-ai"     "$_SETTINGS_APK"
-            cd "$GITHUB_WORKSPACE"
             _run_dex_patch "SETTINGS REGION" "settings-region" "$_SETTINGS_APK"
             cd "$GITHUB_WORKSPACE"
 
