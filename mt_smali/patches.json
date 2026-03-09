@@ -45,11 +45,8 @@
                 "_comment": "Insert cardStyleTilesList() private method at end of class",
                 "class": "Lmiui/systemui/controlcenter/qs/QSController$cardStyleTileSpecs$2;",
                 "method": "*",
-                "op": "insert_before",
-                "match": ".end class",
-                "match_mode": "contains",
-                "occurrence": "last",
-                "replacement": [
+                "op": "append_to_class",
+                "lines": [
                     ".method private cardStyleTilesList()[Ljava/lang/String;",
                     "    .registers 5",
                     "    const-string v0, \"persist.sys.nyxdroid_card_tiles\"",
@@ -325,6 +322,36 @@
                 "method": "*",
                 "op": "replace_class_file",
                 "source_file": "mt_smali/smali/MiuiGuaranteeCard.smali"
+            },
+            {
+                "_comment": "isAiSupported → return true (migrated from dex_patcher)",
+                "class": "Lcom/android/settings/InternalDeviceUtils;",
+                "method": "isAiSupported",
+                "op": "return_true"
+            },
+            {
+                "_comment": "GeminiController — isSystemAppInstalled → return true",
+                "class": "Lcom/android/settings/hyperosai/GeminiController;",
+                "method": "isSystemAppInstalled",
+                "op": "return_true"
+            },
+            {
+                "_comment": "GeminiController — getAvailabilityStatus → return true",
+                "class": "Lcom/android/settings/hyperosai/GeminiController;",
+                "method": "getAvailabilityStatus",
+                "op": "return_true"
+            },
+            {
+                "_comment": "MiuiSettings — IS_GLOBAL_BUILD → const/4 v0, 0x1",
+                "class": "Lcom/android/settings/MiuiSettings;",
+                "method": "*",
+                "op": "replace_line",
+                "match": "sget-boolean v0, Lmiui/os/Build;->IS_GLOBAL_BUILD:Z",
+                "match_mode": "contains",
+                "occurrence": "all",
+                "replacement": [
+                    "const/4 v0, 0x1"
+                ]
             }
         ]
     },
@@ -361,6 +388,42 @@
                 "class": "Lcom/android/contacts/businesshall/utils/BusinessHallUtil;",
                 "method": "i(Landroid/content/Context;)Z",
                 "op": "return_true"
+            }
+        ]
+    },
+    {
+        "_comment": "miui-framework.jar — CustomizeUtil::getMiuiCustVariantFile IS_GLOBAL_BUILD → const/4 v0, 0x1",
+        "apk_path": "system_ext/framework/miui-framework.jar",
+        "out_apk_path": "system_ext/framework/miui-framework.jar",
+        "patches": [
+            {
+                "class": "Lmiui/util/CustomizeUtil;",
+                "method": "getMiuiCustVariantFile",
+                "op": "replace_line",
+                "match": "sget-boolean v0, Lmiui/os/Build;->IS_GLOBAL_BUILD:Z",
+                "match_mode": "contains",
+                "occurrence": "all",
+                "replacement": [
+                    "const/4 v0, 0x1"
+                ]
+            }
+        ]
+    },
+    {
+        "_comment": "MiuiSystemUI — MiuiTileQueryHelper IS_INTERNATIONAL_BUILD → const/4 v10, 0x1",
+        "apk_path": "system_ext/priv-app/MiuiSystemUI/MiuiSystemUI.apk",
+        "out_apk_path": "system_ext/priv-app/MiuiSystemUI/MiuiSystemUI.apk",
+        "patches": [
+            {
+                "class": "Lcom/miui/systemui/quicksettings/MiuiTileQueryHelper$$ExternalSyntheticLambda1;",
+                "method": "*",
+                "op": "replace_line",
+                "match": "sget-boolean v10, Lcom/miui/utils/configs/MiuiConfigs;->IS_INTERNATIONAL_BUILD:Z",
+                "match_mode": "contains",
+                "occurrence": "all",
+                "replacement": [
+                    "const/4 v10, 0x1"
+                ]
             }
         ]
     }
