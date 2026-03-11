@@ -204,6 +204,7 @@ EOF
         local cls="$1"
         local inner="${cls#L}"; inner="${inner%;}"
         _MT_CLASS_DEX_NAME=""
+        OUT_SMALI_FILE=""
         local dex_name dex_dir
         # Search DEX dirs in sorted order (classes.dex first, then classes2.dex, etc.)
         for dex_name in $(printf '%s\n' "${!SMALI_DEX_DIRS[@]}" | sort -V); do
@@ -211,11 +212,10 @@ EOF
             local candidate="${dex_dir}/${inner}.smali"
             if [ -f "$candidate" ]; then
                 _MT_CLASS_DEX_NAME="$dex_name"
-                echo "$candidate"
+                OUT_SMALI_FILE="$candidate"
                 return 0
             fi
         done
-        echo ""
         return 1
     }
 
@@ -889,7 +889,9 @@ EOF
         fi
 
         local P_OPTIONAL; P_OPTIONAL=$(echo "$PATCH_JSON" | jq -r '.optional // false')
-        local SMALI_FILE; SMALI_FILE=$(_class_to_path "$P_CLASS")
+        OUT_SMALI_FILE=""
+        _class_to_path "$P_CLASS"
+        local SMALI_FILE="$OUT_SMALI_FILE"
         if [ -z "$SMALI_FILE" ] || [ ! -f "$SMALI_FILE" ]; then
             if [ "$P_OPTIONAL" = "true" ]; then
                 _warn "$LABEL class not found (optional — skipped): $P_CLASS"
@@ -1036,9 +1038,6 @@ process_mt_smali() {
         return 0
     fi
 
-    cd "$GITHUB_WORKSPACE" || return 1
-    ln -sfn "$DUMP_DIR" "$part_name"
-
     local processed_any=0
 
     # FIX 8 & UNIFIED JSON: Support array of jobs or single job
@@ -1056,20 +1055,19 @@ process_mt_smali() {
                     local target_apk=$(jq -r '.apk_path // empty' "$JOB_STAGE/job_${job_idx}.json")
                     local out_apk=$(jq -r '.out_apk_path // empty' "$JOB_STAGE/job_${job_idx}.json")
                     
-                    if [ -n "$target_apk" ] && [ -f "$GITHUB_WORKSPACE/$target_apk" ]; then
-                        _info "[MT-Smali] Found target $target_apk. Triggering engine for job $job_idx in $(basename "$config_json")"
-                        
-                        if _run_mt_smali_cli -i "$GITHUB_WORKSPACE/$target_apk" "$JOB_STAGE/job_${job_idx}.json" --verbose; then
-                            if [ -n "$out_apk" ] && [ "$out_apk" != "$target_apk" ] && [ -f "$GITHUB_WORKSPACE/$out_apk" ]; then
-                                mv -f "$GITHUB_WORKSPACE/$out_apk" "$GITHUB_WORKSPACE/$target_apk"
-                                _ok "[MT-Smali] Applied patches to $target_apk"
+                    if [ -n "$target_apk" ]; then
+                        # Strip the leading partition name (e.g. 'system_ext/') to append to DUMP_DIR
+                        local abs_target="$DUMP_DIR/${target_apk#*/}"
+                        if [ -f "$abs_target" ]; then
+                            _info "[MT-Smali] Found target $abs_target. Triggering engine for job $job_idx in $(basename "$config_json")"
+                            
+                            if _run_mt_smali_cli -i "$abs_target" "$JOB_STAGE/job_${job_idx}.json" --verbose; then
+                                processed_any=1
+                            else
+                                _err "[MT-Smali] Pipeline failed for job $job_idx in $config_json"
+                                rm -rf "$JOB_STAGE"
+                                return 1
                             fi
-                            processed_any=1
-                        else
-                            _err "[MT-Smali] Pipeline failed for job $job_idx in $config_json"
-                            rm -rf "$JOB_STAGE"
-                            rm -f "$part_name"
-                            return 1
                         fi
                     fi
                 done
@@ -1078,26 +1076,22 @@ process_mt_smali() {
                 local target_apk=$(jq -r '.apk_path // empty' "$config_json")
                 local out_apk=$(jq -r '.out_apk_path // empty' "$config_json")
                 
-                if [ -n "$target_apk" ] && [ -f "$GITHUB_WORKSPACE/$target_apk" ]; then
-                    _info "[MT-Smali] Found target $target_apk. Triggering engine for: $(basename "$config_json")"
-                    
-                    if _run_mt_smali_cli -i "$GITHUB_WORKSPACE/$target_apk" "$config_json" --verbose; then
-                        if [ -n "$out_apk" ] && [ -f "$GITHUB_WORKSPACE/$out_apk" ]; then
-                            mv -f "$GITHUB_WORKSPACE/$out_apk" "$GITHUB_WORKSPACE/$target_apk"
-                            _ok "[MT-Smali] Applied patches to $target_apk"
+                if [ -n "$target_apk" ]; then
+                    local abs_target="$DUMP_DIR/${target_apk#*/}"
+                    if [ -f "$abs_target" ]; then
+                        _info "[MT-Smali] Found target $abs_target. Triggering engine for: $(basename "$config_json")"
+                        
+                        if _run_mt_smali_cli -i "$abs_target" "$config_json" --verbose; then
+                            processed_any=1
+                        else
+                            _err "[MT-Smali] Pipeline failed for $config_json"
+                            return 1
                         fi
-                        processed_any=1
-                    else
-                        _err "[MT-Smali] Pipeline failed for $config_json"
-                        rm -f "$part_name"
-                        return 1
                     fi
                 fi
             fi
         fi
     done
-
-    rm -f "$part_name"
 
     if [ "$processed_any" -eq 1 ]; then
         _info "[MT-Smali] MT-Smali injection strictly completed for $part_name."
