@@ -1347,65 +1347,12 @@ def _miui_service_patch(dex_name: str, dex: bytearray) -> bool:
                                     use_const4=True)
     n += _raw_sget_scan(dex, 'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD',
                         use_const4=True)
-    return n > 0
-
-# ── SystemUI combined: VoLTE + QuickShare + WA notification  ─────
-def _systemui_all_patch(dex_name: str, dex: bytearray) -> bool:
-    """
-    Patch 1 — VoLTE: GLOBAL sweep of Lmiui/os/Build;->IS_INTERNATIONAL_BUILD.
-      No class filter. Targets like MiuiOperatorCustomizedPolicy,
-      MiuiCarrierTextController, MiuiCellularIconVM, MiuiMobileIconBinder
-      and their inner/anonymous classes read this flag via synthetic accessors —
-      the actual sget bytecode lives in those generated accessors, not the named
-      class body. A global sweep catches all of them regardless of which class
-      the compiler emitted the sget into. Uses const/4 vX, 0x1 (fallback const/16
-      if register > 15).
-
-    Patch 2 — QuickShare: Lcom/miui/utils/configs/MiuiConfigs;->IS_INTERNATIONAL_BUILD
-      → const/4 pX, 0x1. Class CurrentTilesInteractorImpl, all methods.
-
-    Patch 3 — WA notification: same MiuiConfigs field → const/4 vX, 0x1.
-      Scoped to NotificationUtil::isEmptySummary.
-    """
-    patched = False
-    raw = bytes(dex)
-
-    # Patch 1 — VoLTE: global sweep + raw-scan fallback, Lmiui/os/Build, const/4
-    #   Two passes guarantee MiuiMobileIconBinder$bind$1$1$10::invokeSuspend
-    #   and any other Kotlin coroutine class whose code_item _iter_code_items
-    #   mis-steps due to synthetic captured fields in class_data.
-    if b'IS_INTERNATIONAL_BUILD' in raw and b'miui/os/Build' in raw:
-        n1 = binary_patch_sget_to_true(dex,
-                'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD',
-                use_const4=True)
-        n2 = _raw_sget_scan(dex,
-                'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD',
-                use_const4=True)
         if n1 + n2 > 0:
             patched = True
             raw = bytes(dex)
-
-    # Patch 2 — QuickShare: CurrentTilesInteractorImpl only, all methods, const/4
-    if b'CurrentTilesInteractorImpl' in raw and b'MiuiConfigs' in raw:
-        if binary_patch_sget_to_true(dex,
-                'Lcom/miui/utils/configs/MiuiConfigs;', 'IS_INTERNATIONAL_BUILD',
-                only_class='CurrentTilesInteractorImpl',
-                use_const4=True) > 0:
-            patched = True
-            raw = bytes(dex)
-
-    # Patch 3 — WA notification: NotificationUtil::isEmptySummary, const/4
-    if b'NotificationUtil' in raw and b'MiuiConfigs' in raw:
-        if binary_patch_sget_to_true(dex,
-                'Lcom/miui/utils/configs/MiuiConfigs;', 'IS_INTERNATIONAL_BUILD',
-                only_class='NotificationUtil',
-                only_method='isEmptySummary',
-                use_const4=True) > 0:
-            patched = True
-
     return patched
 
-# ── miui-framework.jar  ─────────────────────────────────────────
+# ── SystemUI combined: VoLTE + QuickShare + WA notification  ─────
 # Target classes for IS_INTERNATIONAL_BUILD in miui-framework
 _FW_INTL_CLASSES = [
     'AppOpsManagerInjector',   'NearbyUtils',             'ShortcutFunctionManager',
@@ -1467,51 +1414,16 @@ def _miui_framework_patch(dex_name: str, dex: bytearray) -> bool:
 
     return patched
 
-# ── Settings.apk region unlock  ─────────────────────────────────
-def _settings_region_patch(dex_name: str, dex: bytearray) -> bool:
-    """
-    Patch IS_GLOBAL_BUILD → const/4 pX, 0x1 scoped to exactly 3 classes.
-    NO global sweep. NO raw scan. Patching only:
-
-      LocaleController      — all methods (no method filter; the sget may be
-                               in a method other than getAvailabilityStatus)
-      LocaleSettingsTree    — all methods
-      OtherPersonalSettings — all methods (has 2 IS_GLOBAL_BUILD lines in onCreate)
-
-    Global sweep was used previously and patched 57 sgets in Settings.apk,
-    flipping region flags in unrelated classes and crashing the app.
-    Class-filtered approach patches only the 3 intended classes.
-
-    The improved _iter_code_items (using _skip_uleb128 instead of break in
-    the field-skip loop) ensures OtherPersonalSettings::onCreate is not
-    silently skipped due to ULEB128 mis-stepping on its instance fields.
-    """
-    if b'IS_GLOBAL_BUILD' not in bytes(dex): return False
-    n = 0
-    n += binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
-                                    only_class='LocaleController',
-                                    use_const4=True)
-    n += binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
-                                    only_class='LocaleSettingsTree',
-                                    use_const4=True)
-    n += binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_GLOBAL_BUILD',
-                                    only_class='OtherPersonalSettings',
-                                    use_const4=True)
-    return n > 0
-
-
 # ════════════════════════════════════════════════════════════════════
 #  COMMAND TABLE  +  ENTRY POINT
 # ════════════════════════════════════════════════════════════════════
 
 PROFILES = {
     # "settings-ai" — removed, now handled via mt_smali patches.json
-    "settings-region":   _settings_region_patch,   # exact 3 classes only
     "voice-recorder-ai": _recorder_ai_patch,        # AiDeviceUtil::isAiSupportedDevice
     "services-jar":      _services_jar_patch,
     "provision-gms":     _provision_gms_patch,    # Utils::setGmsAppEnabledStateForCn only
     "miui-service":      _miui_service_patch,    # global IS_INTERNATIONAL_BUILD sweep
-    "systemui-volte":    _systemui_all_patch,       # VoLTE + QuickShare(const/4) + WA-notif
     "miui-framework":    _miui_framework_patch,     # validateTheme(trim) + IS_GLOBAL_BUILD
 }
 
@@ -2898,11 +2810,6 @@ PYTHON_EOF
             # D5. MIUI service CN→Global
             _run_dex_patch "MIUI SERVICE CN→GLOBAL" "miui-service" \
                 "$(find "$DUMP_DIR" -name "miui-services.jar" -type f | head -n1)"
-            cd "$GITHUB_WORKSPACE"
-
-            # D6. SystemUI: VoLTE + QuickShare + WhatsApp notification fix
-            _run_dex_patch "SYSTEMUI ALL" "systemui-volte" \
-                "$(find "$DUMP_DIR" \( -name "MiuiSystemUI.apk" -o -name "SystemUI.apk" \) -type f | head -n1)"
             cd "$GITHUB_WORKSPACE"
 
             # D7. miui-framework: IS_INTERNATIONAL_BUILD(13 classes) + showSystemReadyErrorDialogsIfNeeded
