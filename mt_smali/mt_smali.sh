@@ -377,6 +377,7 @@ EOF
 
     op_replace_body() {
         local file="$1" method="$2" patch_json="$3"
+        local i
         local regs=$(echo "$patch_json" | jq -r '.registers // empty')
         [ -z "$regs" ] && { OP_MSG="'registers' field required for replace_body"; return 1; }
         _find_method_awk "$file" "$method" || { OP_MSG="method not found: $method"; return 1; }
@@ -491,6 +492,7 @@ EOF
     _do_line_op_range() {
         local file="$1" start="$2" end="$3" match="$4" mode="$5" occ="$6" op="$7" pjson="$8"
         local scope="${9:-method}"  # 'method' (default) or 'file'
+        local i
         local -a new_lines=()
         if [ "$op" != "delete" ]; then
             local key="lines"
@@ -606,6 +608,7 @@ EOF
     # No text matching, no scanning — just appends before EOF.
     op_append_to_class() {
         local file="$1" patch_json="$2"
+        local i
         local nl_count=$(echo "$patch_json" | jq '.lines | length')
         [ "$nl_count" -eq 0 ] && { OP_MSG="'lines' array is empty"; return 1; }
         local total=$(wc -l < "$file")
@@ -1010,22 +1013,22 @@ process_mt_smali() {
                 # Use a SEPARATE staging dir for job JSONs — _run_mt_smali_cli wipes $MTCLI_TMP on entry
                 local JOB_STAGE="/tmp/mt_smali_jobs_$$"
                 rm -rf "$JOB_STAGE" && mkdir -p "$JOB_STAGE"
-                for ((i=0; i<len; i++)); do
-                    jq ".[$i]" "$config_json" > "$JOB_STAGE/job_$i.json"
-                    local target_apk=$(jq -r '.apk_path // empty' "$JOB_STAGE/job_$i.json")
-                    local out_apk=$(jq -r '.out_apk_path // empty' "$JOB_STAGE/job_$i.json")
+                for ((job_idx=0; job_idx<len; job_idx++)); do
+                    jq ".[$job_idx]" "$config_json" > "$JOB_STAGE/job_${job_idx}.json"
+                    local target_apk=$(jq -r '.apk_path // empty' "$JOB_STAGE/job_${job_idx}.json")
+                    local out_apk=$(jq -r '.out_apk_path // empty' "$JOB_STAGE/job_${job_idx}.json")
                     
                     if [ -n "$target_apk" ] && [ -f "$GITHUB_WORKSPACE/$target_apk" ]; then
-                        _info "[MT-Smali] Found target $target_apk. Triggering engine for job $i in $(basename "$config_json")"
+                        _info "[MT-Smali] Found target $target_apk. Triggering engine for job $job_idx in $(basename "$config_json")"
                         
-                        if _run_mt_smali_cli -i "$GITHUB_WORKSPACE/$target_apk" "$JOB_STAGE/job_$i.json" --verbose; then
+                        if _run_mt_smali_cli -i "$GITHUB_WORKSPACE/$target_apk" "$JOB_STAGE/job_${job_idx}.json" --verbose; then
                             if [ -n "$out_apk" ] && [ "$out_apk" != "$target_apk" ] && [ -f "$GITHUB_WORKSPACE/$out_apk" ]; then
                                 mv -f "$GITHUB_WORKSPACE/$out_apk" "$GITHUB_WORKSPACE/$target_apk"
                                 _ok "[MT-Smali] Applied patches to $target_apk"
                             fi
                             processed_any=1
                         else
-                            _err "[MT-Smali] Pipeline failed for job $i in $config_json"
+                            _err "[MT-Smali] Pipeline failed for job $job_idx in $config_json"
                             rm -rf "$JOB_STAGE"
                             rm -f "$part_name"
                             return 1
