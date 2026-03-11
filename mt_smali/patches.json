@@ -466,7 +466,7 @@
         "patches": [
             {
                 "_comment": "MiuiSystemUI: VoLTE fix \u2014 MiuiOperatorCustomizedPolicy IS_INTERNATIONAL_BUILD -> true",
-                "class": "Lcom/android/systemui/statusbar/policy/MiuiOperatorCustomizedPolicy;",
+                "class": "Lcom/android/systemui/MiuiOperatorCustomizedPolicy;",
                 "method": "*",
                 "op": "replace_line",
                 "match": "sget-boolean [pv]([0-9]+), Lmiui/os/Build;->IS_INTERNATIONAL_BUILD:Z",
