@@ -131,60 +131,40 @@ EOF
         _die "Input is a directory but --no-baksmali not set" || return 1
     else
         if [ "$IS_ARCHIVE" -eq 1 ]; then
-            # Auto-detect which DEX contains the target class(es)
-            # List all DEX files in APK: classes.dex, classes2.dex, classes3.dex ...
+            # Disassemble ALL DEX files so patches can target classes across any DEX.
+            # Each DEX gets its own smali subdir: smali_classes, smali_classes2, etc.
+            # _class_to_path searches all subdirs and records which DEX a class lives in.
+            # Only the DEX dirs that were modified get recompiled and re-injected.
             local dex_list
             dex_list=$(unzip -l "$INPUT" | grep -oE 'classes[0-9]*\.dex' | sort -V | uniq)
             [ -z "$dex_list" ] && { _die "No classes*.dex found in $INPUT"; return 1; }
 
-            # Extract class paths from patch JSON to check against smali output
-            local target_classes
-            target_classes=$(jq -r '.patches[].class // empty' "$PATCH_FILE" 2>/dev/null \
-                | sed 's|^L||; s|;$||; s|$|.smali|')
-
-            local found_dex=""
-            local tmp_probe="$MTCLI_TMP/dex_probe"
+            declare -A SMALI_DEX_DIRS   # dex_name -> smali subdir
+            local total_classes=0
 
             for candidate_dex in $dex_list; do
-                _info "Probing $candidate_dex for target classes..."
+                _info "Disassembling $candidate_dex (API $API_LEVEL)..."
                 local cand_path="$MTCLI_TMP/$candidate_dex"
                 unzip -p "$INPUT" "$candidate_dex" > "$cand_path" 2>/dev/null
-                [ ! -s "$cand_path" ] && continue
-                rm -rf "$tmp_probe" && mkdir -p "$tmp_probe"
-                java -jar "$BAKSMALI_JAR" d -a "$API_LEVEL" -o "$tmp_probe" "$cand_path" >/dev/null 2>&1 || continue
-                local hit=0
-                while IFS= read -r rel_path; do
-                    [ -f "$tmp_probe/$rel_path" ] && { hit=1; break; }
-                done <<< "$target_classes"
-                if [ "$hit" -eq 1 ]; then
-                    found_dex="$candidate_dex"
-                    DEX_PATH="$cand_path"
-                    # Reuse the already-disassembled smali
-                    mkdir -p "$SMALI_DIR"
-                    cp -r "$tmp_probe/." "$SMALI_DIR/"
-                    _ok "Disassembly complete: $(find "$SMALI_DIR" -name '*.smali' | wc -l) classes"
-                    rm -rf "$tmp_probe"
-                    break
+                [ ! -s "$cand_path" ] && { _warn "  Skipping $candidate_dex — empty extract"; continue; }
+                local dex_smali_dir="$MTCLI_TMP/smali_${candidate_dex%.dex}"
+                mkdir -p "$dex_smali_dir"
+                if ! java -jar "$BAKSMALI_JAR" d -a "$API_LEVEL" -o "$dex_smali_dir" "$cand_path" >/dev/null 2>&1; then
+                    _warn "  baksmali failed for $candidate_dex — skipping"
+                    continue
                 fi
-                rm -rf "$tmp_probe"
+                SMALI_DEX_DIRS["$candidate_dex"]="$dex_smali_dir"
+                local cnt; cnt=$(find "$dex_smali_dir" -name '*.smali' | wc -l)
+                total_classes=$((total_classes + cnt))
+                _info "  $candidate_dex: $cnt classes"
             done
 
-            if [ -z "$found_dex" ]; then
-                _warn "No DEX matched target classes — falling back to classes.dex"
-                found_dex="classes.dex"
-                DEX_PATH="$MTCLI_TMP/classes.dex"
-                unzip -p "$INPUT" "classes.dex" > "$DEX_PATH" 2>/dev/null \
-                    || { _die "Failed to extract classes.dex from $INPUT"; return 1; }
-                [ ! -s "$DEX_PATH" ] && { _die "Extracted DEX is empty"; return 1; }
-                _info "Disassembling classes.dex (API $API_LEVEL)..."
-                mkdir -p "$SMALI_DIR"
-                java -jar "$BAKSMALI_JAR" d -a "$API_LEVEL" -o "$SMALI_DIR" "$DEX_PATH" \
-                    || { _die "baksmali failed"; return 1; }
-                _ok "Disassembly complete: $(find "$SMALI_DIR" -name '*.smali' | wc -l) classes"
-            fi
+            [ ${#SMALI_DEX_DIRS[@]} -eq 0 ] && { _die "Failed to disassemble any DEX from $INPUT"; return 1; }
+            _ok "Disassembly complete: $total_classes classes across ${#SMALI_DEX_DIRS[@]} DEX(es)"
 
-            DEX_NAME="$found_dex"
-            _info "Using DEX: $DEX_NAME"
+            # Primary DEX name (lowest-numbered) for legacy logging
+            DEX_NAME=$(printf '%s\n' "${!SMALI_DEX_DIRS[@]}" | sort -V | head -1)
+            _info "Using DEX(es): $(printf '%s\n' "${!SMALI_DEX_DIRS[@]}" | sort -V | tr '\n' ' ')"
 
         elif [ "$INPUT_EXT_LOWER" = "dex" ]; then
             DEX_PATH="$INPUT"
@@ -193,6 +173,7 @@ EOF
             java -jar "$BAKSMALI_JAR" d -a "$API_LEVEL" -o "$SMALI_DIR" "$DEX_PATH" \
                 || { _die "baksmali failed"; return 1; }
             _ok "Disassembly complete: $(find "$SMALI_DIR" -name '*.smali' | wc -l) classes"
+            declare -A SMALI_DEX_DIRS; SMALI_DEX_DIRS["$DEX_NAME"]="$SMALI_DIR"
         else
             DEX_PATH="$MTCLI_TMP/$DEX_NAME"
             unzip -p "$INPUT" "$DEX_NAME" > "$DEX_PATH" 2>/dev/null \
@@ -203,19 +184,39 @@ EOF
             java -jar "$BAKSMALI_JAR" d -a "$API_LEVEL" -o "$SMALI_DIR" "$DEX_PATH" \
                 || { _die "baksmali failed"; return 1; }
             _ok "Disassembly complete: $(find "$SMALI_DIR" -name '*.smali' | wc -l) classes"
+            declare -A SMALI_DEX_DIRS; SMALI_DEX_DIRS["$DEX_NAME"]="$SMALI_DIR"
         fi
 
     fi  # end if NO_BAKSMALI / elif dir / else
+    # no-baksmali path — seed SMALI_DEX_DIRS from single input dir
+    if [ "$NO_BAKSMALI" -eq 1 ]; then
+        declare -A SMALI_DEX_DIRS; SMALI_DEX_DIRS["$DEX_NAME"]="$SMALI_DIR"
+    fi
 
     # ══════════════════════════════════════════════════════════════════
     # PATCH ENGINE — Core Functions
     # ══════════════════════════════════════════════════════════════════
 
+    # Tracks which DEX the last resolved class came from (set by _class_to_path)
+    _MT_CLASS_DEX_NAME=""
+
     _class_to_path() {
         local cls="$1"
-        local inner="${cls#L}"
-        inner="${inner%;}"
-        echo "$SMALI_DIR/${inner}.smali"
+        local inner="${cls#L}"; inner="${inner%;}"
+        _MT_CLASS_DEX_NAME=""
+        local dex_name dex_dir
+        # Search DEX dirs in sorted order (classes.dex first, then classes2.dex, etc.)
+        for dex_name in $(printf '%s\n' "${!SMALI_DEX_DIRS[@]}" | sort -V); do
+            dex_dir="${SMALI_DEX_DIRS[$dex_name]}"
+            local candidate="${dex_dir}/${inner}.smali"
+            if [ -f "$candidate" ]; then
+                _MT_CLASS_DEX_NAME="$dex_name"
+                echo "$candidate"
+                return 0
+            fi
+        done
+        echo ""
+        return 1
     }
 
     _return_type() {
@@ -887,12 +888,19 @@ EOF
             continue
         fi
 
-        local SMALI_FILE=$(_class_to_path "$P_CLASS")
-        if [ ! -f "$SMALI_FILE" ]; then
+        local P_OPTIONAL; P_OPTIONAL=$(echo "$PATCH_JSON" | jq -r '.optional // false')
+        local SMALI_FILE; SMALI_FILE=$(_class_to_path "$P_CLASS")
+        if [ -z "$SMALI_FILE" ] || [ ! -f "$SMALI_FILE" ]; then
+            if [ "$P_OPTIONAL" = "true" ]; then
+                _warn "$LABEL class not found (optional — skipped): $P_CLASS"
+                APPLIED=$((APPLIED+1))
+                continue
+            fi
             _err "$LABEL class not found: $P_CLASS"
             [ "$DRY_RUN" -eq 1 ] && { FAILED=$((FAILED+1)); continue; }
             _die "Aborting — class not found: $P_CLASS" || return 1
         fi
+        local PATCH_DEX_NAME="$_MT_CLASS_DEX_NAME"
 
         OP_MSG=""
         local rc=0
@@ -925,7 +933,14 @@ EOF
         if [ "$rc" -eq 0 ]; then
             _log "$LABEL \033[0;36m${P_OP}\033[0m  ${P_CLASS} :: ${P_METHOD:-class-level}  \033[0;32m${OP_MSG}\033[0m"
             APPLIED=$((APPLIED+1))
+            # Record which DEX was modified so we only recompile/inject what changed
+            [ -n "$PATCH_DEX_NAME" ] && echo "$PATCH_DEX_NAME" >> "$MTCLI_TMP/modified_dexes.txt"
         else
+            if [ "$P_OPTIONAL" = "true" ]; then
+                _warn "$LABEL optional patch skipped: $OP_MSG"
+                APPLIED=$((APPLIED+1))
+                continue
+            fi
             _err "$LABEL ERROR: $OP_MSG"
             FAILED=$((FAILED+1))
             if [ "$DRY_RUN" -eq 0 ]; then
@@ -951,32 +966,55 @@ EOF
         return 0
     fi
 
-    _info "Recompiling smali → DEX (API $API_LEVEL)..."
-    local PATCHED_DEX="$MTCLI_TMP/patched_${DEX_NAME}"
-    java -jar "$SMALI_JAR" a -a "$API_LEVEL" -o "$PATCHED_DEX" "$SMALI_DIR"
-    if [ ! -f "$PATCHED_DEX" ]; then
-        _die "smali recompile FAILED — original untouched" || return 1
-    fi
-    _ok "Recompilation successful"
+    # ══════════════════════════════════════════════════════════════════
+    # Step 3 & 4: Recompile only modified DEX(es), inject each back
+    # ══════════════════════════════════════════════════════════════════
 
-    # ══════════════════════════════════════════════════════════════════
-    # Step 4: Inject DEX back
-    # ══════════════════════════════════════════════════════════════════
-    if [ "$IS_ARCHIVE" -eq 1 ]; then
-        _info "Injecting $DEX_NAME into $(basename "$OUTPUT")..."
-        cp "$PATCHED_DEX" "$MTCLI_TMP/$DEX_NAME"
-        cd "$MTCLI_TMP"
-        zip -j -0 "$OUTPUT" "$DEX_NAME" > /dev/null 2>&1 || { _die "Failed to inject DEX into $OUTPUT"; return 1; }
-        cd - > /dev/null
-        _ok "DEX injected into $OUTPUT"
-    elif [ "$INPUT_EXT_LOWER" = "dex" ]; then
-        cp "$PATCHED_DEX" "$OUTPUT"
-    else
-        cp "$PATCHED_DEX" "$MTCLI_TMP/$DEX_NAME"
-        cd "$MTCLI_TMP"
-        zip -j -0 "$OUTPUT" "$DEX_NAME" > /dev/null 2>&1 || cp "$PATCHED_DEX" "$OUTPUT"
-        cd - > /dev/null
+    # Determine which DEX dirs actually had smali modifications
+    local modified_dex_list=""
+    if [ -f "$MTCLI_TMP/modified_dexes.txt" ]; then
+        modified_dex_list=$(sort -uV "$MTCLI_TMP/modified_dexes.txt")
     fi
+
+    if [ -z "$modified_dex_list" ]; then
+        _warn "No smali files were modified — skipping recompile and injection"
+        rm -rf "$MTCLI_TMP"
+        _ok "Done. $APPLIED/$PATCH_COUNT patches applied. Output: $OUTPUT"
+        return 0
+    fi
+
+    local mod_dex
+    for mod_dex in $modified_dex_list; do
+        local smali_src="${SMALI_DEX_DIRS[$mod_dex]}"
+        if [ -z "$smali_src" ] || [ ! -d "$smali_src" ]; then
+            _warn "Cannot locate smali dir for $mod_dex — skipping"
+            continue
+        fi
+
+        _info "Recompiling smali → $mod_dex (API $API_LEVEL)..."
+        local PATCHED_DEX="$MTCLI_TMP/patched_${mod_dex}"
+        java -jar "$SMALI_JAR" a -a "$API_LEVEL" -o "$PATCHED_DEX" "$smali_src"
+        if [ ! -f "$PATCHED_DEX" ]; then
+            _die "smali recompile FAILED for $mod_dex — original untouched" || return 1
+        fi
+        _ok "Recompilation of $mod_dex successful"
+
+        if [ "$IS_ARCHIVE" -eq 1 ]; then
+            _info "Injecting $mod_dex into $(basename "$OUTPUT")..."
+            cp "$PATCHED_DEX" "$MTCLI_TMP/$mod_dex"
+            cd "$MTCLI_TMP"
+            zip -j -0 "$OUTPUT" "$mod_dex" > /dev/null 2>&1 || { _die "Failed to inject $mod_dex into $OUTPUT"; return 1; }
+            cd - > /dev/null
+            _ok "DEX injected into $OUTPUT"
+        elif [ "$INPUT_EXT_LOWER" = "dex" ]; then
+            cp "$PATCHED_DEX" "$OUTPUT"
+        else
+            cp "$PATCHED_DEX" "$MTCLI_TMP/$mod_dex"
+            cd "$MTCLI_TMP"
+            zip -j -0 "$OUTPUT" "$mod_dex" > /dev/null 2>&1 || cp "$PATCHED_DEX" "$OUTPUT"
+            cd - > /dev/null
+        fi
+    done
 
     rm -rf "$MTCLI_TMP"
     _ok "Done. $APPLIED/$PATCH_COUNT patches applied. Output: $OUTPUT"

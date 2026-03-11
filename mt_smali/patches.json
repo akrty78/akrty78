@@ -19,7 +19,7 @@
         ]
     },
     {
-        "_comment": "Function 1: Big Tiles Customization \u2014 MIUISystemUIPlugin.apk",
+        "_comment": "Function 1: Big Tiles Customization — MIUISystemUIPlugin.apk",
         "apk_path": "product/app/MIUISystemUIPlugin/MIUISystemUIPlugin.apk",
         "out_apk_path": "product/app/MIUISystemUIPlugin/MIUISystemUIPlugin.apk",
         "patches": [
@@ -84,7 +84,7 @@
         ]
     },
     {
-        "_comment": "Function 2: Custom Screenshot Frame \u2014 MIUIScreenshot.apk",
+        "_comment": "Function 2: Custom Screenshot Frame — MIUIScreenshot.apk",
         "apk_path": "product/app/MIUIScreenshot/MIUIScreenshot.apk",
         "out_apk_path": "product/app/MIUIScreenshot/MIUIScreenshot.apk",
         "patches": [
@@ -111,7 +111,7 @@
         "out_apk_path": "system_ext/priv-app/Settings/Settings.apk",
         "patches": [
             {
-                "_comment": "Settings.apk: Region fix \u2014 LocaleController IS_GLOBAL_BUILD -> true",
+                "_comment": "Settings.apk: Region fix — LocaleController IS_GLOBAL_BUILD -> true",
                 "class": "Lcom/android/settings/personal/LocaleController;",
                 "method": "*",
                 "op": "replace_line",
@@ -123,7 +123,7 @@
                 ]
             },
             {
-                "_comment": "Settings.apk: Region fix \u2014 LocaleSettingsTree IS_GLOBAL_BUILD -> true",
+                "_comment": "Settings.apk: Region fix — LocaleSettingsTree IS_GLOBAL_BUILD -> true",
                 "class": "Lcom/android/settings/search/tree/LocaleSettingsTree;",
                 "method": "*",
                 "op": "replace_line",
@@ -135,7 +135,7 @@
                 ]
             },
             {
-                "_comment": "Settings.apk: Region fix \u2014 OtherPersonalSettings IS_GLOBAL_BUILD -> true",
+                "_comment": "Settings.apk: Region fix — OtherPersonalSettings IS_GLOBAL_BUILD -> true",
                 "class": "Lcom/android/settings/personal/OtherPersonalSettings;",
                 "method": "*",
                 "op": "replace_line",
@@ -154,7 +154,7 @@
         "out_apk_path": "system_ext/priv-app/Settings/Settings.apk",
         "patches": [
             {
-                "_comment": "Function 3: getSimpleOSVersion \u2014 append .Extended build by NexDroid to OS version",
+                "_comment": "Function 3: getSimpleOSVersion — append .Extended build by NexDroid to OS version",
                 "class": "Lcom/android/settings/device/MiuiAboutPhoneUtils;",
                 "method": "getSimpleOSVersion",
                 "op": "replace_body",
@@ -248,7 +248,7 @@
                 ]
             },
             {
-                "_comment": "Function 4: getMiuiVersionInCard \u2014 append EXTENDED build by NexDroid to version card",
+                "_comment": "Function 4: getMiuiVersionInCard — append EXTENDED build by NexDroid to version card",
                 "class": "Lcom/android/settings/device/MiuiAboutPhoneUtils;",
                 "method": "getMiuiVersionInCard",
                 "op": "replace_body",
@@ -360,14 +360,14 @@
                 ]
             },
             {
-                "_comment": "Function 5: MiuiGuaranteeCard \u2014 replace whole class with NexDroid Extended Build card. VERSION_NUMBER set by NEXDROID_VERSION env var.",
+                "_comment": "Function 5: MiuiGuaranteeCard — replace whole class with NexDroid Extended Build card. VERSION_NUMBER set by NEXDROID_VERSION env var.",
                 "class": "Lcom/android/settings/device/MiuiGuaranteeCard;",
                 "method": "*",
                 "op": "replace_class_file",
                 "source_file": "mt_smali/smali/MiuiGuaranteeCard.smali"
             },
             {
-                "_comment": "isAiSupported \u2192 return true (migrated from dex_patcher)",
+                "_comment": "isAiSupported → return true (migrated from dex_patcher)",
                 "class": "Lcom/android/settings/InternalDeviceUtils;",
                 "method": "isAiSupported",
                 "op": "return_true"
@@ -380,19 +380,19 @@
         "out_apk_path": "system_ext/priv-app/Settings/Settings.apk",
         "patches": [
             {
-                "_comment": "GeminiController \u2014 isSystemAppInstalled \u2192 return true",
+                "_comment": "GeminiController — isSystemAppInstalled → return true",
                 "class": "Lcom/android/settings/hyperosai/GeminiController;",
                 "method": "isSystemAppInstalled",
                 "op": "return_true"
             },
             {
-                "_comment": "GeminiController \u2014 getAvailabilityStatus \u2192 return true",
+                "_comment": "GeminiController — getAvailabilityStatus → return true",
                 "class": "Lcom/android/settings/hyperosai/GeminiController;",
                 "method": "getAvailabilityStatus",
                 "op": "return_true"
             },
             {
-                "_comment": "MiuiSettings \u2014 IS_GLOBAL_BUILD \u2192 const/4 v0, 0x1",
+                "_comment": "MiuiSettings — IS_GLOBAL_BUILD → const/4 v0, 0x1",
                 "class": "Lcom/android/settings/MiuiSettings;",
                 "method": "*",
                 "op": "replace_line",
@@ -406,7 +406,7 @@
         ]
     },
     {
-        "_comment": "InCallUI \u2014 RecorderUtils::isAiRecordEnable \u2192 return true (migrated from dex_patcher)",
+        "_comment": "InCallUI — RecorderUtils::isAiRecordEnable → return true (migrated from dex_patcher)",
         "apk_path": "product/priv-app/InCallUI/InCallUI.apk",
         "out_apk_path": "product/priv-app/InCallUI/InCallUI.apk",
         "patches": [
@@ -418,7 +418,7 @@
         ]
     },
     {
-        "_comment": "SoundRecorder \u2014 AiDeviceUtil::isAiSupportedDevice \u2192 return true (migrated from dex_patcher)",
+        "_comment": "SoundRecorder — AiDeviceUtil::isAiSupportedDevice → return true (migrated from dex_patcher)",
         "apk_path": "product/data-app/MIUISoundRecorderTargetSdk30/MIUISoundRecorderTargetSdk30.apk",
         "out_apk_path": "product/data-app/MIUISoundRecorderTargetSdk30/MIUISoundRecorderTargetSdk30.apk",
         "patches": [
@@ -430,7 +430,7 @@
         ]
     },
     {
-        "_comment": "MIUIContactsT \u2014 BusinessHallUtil::i(Context)Z \u2192 return true",
+        "_comment": "MIUIContactsT — BusinessHallUtil::i(Context)Z → return true",
         "apk_path": "product/priv-app/MIUIContactsT/MIUIContactsT.apk",
         "out_apk_path": "product/priv-app/MIUIContactsT/MIUIContactsT.apk",
         "patches": [
@@ -442,7 +442,7 @@
         ]
     },
     {
-        "_comment": "miui-framework.jar \u2014 CustomizeUtil::getMiuiCustVariantFile IS_GLOBAL_BUILD \u2192 const/4 v0, 0x1",
+        "_comment": "miui-framework.jar — CustomizeUtil::getMiuiCustVariantFile IS_GLOBAL_BUILD → const/4 v0, 0x1",
         "apk_path": "system_ext/framework/miui-framework.jar",
         "out_apk_path": "system_ext/framework/miui-framework.jar",
         "patches": [
@@ -465,7 +465,7 @@
         "out_apk_path": "system_ext/priv-app/MiuiSystemUI/MiuiSystemUI.apk",
         "patches": [
             {
-                "_comment": "MiuiSystemUI: VoLTE fix \u2014 MiuiOperatorCustomizedPolicy IS_INTERNATIONAL_BUILD -> true",
+                "_comment": "MiuiSystemUI: VoLTE fix — MiuiOperatorCustomizedPolicy IS_INTERNATIONAL_BUILD -> true",
                 "class": "Lcom/android/systemui/MiuiOperatorCustomizedPolicy;",
                 "method": "*",
                 "op": "replace_line",
@@ -474,10 +474,11 @@
                 "occurrence": "all",
                 "replacement": [
                     "const/4 v\\1, 0x1"
-                ]
+                ],
+                "optional": true
             },
             {
-                "_comment": "MiuiSystemUI: VoLTE fix \u2014 MiuiCarrierTextController IS_INTERNATIONAL_BUILD -> true",
+                "_comment": "MiuiSystemUI: VoLTE fix — MiuiCarrierTextController IS_INTERNATIONAL_BUILD -> true",
                 "class": "Lcom/android/systemui/statusbar/policy/MiuiCarrierTextController;",
                 "method": "*",
                 "op": "replace_line",
@@ -486,10 +487,11 @@
                 "occurrence": "all",
                 "replacement": [
                     "const/4 v\\1, 0x1"
-                ]
+                ],
+                "optional": true
             },
             {
-                "_comment": "MiuiSystemUI: VoLTE fix \u2014 MiuiCellularIconVM IS_INTERNATIONAL_BUILD -> true",
+                "_comment": "MiuiSystemUI: VoLTE fix — MiuiCellularIconVM IS_INTERNATIONAL_BUILD -> true",
                 "class": "Lcom/android/systemui/statusbar/pipeline/mobile/ui/viewmodel/MiuiCellularIconVM;",
                 "method": "*",
                 "op": "replace_line",
@@ -498,10 +500,11 @@
                 "occurrence": "all",
                 "replacement": [
                     "const/4 v\\1, 0x1"
-                ]
+                ],
+                "optional": true
             },
             {
-                "_comment": "MiuiSystemUI: VoLTE fix \u2014 MiuiMobileIconBinder IS_INTERNATIONAL_BUILD -> true",
+                "_comment": "MiuiSystemUI: VoLTE fix — MiuiMobileIconBinder IS_INTERNATIONAL_BUILD -> true",
                 "class": "Lcom/android/systemui/statusbar/pipeline/mobile/ui/binder/MiuiMobileIconBinder;",
                 "method": "*",
                 "op": "replace_line",
@@ -510,7 +513,8 @@
                 "occurrence": "all",
                 "replacement": [
                     "const/4 v\\1, 0x1"
-                ]
+                ],
+                "optional": true
             }
         ]
     },
@@ -520,7 +524,7 @@
         "out_apk_path": "system_ext/priv-app/MiuiSystemUI/MiuiSystemUI.apk",
         "patches": [
             {
-                "_comment": "MiuiSystemUI: QuickShare fix \u2014 CurrentTilesInteractorImpl IS_INTERNATIONAL_BUILD -> true",
+                "_comment": "MiuiSystemUI: QuickShare fix — CurrentTilesInteractorImpl IS_INTERNATIONAL_BUILD -> true",
                 "class": "Lcom/android/systemui/qs/pipeline/domain/interactor/CurrentTilesInteractorImpl;",
                 "method": "*",
                 "op": "replace_line",
@@ -529,7 +533,8 @@
                 "occurrence": "all",
                 "replacement": [
                     "const/4 v\\1, 0x1"
-                ]
+                ],
+                "optional": true
             }
         ]
     },
@@ -539,7 +544,7 @@
         "out_apk_path": "system_ext/priv-app/MiuiSystemUI/MiuiSystemUI.apk",
         "patches": [
             {
-                "_comment": "MiuiSystemUI: WhatsApp Notification fix \u2014 NotificationUtil::isEmptySummary IS_INTERNATIONAL_BUILD -> true",
+                "_comment": "MiuiSystemUI: WhatsApp Notification fix — NotificationUtil::isEmptySummary IS_INTERNATIONAL_BUILD -> true",
                 "class": "Lcom/android/systemui/statusbar/notification/NotificationUtil;",
                 "method": "isEmptySummary",
                 "op": "replace_line",
@@ -548,7 +553,8 @@
                 "occurrence": "all",
                 "replacement": [
                     "const/4 v\\1, 0x1"
-                ]
+                ],
+                "optional": true
             },
             {
                 "class": "Lcom/miui/systemui/quicksettings/MiuiTileQueryHelper$$ExternalSyntheticLambda1;",
@@ -559,7 +565,8 @@
                 "occurrence": "all",
                 "replacement": [
                     "const/4 v10, 0x1"
-                ]
+                ],
+                "optional": true
             }
         ]
     }
