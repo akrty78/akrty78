@@ -545,7 +545,7 @@
         "patches": [
             {
                 "_comment": "MiuiSystemUI: WhatsApp Notification fix — NotificationUtil::isEmptySummary IS_INTERNATIONAL_BUILD -> true",
-                "class": "Lcom/android/systemui/statusbar/notification/NotificationUtil;",
+                "class": "Lcom/android/systemui/statusbar/notification/utils/NotificationUtil;",
                 "method": "isEmptySummary",
                 "op": "replace_line",
                 "match": "sget-boolean [pv]([0-9]+), Lcom/miui/utils/configs/MiuiConfigs;->IS_INTERNATIONAL_BUILD:Z",
@@ -557,7 +557,7 @@
                 "optional": true
             },
             {
-                "class": "Lcom/miui/systemui/quicksettings/MiuiTileQueryHelper$$ExternalSyntheticLambda1;",
+                "class": "Lcom/android/systemui/qs/customize/MiuiTileQueryHelper$$ExternalSyntheticLambda1;",
                 "method": "*",
                 "op": "replace_line",
                 "match": "sget-boolean v10, Lcom/miui/utils/configs/MiuiConfigs;->IS_INTERNATIONAL_BUILD:Z",
