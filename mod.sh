@@ -1347,12 +1347,9 @@ def _miui_service_patch(dex_name: str, dex: bytearray) -> bool:
                                     use_const4=True)
     n += _raw_sget_scan(dex, 'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD',
                         use_const4=True)
-        if n1 + n2 > 0:
-            patched = True
-            raw = bytes(dex)
-    return patched
+    return n > 0
 
-# ── SystemUI combined: VoLTE + QuickShare + WA notification  ─────
+# ── miui-framework.jar  ─────────────────────────────────────────
 # Target classes for IS_INTERNATIONAL_BUILD in miui-framework
 _FW_INTL_CLASSES = [
     'AppOpsManagerInjector',   'NearbyUtils',             'ShortcutFunctionManager',
