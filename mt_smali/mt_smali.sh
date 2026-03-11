@@ -231,12 +231,14 @@ EOF
     # FIX 2: Make globals with explicit prefix to avoid scope loss in bash
     _MT_METHOD_START=0
     _MT_METHOD_END=0
+    _MT_METHOD_SIG=""
 
     _find_method_awk() {
         local smali_file="$1"
         local method_sig="$2"
         _MT_METHOD_START=0
         _MT_METHOD_END=0
+        _MT_METHOD_SIG=""
     
         # If no parenthesis in sig, treat as name-only (match first method with that name)
         local match_mode="exact"
@@ -259,10 +261,10 @@ EOF
                 split(line, parts, "(")
                 matched = (parts[1] == sig)
             }
-            if (matched) { start = NR; searching = 1 }
+            if (matched) { start = NR; searching = 1; sig_found = $NF }
         }
         searching && /^\.end method/ {
-            print start " " NR
+            print start " " NR " " sig_found
             exit
         }
         ' "$smali_file")
@@ -270,6 +272,7 @@ EOF
         if [ -n "$result" ]; then
             _MT_METHOD_START=$(echo "$result" | awk '{print $1}')
             _MT_METHOD_END=$(echo "$result" | awk '{print $2}')
+            _MT_METHOD_SIG=$(echo "$result" | awk '{print $3}')
             return 0
         fi
         return 1
@@ -301,9 +304,9 @@ EOF
     # FIX 1: new_body split into registers part and instructions part
     op_return_void() {
         local file="$1" method="$2" ret_type
-        ret_type=$(_return_type "$method")
-        [ "$ret_type" != "V" ] && { OP_MSG="return type must be V, got $ret_type"; return 1; }
         _find_method_awk "$file" "$method" || { OP_MSG="method not found: $method"; return 1; }
+        ret_type=$(_return_type "$_MT_METHOD_SIG")
+        [ "$ret_type" != "V" ] && { OP_MSG="return type must be V, got $ret_type"; return 1; }
         if [ "$DRY_RUN" -eq 1 ]; then OP_MSG="OK (dry-run)"; return 0; fi
         _replace_method_body "$file" ".registers 1" "    return-void"
         OP_MSG="✓"
@@ -311,9 +314,9 @@ EOF
 
     op_return_true() {
         local file="$1" method="$2" ret_type
-        ret_type=$(_return_type "$method")
-        case "$ret_type" in Z|B|S|C|I) ;; *) OP_MSG="return type must be Z/B/S/C/I, got $ret_type"; return 1;; esac
         _find_method_awk "$file" "$method" || { OP_MSG="method not found: $method"; return 1; }
+        ret_type=$(_return_type "$_MT_METHOD_SIG")
+        case "$ret_type" in Z|B|S|C|I) ;; *) OP_MSG="return type must be Z/B/S/C/I, got $ret_type"; return 1;; esac
         if [ "$DRY_RUN" -eq 1 ]; then OP_MSG="OK (dry-run)"; return 0; fi
         _replace_method_body "$file" ".registers 1" "    const/4 v0, 0x1\n    return v0"
         OP_MSG="✓"
@@ -321,9 +324,9 @@ EOF
 
     op_return_false() {
         local file="$1" method="$2" ret_type
-        ret_type=$(_return_type "$method")
-        case "$ret_type" in Z|B|S|C|I) ;; *) OP_MSG="return type must be Z/B/S/C/I, got $ret_type"; return 1;; esac
         _find_method_awk "$file" "$method" || { OP_MSG="method not found: $method"; return 1; }
+        ret_type=$(_return_type "$_MT_METHOD_SIG")
+        case "$ret_type" in Z|B|S|C|I) ;; *) OP_MSG="return type must be Z/B/S/C/I, got $ret_type"; return 1;; esac
         if [ "$DRY_RUN" -eq 1 ]; then OP_MSG="OK (dry-run)"; return 0; fi
         _replace_method_body "$file" ".registers 1" "    const/4 v0, 0x0\n    return v0"
         OP_MSG="✓"
@@ -331,9 +334,9 @@ EOF
 
     op_return_minus1() {
         local file="$1" method="$2" ret_type
-        ret_type=$(_return_type "$method")
-        case "$ret_type" in Z|B|S|C|I) ;; *) OP_MSG="return type must be Z/B/S/C/I, got $ret_type"; return 1;; esac
         _find_method_awk "$file" "$method" || { OP_MSG="method not found: $method"; return 1; }
+        ret_type=$(_return_type "$_MT_METHOD_SIG")
+        case "$ret_type" in Z|B|S|C|I) ;; *) OP_MSG="return type must be Z/B/S/C/I, got $ret_type"; return 1;; esac
         if [ "$DRY_RUN" -eq 1 ]; then OP_MSG="OK (dry-run)"; return 0; fi
         _replace_method_body "$file" ".registers 1" "    const/4 v0, -0x1\n    return v0"
         OP_MSG="✓"
@@ -341,9 +344,9 @@ EOF
 
     op_return_null() {
         local file="$1" method="$2" ret_type
-        ret_type=$(_return_type "$method")
-        case "$ret_type" in L*|"["*) ;; *) OP_MSG="return type must be object, got $ret_type"; return 1;; esac
         _find_method_awk "$file" "$method" || { OP_MSG="method not found: $method"; return 1; }
+        ret_type=$(_return_type "$_MT_METHOD_SIG")
+        case "$ret_type" in L*|"["*) ;; *) OP_MSG="return type must be object, got $ret_type"; return 1;; esac
         if [ "$DRY_RUN" -eq 1 ]; then OP_MSG="OK (dry-run)"; return 0; fi
         _replace_method_body "$file" ".registers 1" "    const/4 v0, 0x0\n    return-object v0"
         OP_MSG="✓"
@@ -351,9 +354,9 @@ EOF
 
     op_return_empty_string() {
         local file="$1" method="$2" ret_type
-        ret_type=$(_return_type "$method")
-        [ "$ret_type" != "Ljava/lang/String;" ] && { OP_MSG="return type must be String, got $ret_type"; return 1; }
         _find_method_awk "$file" "$method" || { OP_MSG="method not found: $method"; return 1; }
+        ret_type=$(_return_type "$_MT_METHOD_SIG")
+        [ "$ret_type" != "Ljava/lang/String;" ] && { OP_MSG="return type must be String, got $ret_type"; return 1; }
         if [ "$DRY_RUN" -eq 1 ]; then OP_MSG="OK (dry-run)"; return 0; fi
         _replace_method_body "$file" ".registers 1" "    const-string v0, \"\"\n    return-object v0"
         OP_MSG="✓"
@@ -361,11 +364,11 @@ EOF
 
     op_return_int() {
         local file="$1" method="$2" patch_json="$3" ret_type
-        ret_type=$(_return_type "$method")
+        _find_method_awk "$file" "$method" || { OP_MSG="method not found: $method"; return 1; }
+        ret_type=$(_return_type "$_MT_METHOD_SIG")
         case "$ret_type" in Z|B|S|C|I) ;; *) OP_MSG="return type must be Z/B/S/C/I, got $ret_type"; return 1;; esac
         local val=$(echo "$patch_json" | jq -r '.value // empty')
         [ -z "$val" ] && { OP_MSG="'value' field required for return_int"; return 1; }
-        _find_method_awk "$file" "$method" || { OP_MSG="method not found: $method"; return 1; }
         if [ "$DRY_RUN" -eq 1 ]; then OP_MSG="OK (dry-run)"; return 0; fi
         local insn=$(_const_insn "$val")
         _replace_method_body "$file" ".registers 1" "    $insn\n    return v0"
