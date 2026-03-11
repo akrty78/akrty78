@@ -318,7 +318,7 @@ EOF
         ret_type=$(_return_type "$_MT_METHOD_SIG")
         case "$ret_type" in Z|B|S|C|I) ;; *) OP_MSG="return type must be Z/B/S/C/I, got $ret_type"; return 1;; esac
         if [ "$DRY_RUN" -eq 1 ]; then OP_MSG="OK (dry-run)"; return 0; fi
-        _replace_method_body "$file" ".locals 1" "    const/4 v0, 0x1\n    return v0"
+        _replace_method_body "$file" ".locals 1" "    const/4 v0, 0x1"$'\n'"    return v0"
         OP_MSG="✓"
     }
 
@@ -328,7 +328,7 @@ EOF
         ret_type=$(_return_type "$_MT_METHOD_SIG")
         case "$ret_type" in Z|B|S|C|I) ;; *) OP_MSG="return type must be Z/B/S/C/I, got $ret_type"; return 1;; esac
         if [ "$DRY_RUN" -eq 1 ]; then OP_MSG="OK (dry-run)"; return 0; fi
-        _replace_method_body "$file" ".locals 1" "    const/4 v0, 0x0\n    return v0"
+        _replace_method_body "$file" ".locals 1" "    const/4 v0, 0x0"$'\n'"    return v0"
         OP_MSG="✓"
     }
 
@@ -338,7 +338,7 @@ EOF
         ret_type=$(_return_type "$_MT_METHOD_SIG")
         case "$ret_type" in Z|B|S|C|I) ;; *) OP_MSG="return type must be Z/B/S/C/I, got $ret_type"; return 1;; esac
         if [ "$DRY_RUN" -eq 1 ]; then OP_MSG="OK (dry-run)"; return 0; fi
-        _replace_method_body "$file" ".locals 1" "    const/4 v0, -0x1\n    return v0"
+        _replace_method_body "$file" ".locals 1" "    const/4 v0, -0x1"$'\n'"    return v0"
         OP_MSG="✓"
     }
 
@@ -348,7 +348,7 @@ EOF
         ret_type=$(_return_type "$_MT_METHOD_SIG")
         case "$ret_type" in L*|"["*) ;; *) OP_MSG="return type must be object, got $ret_type"; return 1;; esac
         if [ "$DRY_RUN" -eq 1 ]; then OP_MSG="OK (dry-run)"; return 0; fi
-        _replace_method_body "$file" ".locals 1" "    const/4 v0, 0x0\n    return-object v0"
+        _replace_method_body "$file" ".locals 1" "    const/4 v0, 0x0"$'\n'"    return-object v0"
         OP_MSG="✓"
     }
 
@@ -358,7 +358,7 @@ EOF
         ret_type=$(_return_type "$_MT_METHOD_SIG")
         [ "$ret_type" != "Ljava/lang/String;" ] && { OP_MSG="return type must be String, got $ret_type"; return 1; }
         if [ "$DRY_RUN" -eq 1 ]; then OP_MSG="OK (dry-run)"; return 0; fi
-        _replace_method_body "$file" ".locals 1" "    const-string v0, \"\"\n    return-object v0"
+        _replace_method_body "$file" ".locals 1" "    const-string v0, \"\""$'\n'"    return-object v0"
         OP_MSG="✓"
     }
 
@@ -371,7 +371,7 @@ EOF
         [ -z "$val" ] && { OP_MSG="'value' field required for return_int"; return 1; }
         if [ "$DRY_RUN" -eq 1 ]; then OP_MSG="OK (dry-run)"; return 0; fi
         local insn=$(_const_insn "$val")
-        _replace_method_body "$file" ".locals 1" "    $insn\n    return v0"
+        _replace_method_body "$file" ".locals 1" "    $insn"$'\n'"    return v0"
         OP_MSG="✓"
     }
 
@@ -383,15 +383,18 @@ EOF
         if [ "$DRY_RUN" -eq 1 ]; then OP_MSG="OK (dry-run)"; return 0; fi
 
         local pre_body=".registers $regs"
-        local body=""
+        export MT_BODY_REPL=""
         local line_count=$(echo "$patch_json" | jq '.lines | length')
         for ((i=0; i<line_count; i++)); do
             local l=$(echo "$patch_json" | jq -r ".lines[$i]")
-            body="${body}    ${l}\n"
+            if [ -z "$MT_BODY_REPL" ]; then
+                MT_BODY_REPL="    ${l}"
+            else
+                MT_BODY_REPL="${MT_BODY_REPL}
+    ${l}"
+            fi
         done
-        # strip last \n
-        body="${body%\\n}"
-        _replace_method_body "$file" "$pre_body" "$(echo -e "$body")"
+        _replace_method_body "$file" "$pre_body" "$MT_BODY_REPL"
         OP_MSG="✓"
     }
 
@@ -429,12 +432,15 @@ EOF
             fi
             if [ "$in_target" -eq 1 ] && [ "$line_num" -eq "$_MT_METHOD_END" ]; then
                 # FIX 1 & FIX 3: Emit registers, then annotations, then instructions
-                echo -e "$new_registers" >> "$tmp_file"
+                printf "%s\n" "$new_registers" >> "$tmp_file"
                 if [ -n "$annotations" ]; then
-                    # FIX 12: Use parameter expansion safely to drop trailing newline
+                    # Replace literal \n with actual newlines for annotations (from earlier accumulation)
+                    # wait, annotations is built with \n string concatenation: annotations="${annotations}${line}\n"
+                    # To fix it cleanly without eval, we can use awk or just printf
+                    # Let's echo -e the annotations since they don't have user string payloads
                     echo -e "${annotations%\\n}" >> "$tmp_file"
                 fi
-                echo -e "$new_instructions" >> "$tmp_file"
+                printf "%s\n" "$new_instructions" >> "$tmp_file"
                 echo "$line" >> "$tmp_file"
                 in_target=0
                 continue
@@ -556,23 +562,32 @@ EOF
                             fi
                             sed -i -E "${tl}s|${esc_match}|${esc_repl}|" "$tmp_file"
                         else
-                            local awk_repl=""
-                            for nl in "${new_lines[@]}"; do awk_repl="${awk_repl}    ${nl}\n"; done
-                            awk -v ln="$tl" -v repl="$awk_repl" 'NR==ln{printf "%s", repl; next}1' "$tmp_file" > "${tmp_file}.2"
+                            export MT_AWK_REPL=""
+                            for nl in "${new_lines[@]}"; do
+                                MT_AWK_REPL="${MT_AWK_REPL}    ${nl}
+"
+                            done
+                            awk -v ln="$tl" 'NR==ln{printf "%s", ENVIRON["MT_AWK_REPL"]; next}1' "$tmp_file" > "${tmp_file}.2"
                             mv "${tmp_file}.2" "$tmp_file"
                         fi
                     fi
                     ;;
                 insert_before)
-                    local ins=""
-                    for nl in "${new_lines[@]}"; do ins="${ins}    ${nl}\n"; done
-                    awk -v ln="$tl" -v ins="$ins" 'NR==ln{printf "%s", ins}1' "$tmp_file" > "${tmp_file}.2"
+                    export MT_AWK_REPL=""
+                    for nl in "${new_lines[@]}"; do
+                        MT_AWK_REPL="${MT_AWK_REPL}    ${nl}
+"
+                    done
+                    awk -v ln="$tl" 'NR==ln{printf "%s", ENVIRON["MT_AWK_REPL"]}1' "$tmp_file" > "${tmp_file}.2"
                     mv "${tmp_file}.2" "$tmp_file"
                     ;;
                 insert_after)
-                    local ins=""
-                    for nl in "${new_lines[@]}"; do ins="${ins}    ${nl}\n"; done
-                    awk -v ln="$tl" -v ins="$ins" '{print}NR==ln{printf "%s", ins}' "$tmp_file" > "${tmp_file}.2"
+                    export MT_AWK_REPL=""
+                    for nl in "${new_lines[@]}"; do
+                        MT_AWK_REPL="${MT_AWK_REPL}    ${nl}
+"
+                    done
+                    awk -v ln="$tl" '{print}NR==ln{printf "%s", ENVIRON["MT_AWK_REPL"]}' "$tmp_file" > "${tmp_file}.2"
                     mv "${tmp_file}.2" "$tmp_file"
                     ;;
             esac
