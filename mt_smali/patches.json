@@ -111,6 +111,42 @@
         "out_apk_path": "system_ext/priv-app/Settings/Settings.apk",
         "patches": [
             {
+                "_comment": "Settings.apk: Region fix — LocaleController IS_GLOBAL_BUILD -> true",
+                "class": "Lcom/android/settings/region/LocaleController;",
+                "method": "*",
+                "op": "replace_line",
+                "match": "sget-boolean v([0-9]+), Lmiui/os/Build;->IS_GLOBAL_BUILD:Z",
+                "match_mode": "regex",
+                "occurrence": "all",
+                "replacement": [
+                    "const/4 v\\1, 0x1"
+                ]
+            },
+            {
+                "_comment": "Settings.apk: Region fix — LocaleSettingsTree IS_GLOBAL_BUILD -> true",
+                "class": "Lcom/android/settings/region/LocaleSettingsTree;",
+                "method": "*",
+                "op": "replace_line",
+                "match": "sget-boolean v([0-9]+), Lmiui/os/Build;->IS_GLOBAL_BUILD:Z",
+                "match_mode": "regex",
+                "occurrence": "all",
+                "replacement": [
+                    "const/4 v\\1, 0x1"
+                ]
+            },
+            {
+                "_comment": "Settings.apk: Region fix — OtherPersonalSettings IS_GLOBAL_BUILD -> true",
+                "class": "Lcom/android/settings/OtherPersonalSettings;",
+                "method": "*",
+                "op": "replace_line",
+                "match": "sget-boolean [pv]([0-9]+), Lmiui/os/Build;->IS_GLOBAL_BUILD:Z",
+                "match_mode": "regex",
+                "occurrence": "all",
+                "replacement": [
+                    "const/4 v\\1, 0x1"
+                ]
+            },
+            {
                 "_comment": "Function 3: getSimpleOSVersion — append .Extended build by NexDroid to OS version",
                 "class": "Lcom/android/settings/device/MiuiAboutPhoneUtils;",
                 "method": "getSimpleOSVersion",
@@ -414,6 +450,42 @@
         "apk_path": "system_ext/priv-app/MiuiSystemUI/MiuiSystemUI.apk",
         "out_apk_path": "system_ext/priv-app/MiuiSystemUI/MiuiSystemUI.apk",
         "patches": [
+            {
+                "_comment": "MiuiSystemUI: VoLTE fix — Global Lmiui/os/Build;->IS_INTERNATIONAL_BUILD -> true",
+                "class": "*",
+                "method": "*",
+                "op": "replace_line",
+                "match": "sget-boolean [pv]([0-9]+), Lmiui/os/Build;->IS_INTERNATIONAL_BUILD:Z",
+                "match_mode": "regex",
+                "occurrence": "all",
+                "replacement": [
+                    "const/4 v\\1, 0x1"
+                ]
+            },
+            {
+                "_comment": "MiuiSystemUI: QuickShare fix — CurrentTilesInteractorImpl IS_INTERNATIONAL_BUILD -> true",
+                "class": "Lcom/android/systemui/qs/pipeline/domain/interactor/CurrentTilesInteractorImpl;",
+                "method": "*",
+                "op": "replace_line",
+                "match": "sget-boolean [pv]([0-9]+), Lcom/miui/utils/configs/MiuiConfigs;->IS_INTERNATIONAL_BUILD:Z",
+                "match_mode": "regex",
+                "occurrence": "all",
+                "replacement": [
+                    "const/4 v\\1, 0x1"
+                ]
+            },
+            {
+                "_comment": "MiuiSystemUI: WhatsApp Notification fix — NotificationUtil::isEmptySummary IS_INTERNATIONAL_BUILD -> true",
+                "class": "Lcom/android/systemui/statusbar/notification/NotificationUtil;",
+                "method": "isEmptySummary",
+                "op": "replace_line",
+                "match": "sget-boolean [pv]([0-9]+), Lcom/miui/utils/configs/MiuiConfigs;->IS_INTERNATIONAL_BUILD:Z",
+                "match_mode": "regex",
+                "occurrence": "all",
+                "replacement": [
+                    "const/4 v\\1, 0x1"
+                ]
+            },
             {
                 "class": "Lcom/miui/systemui/quicksettings/MiuiTileQueryHelper$$ExternalSyntheticLambda1;",
                 "method": "*",
