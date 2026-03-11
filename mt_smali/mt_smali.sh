@@ -617,7 +617,6 @@ EOF
         local i
         local nl_count=$(echo "$patch_json" | jq '.lines | length')
         [ "$nl_count" -eq 0 ] && { OP_MSG="'lines' array is empty"; return 1; }
-        local total=$(wc -l < "$file")
         
         # Build a temporary file with the lines to append
         local tmp_ins="$MTCLI_TMP/append_$$.txt"
@@ -633,15 +632,16 @@ EOF
             return 0
         fi
         
-        # Insert the tmp_ins file right before the last line (.end class is usually last)
-        awk -v ln="$total" -v ins_file="$tmp_ins" '
-        NR==ln {
-            while ((getline line < ins_file) > 0) {
-                print line
+        # Insert before .end class (pattern-based — immune to trailing blank lines)
+        awk -v ins_file="$tmp_ins" '
+        /^\.end class$/ && !done {
+            while ((getline ins_line < ins_file) > 0) {
+                print ins_line
             }
             close(ins_file)
+            done = 1
         }
-        {print}' "$file" > "${file}.tmp"
+        { print }' "$file" > "${file}.tmp"
         
         mv "${file}.tmp" "$file"
         rm -f "$tmp_ins"
