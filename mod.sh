@@ -2746,8 +2746,6 @@ PYTHON_EOF
 
             # D3. Settings AI — now handled via mt_smali patches.json
             _SETTINGS_APK="$(find "$DUMP_DIR" -name "Settings.apk" -type f | head -n1)"
-            _run_dex_patch "SETTINGS REGION" "settings-region" "$_SETTINGS_APK"
-            cd "$GITHUB_WORKSPACE"
 
             # D4b. OtherPersonalSettings — IS_GLOBAL_BUILD smali patch
             #   Binary walker mis-steps on this class's class_data → apktool smali sed.
