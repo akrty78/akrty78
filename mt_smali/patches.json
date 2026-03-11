@@ -112,7 +112,7 @@
         "patches": [
             {
                 "_comment": "Settings.apk: Region fix \u2014 LocaleController IS_GLOBAL_BUILD -> true",
-                "class": "Lcom/android/settings/region/LocaleController;",
+                "class": "Lcom/android/settings/personal/LocaleController;",
                 "method": "*",
                 "op": "replace_line",
                 "match": "sget-boolean v([0-9]+), Lmiui/os/Build;->IS_GLOBAL_BUILD:Z",
@@ -124,7 +124,7 @@
             },
             {
                 "_comment": "Settings.apk: Region fix \u2014 LocaleSettingsTree IS_GLOBAL_BUILD -> true",
-                "class": "Lcom/android/settings/region/LocaleSettingsTree;",
+                "class": "Lcom/android/settings/search/tree/LocaleSettingsTree;",
                 "method": "*",
                 "op": "replace_line",
                 "match": "sget-boolean v([0-9]+), Lmiui/os/Build;->IS_GLOBAL_BUILD:Z",
@@ -136,7 +136,7 @@
             },
             {
                 "_comment": "Settings.apk: Region fix \u2014 OtherPersonalSettings IS_GLOBAL_BUILD -> true",
-                "class": "Lcom/android/settings/OtherPersonalSettings;",
+                "class": "Lcom/android/settings/personal/OtherPersonalSettings;",
                 "method": "*",
                 "op": "replace_line",
                 "match": "sget-boolean [pv]([0-9]+), Lmiui/os/Build;->IS_GLOBAL_BUILD:Z",
@@ -465,8 +465,44 @@
         "out_apk_path": "system_ext/priv-app/MiuiSystemUI/MiuiSystemUI.apk",
         "patches": [
             {
-                "_comment": "MiuiSystemUI: VoLTE fix \u2014 Global Lmiui/os/Build;->IS_INTERNATIONAL_BUILD -> true",
-                "class": "*",
+                "_comment": "MiuiSystemUI: VoLTE fix \u2014 MiuiOperatorCustomizedPolicy IS_INTERNATIONAL_BUILD -> true",
+                "class": "Lcom/android/systemui/statusbar/policy/MiuiOperatorCustomizedPolicy;",
+                "method": "*",
+                "op": "replace_line",
+                "match": "sget-boolean [pv]([0-9]+), Lmiui/os/Build;->IS_INTERNATIONAL_BUILD:Z",
+                "match_mode": "regex",
+                "occurrence": "all",
+                "replacement": [
+                    "const/4 v\\1, 0x1"
+                ]
+            },
+            {
+                "_comment": "MiuiSystemUI: VoLTE fix \u2014 MiuiCarrierTextController IS_INTERNATIONAL_BUILD -> true",
+                "class": "Lcom/android/systemui/statusbar/policy/MiuiCarrierTextController;",
+                "method": "*",
+                "op": "replace_line",
+                "match": "sget-boolean [pv]([0-9]+), Lmiui/os/Build;->IS_INTERNATIONAL_BUILD:Z",
+                "match_mode": "regex",
+                "occurrence": "all",
+                "replacement": [
+                    "const/4 v\\1, 0x1"
+                ]
+            },
+            {
+                "_comment": "MiuiSystemUI: VoLTE fix \u2014 MiuiCellularIconVM IS_INTERNATIONAL_BUILD -> true",
+                "class": "Lcom/android/systemui/statusbar/pipeline/mobile/ui/viewmodel/MiuiCellularIconVM;",
+                "method": "*",
+                "op": "replace_line",
+                "match": "sget-boolean [pv]([0-9]+), Lmiui/os/Build;->IS_INTERNATIONAL_BUILD:Z",
+                "match_mode": "regex",
+                "occurrence": "all",
+                "replacement": [
+                    "const/4 v\\1, 0x1"
+                ]
+            },
+            {
+                "_comment": "MiuiSystemUI: VoLTE fix \u2014 MiuiMobileIconBinder IS_INTERNATIONAL_BUILD -> true",
+                "class": "Lcom/android/systemui/statusbar/pipeline/mobile/ui/binder/MiuiMobileIconBinder;",
                 "method": "*",
                 "op": "replace_line",
                 "match": "sget-boolean [pv]([0-9]+), Lmiui/os/Build;->IS_INTERNATIONAL_BUILD:Z",
