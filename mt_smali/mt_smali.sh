@@ -935,7 +935,8 @@ EOF
 
     _info "Recompiling smali → DEX (API $API_LEVEL)..."
     local PATCHED_DEX="$MTCLI_TMP/patched_${DEX_NAME}"
-    if ! java -jar "$SMALI_JAR" a -a "$API_LEVEL" -o "$PATCHED_DEX" "$SMALI_DIR"; then
+    java -jar "$SMALI_JAR" a -a "$API_LEVEL" -o "$PATCHED_DEX" "$SMALI_DIR"
+    if [ ! -f "$PATCHED_DEX" ]; then
         _die "smali recompile FAILED — original untouched" || return 1
     fi
     _ok "Recompilation successful"
