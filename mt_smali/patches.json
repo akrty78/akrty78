@@ -448,7 +448,7 @@
         "patches": [
             {
                 "class": "Lmiui/util/CustomizeUtil;",
-                "method": "getMiuiCustVariantFile",
+                "method": "*",
                 "op": "replace_line",
                 "match": "sget-boolean v0, Lmiui/os/Build;->IS_GLOBAL_BUILD:Z",
                 "match_mode": "contains",
