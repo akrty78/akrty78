@@ -403,53 +403,58 @@ EOF
     _replace_method_body() {
         local file="$1" new_registers="$2" new_instructions="$3"
         local tmp_file="${file}.tmp"
+        local ann_tmp="${file}.ann.tmp"
+        > "$ann_tmp"
+        
         local line_num=0
         local in_target=0
         local in_annotation=0
-        local annotations=""
+        
+        > "$tmp_file"
         
         while IFS= read -r line || [[ -n "$line" ]]; do
             line_num=$((line_num + 1))
+            
             if [ "$line_num" -eq "$_MT_METHOD_START" ]; then
                 in_target=1
-                echo "$line" >> "$tmp_file"
+                printf "%s\n" "$line" >> "$tmp_file"
                 continue
             fi
+            
             if [ "$in_target" -eq 1 ] && [ "$line_num" -lt "$_MT_METHOD_END" ]; then
                 if [[ "$line" =~ ^[[:space:]]*\.annotation ]]; then
                     in_annotation=1
-                    annotations="${annotations}${line}\n"
+                    printf "%s\n" "$line" >> "$ann_tmp"
                     continue
                 fi
                 if [ "$in_annotation" -eq 1 ]; then
-                    annotations="${annotations}${line}\n"
+                    printf "%s\n" "$line" >> "$ann_tmp"
                     [[ "$line" =~ ^[[:space:]]*\.end[[:space:]]+annotation ]] && in_annotation=0
                     continue
                 fi
                 if [[ "$line" =~ ^[[:space:]]*\.param ]] || [[ "$line" =~ ^[[:space:]]*\.end[[:space:]]+param ]]; then
-                    annotations="${annotations}${line}\n"
+                    printf "%s\n" "$line" >> "$ann_tmp"
                     continue
                 fi
                 continue
             fi
+            
             if [ "$in_target" -eq 1 ] && [ "$line_num" -eq "$_MT_METHOD_END" ]; then
-                # FIX 1 & FIX 3: Emit registers, then annotations, then instructions
                 printf "%s\n" "$new_registers" >> "$tmp_file"
-                if [ -n "$annotations" ]; then
-                    # Replace literal \n with actual newlines for annotations (from earlier accumulation)
-                    # wait, annotations is built with \n string concatenation: annotations="${annotations}${line}\n"
-                    # To fix it cleanly without eval, we can use awk or just printf
-                    # Let's echo -e the annotations since they don't have user string payloads
-                    echo -e "${annotations%\\n}" >> "$tmp_file"
+                if [ -s "$ann_tmp" ]; then
+                    cat "$ann_tmp" >> "$tmp_file"
                 fi
                 printf "%s\n" "$new_instructions" >> "$tmp_file"
-                echo "$line" >> "$tmp_file"
+                printf "%s\n" "$line" >> "$tmp_file"
                 in_target=0
                 continue
             fi
-            echo "$line" >> "$tmp_file"
+            
+            printf "%s\n" "$line" >> "$tmp_file"
         done < "$file"
+        
         mv "$tmp_file" "$file"
+        rm -f "$ann_tmp"
     }
 
     _line_op() {
@@ -613,18 +618,33 @@ EOF
         local nl_count=$(echo "$patch_json" | jq '.lines | length')
         [ "$nl_count" -eq 0 ] && { OP_MSG="'lines' array is empty"; return 1; }
         local total=$(wc -l < "$file")
-        local ins="\n"
+        
+        # Build a temporary file with the lines to append
+        local tmp_ins="$MTCLI_TMP/append_$$.txt"
+        echo "" > "$tmp_ins"
         for ((i=0; i<nl_count; i++)); do
-            local line=$(echo "$patch_json" | jq -r ".lines[$i]")
-            ins="${ins}${line}\n"
+            echo "$patch_json" | jq -r ".lines[$i]" >> "$tmp_ins"
         done
-        ins="${ins}\n"
+        echo "" >> "$tmp_ins"
+        
         if [ "$DRY_RUN" -eq 1 ]; then
             OP_MSG="✓ (dry-run, would append $nl_count lines)"
+            rm -f "$tmp_ins"
             return 0
         fi
-        awk -v ln="$total" -v ins="$ins" 'NR==ln{printf "%s", ins}{print}' "$file" > "${file}.tmp"
+        
+        # Insert the tmp_ins file right before the last line (.end class is usually last)
+        awk -v ln="$total" -v ins_file="$tmp_ins" '
+        NR==ln {
+            while ((getline line < ins_file) > 0) {
+                print line
+            }
+            close(ins_file)
+        }
+        {print}' "$file" > "${file}.tmp"
+        
         mv "${file}.tmp" "$file"
+        rm -f "$tmp_ins"
         OP_MSG="✓ ($nl_count lines appended before .end class)"
     }
 
