@@ -308,7 +308,7 @@ EOF
         ret_type=$(_return_type "$_MT_METHOD_SIG")
         [ "$ret_type" != "V" ] && { OP_MSG="return type must be V, got $ret_type"; return 1; }
         if [ "$DRY_RUN" -eq 1 ]; then OP_MSG="OK (dry-run)"; return 0; fi
-        _replace_method_body "$file" ".registers 1" "    return-void"
+        _replace_method_body "$file" ".locals 0" "    return-void"
         OP_MSG="✓"
     }
 
@@ -318,7 +318,7 @@ EOF
         ret_type=$(_return_type "$_MT_METHOD_SIG")
         case "$ret_type" in Z|B|S|C|I) ;; *) OP_MSG="return type must be Z/B/S/C/I, got $ret_type"; return 1;; esac
         if [ "$DRY_RUN" -eq 1 ]; then OP_MSG="OK (dry-run)"; return 0; fi
-        _replace_method_body "$file" ".registers 1" "    const/4 v0, 0x1\n    return v0"
+        _replace_method_body "$file" ".locals 1" "    const/4 v0, 0x1\n    return v0"
         OP_MSG="✓"
     }
 
@@ -328,7 +328,7 @@ EOF
         ret_type=$(_return_type "$_MT_METHOD_SIG")
         case "$ret_type" in Z|B|S|C|I) ;; *) OP_MSG="return type must be Z/B/S/C/I, got $ret_type"; return 1;; esac
         if [ "$DRY_RUN" -eq 1 ]; then OP_MSG="OK (dry-run)"; return 0; fi
-        _replace_method_body "$file" ".registers 1" "    const/4 v0, 0x0\n    return v0"
+        _replace_method_body "$file" ".locals 1" "    const/4 v0, 0x0\n    return v0"
         OP_MSG="✓"
     }
 
@@ -338,7 +338,7 @@ EOF
         ret_type=$(_return_type "$_MT_METHOD_SIG")
         case "$ret_type" in Z|B|S|C|I) ;; *) OP_MSG="return type must be Z/B/S/C/I, got $ret_type"; return 1;; esac
         if [ "$DRY_RUN" -eq 1 ]; then OP_MSG="OK (dry-run)"; return 0; fi
-        _replace_method_body "$file" ".registers 1" "    const/4 v0, -0x1\n    return v0"
+        _replace_method_body "$file" ".locals 1" "    const/4 v0, -0x1\n    return v0"
         OP_MSG="✓"
     }
 
@@ -348,7 +348,7 @@ EOF
         ret_type=$(_return_type "$_MT_METHOD_SIG")
         case "$ret_type" in L*|"["*) ;; *) OP_MSG="return type must be object, got $ret_type"; return 1;; esac
         if [ "$DRY_RUN" -eq 1 ]; then OP_MSG="OK (dry-run)"; return 0; fi
-        _replace_method_body "$file" ".registers 1" "    const/4 v0, 0x0\n    return-object v0"
+        _replace_method_body "$file" ".locals 1" "    const/4 v0, 0x0\n    return-object v0"
         OP_MSG="✓"
     }
 
@@ -358,7 +358,7 @@ EOF
         ret_type=$(_return_type "$_MT_METHOD_SIG")
         [ "$ret_type" != "Ljava/lang/String;" ] && { OP_MSG="return type must be String, got $ret_type"; return 1; }
         if [ "$DRY_RUN" -eq 1 ]; then OP_MSG="OK (dry-run)"; return 0; fi
-        _replace_method_body "$file" ".registers 1" "    const-string v0, \"\"\n    return-object v0"
+        _replace_method_body "$file" ".locals 1" "    const-string v0, \"\"\n    return-object v0"
         OP_MSG="✓"
     }
 
@@ -371,7 +371,7 @@ EOF
         [ -z "$val" ] && { OP_MSG="'value' field required for return_int"; return 1; }
         if [ "$DRY_RUN" -eq 1 ]; then OP_MSG="OK (dry-run)"; return 0; fi
         local insn=$(_const_insn "$val")
-        _replace_method_body "$file" ".registers 1" "    $insn\n    return v0"
+        _replace_method_body "$file" ".locals 1" "    $insn\n    return v0"
         OP_MSG="✓"
     }
 
