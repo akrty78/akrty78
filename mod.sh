@@ -176,63 +176,6 @@ install_gapp_logic() {
     log_success "GApps installation complete: $installed_count/$total_count installed"
 }
 
-# --- CREATE APK-MODDER.SH ---
-cat <<'EOF' > "$GITHUB_WORKSPACE/apk-modder.sh"
-#!/bin/bash
-APK_PATH="$1"
-TARGET_CLASS="$2"
-TARGET_METHOD="$3"
-RETURN_VAL="$4"
-BIN_DIR="$(pwd)/bin"
-TEMP_MOD="temp_modder"
-export PATH="$BIN_DIR:$PATH"
-
-if [ ! -f "$APK_PATH" ]; then exit 1; fi
-echo "   [Modder] 💉 Patching $TARGET_METHOD..."
-
-rm -rf "$TEMP_MOD"
-apktool d -r -f "$APK_PATH" -o "$TEMP_MOD" >/dev/null 2>&1
-
-CLASS_PATH=$(echo "$TARGET_CLASS" | sed 's/\./\//g')
-SMALI_FILE=$(find "$TEMP_MOD" -type f -path "*/$CLASS_PATH.smali" | head -n 1)
-
-if [ -z "$SMALI_FILE" ]; then
-    echo "   [Modder] ⚠️ Class not found."
-    rm -rf "$TEMP_MOD"; exit 0
-fi
-
-cat <<PY > "$BIN_DIR/wiper.py"
-import sys, re
-file_path = sys.argv[1]; method_name = sys.argv[2]; ret_type = sys.argv[3]
-
-tpl_true = ".registers 1\n    const/4 v0, 0x1\n    return v0"
-tpl_false = ".registers 1\n    const/4 v0, 0x0\n    return v0"
-tpl_null = ".registers 1\n    const/4 v0, 0x0\n    return-object v0"
-tpl_void = ".registers 0\n    return-void"
-
-payload = tpl_void
-if ret_type.lower() == 'true': payload = tpl_true
-elif ret_type.lower() == 'false': payload = tpl_false
-elif ret_type.lower() == 'null': payload = tpl_null
-
-with open(file_path, 'r') as f: content = f.read()
-pattern = r'(\.method.* ' + re.escape(method_name) + r'\(.*)(?s:.*?)(\.end method)'
-new_content, count = re.subn(pattern, lambda m: m.group(1) + "\n" + payload + "\n" + m.group(2), content)
-
-if count > 0:
-    with open(file_path, 'w') as f: f.write(new_content)
-    print("PATCHED")
-PY
-
-RESULT=$(python3 "$BIN_DIR/wiper.py" "$SMALI_FILE" "$TARGET_METHOD" "$RETURN_VAL")
-
-if [ "$RESULT" == "PATCHED" ]; then
-    apktool b -c "$TEMP_MOD" -o "$APK_PATH" >/dev/null 2>&1
-    echo "   [Modder] ✅ Done."
-fi
-rm -rf "$TEMP_MOD" "$BIN_DIR/wiper.py"
-EOF
-chmod +x "$GITHUB_WORKSPACE/apk-modder.sh"
 
 # =========================================================
 #  2. SETUP & TOOLS
@@ -247,9 +190,7 @@ sudo apt-get install -y -qq python3 python3-pip erofs-utils erofsfuse jq aria2 z
 pip3 install gdown --break-system-packages -q
 log_success "System dependencies installed"
 
-if [ -f "apk-modder.sh" ]; then
-    chmod +x apk-modder.sh
-fi
+
 
 # =========================================================
 #  3. DOWNLOAD RESOURCES
@@ -1104,18 +1045,42 @@ def list_dexes(archive: Path) -> list:
                                        else int(re.search(r'\d+', x).group()))
 
 def _inject_dex(archive: Path, dex_name: str, dex_bytes: bytes) -> bool:
-    work = Path(tempfile.mkdtemp(prefix="dp_"))
+    """MT-Manager style DEX injection: replaces a single DEX inside an APK/JAR
+    while keeping resources.arsc STORED + 4-byte aligned. No zip/zipalign needed."""
+    ALIGN = 4
+    tmp_path = str(archive) + ".mtinject.tmp"
     try:
-        (work / dex_name).write_bytes(dex_bytes)
-        r = subprocess.run(["zip", "-0", "-u", str(archive), dex_name],
-                           cwd=str(work), capture_output=True, text=True)
-        if r.returncode not in (0, 12):
-            err(f"  zip failed rc={r.returncode}: {r.stderr[:200]}"); return False
+        with zipfile.ZipFile(str(archive), 'r') as zin:
+            with zipfile.ZipFile(tmp_path, 'w') as zout:
+                for item in zin.infolist():
+                    if item.filename == dex_name:
+                        info_new = zipfile.ZipInfo(item.filename)
+                        info_new.compress_type = zipfile.ZIP_STORED
+                        info_new.external_attr = item.external_attr
+                        hdr = 30 + len(info_new.filename.encode('utf-8'))
+                        info_new.extra = b'\x00' * ((ALIGN - (hdr % ALIGN)) % ALIGN)
+                        zout.writestr(info_new, dex_bytes)
+                    elif item.filename == 'resources.arsc':
+                        data = zin.read(item.filename)
+                        info_new = zipfile.ZipInfo(item.filename)
+                        info_new.compress_type = zipfile.ZIP_STORED
+                        info_new.external_attr = item.external_attr
+                        hdr = 30 + len(info_new.filename.encode('utf-8'))
+                        info_new.extra = b'\x00' * ((ALIGN - (hdr % ALIGN)) % ALIGN)
+                        zout.writestr(info_new, data)
+                    else:
+                        data = zin.read(item.filename)
+                        info_new = zipfile.ZipInfo(item.filename)
+                        info_new.compress_type = item.compress_type
+                        info_new.external_attr = item.external_attr
+                        info_new.extra = item.extra
+                        zout.writestr(info_new, data)
+        os.replace(tmp_path, str(archive))
         return True
     except Exception as exc:
-        err(f"  inject crash: {exc}"); return False
-    finally:
-        shutil.rmtree(work, ignore_errors=True)
+        err(f"  inject crash: {exc}")
+        if os.path.exists(tmp_path): os.remove(tmp_path)
+        return False
 
 def run_patches(archive: Path, patch_fn, label: str) -> int:
     """
@@ -1685,100 +1650,6 @@ inject_security_mod() {
 }
 
 # ── Mod 4: Multi-Language Overlays ───────────────────────────
-# ── Mod 3: Fold-Pager (Settings Mod) ─────────────────────────
-inject_foldpager_mod() {
-    local dump_dir="$1"
-    local settings_apk=$(find "$dump_dir/priv-app" -name "Settings.apk" -type f | head -n 1)
-    if [ -z "$settings_apk" ]; then
-        log_error "[foldpager] Settings.apk not found in dump"
-        return 1
-    fi
-
-    log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    log_step "📱 FOLD-PAGER INJECTION"
-    log_step "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-    local fp_work="$TEMP_DIR/foldpager_work"
-    rm -rf "$fp_work"
-    mkdir -p "$fp_work"
-
-    # Download all release assets individually (classes.dex, xmls)
-    local api_url="https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/Multilang"
-    
-    log_info "[foldpager] Fetching release assets..."
-    mkdir -p "$fp_work/extracted"
-    
-    # Extract asset URLs
-    local asset_urls=$(curl -s "$api_url" | jq -r '.assets[].browser_download_url')
-    
-    if [ -z "$asset_urls" ]; then
-        log_error "[foldpager] Could not resolve Multilang release assets"
-        return 1
-    fi
-    
-    for url in $asset_urls; do
-        local filename=$(basename "$url")
-        log_info "  -> Downloading $filename..."
-        wget -q -O "$fp_work/extracted/$filename" "$url"
-    done
-
-    # Step 1 & 2: Smali Patches
-    log_info "[foldpager] Applying Smali Patches via apk-modder..."
-    "$GITHUB_WORKSPACE/apk-modder.sh" "$settings_apk" "com.android.settings.utils.SettingsFeatures" "isSupportFoldScreenSettings" "true"
-    "$GITHUB_WORKSPACE/apk-modder.sh" "$settings_apk" "com.android.settings.foldSettings.MiuiFoldScreenSettings" "displayResourceTilesToScreen" "void"
-
-    # Step 5: DEX Import
-    log_info "[foldpager] Importing custom smali from release classes.dex..."
-    local classes_dex=$(find "$fp_work/extracted" -name "classes.dex" -type f | head -n 1)
-    if [ -n "$classes_dex" ]; then
-        # Find the highest classesN.dex. Android dexes are named classes.dex, classes2.dex, classes3.dex...
-        # Let's count how many exist in the APK.
-        local dex_count=$(unzip -l "$settings_apk" | grep -E "classes[0-9]*\.dex" | wc -l)
-        
-        local target_dex_name
-        if [ "$dex_count" -eq 1 ]; then
-            # Only classes.dex exists, so we inject classes2.dex
-            target_dex_name="classes2.dex"
-        else
-            # classes.dex = 1
-            # classes2.dex = 2
-            # classes3.dex = 3
-            # If count is 3, next is classes4.dex.
-            target_dex_name="classes$((dex_count + 1)).dex"
-        fi
-        
-        log_info "[foldpager] Injecting as $target_dex_name"
-        cp "$classes_dex" "$fp_work/$target_dex_name"
-        
-        cd "$fp_work"
-        zip -q -u "$settings_apk" "$target_dex_name"
-        cd - >/dev/null
-        
-        log_success "[foldpager] Custom classes.dex injected as $target_dex_name"
-    else
-        log_warning "[foldpager] classes.dex not found in release asset"
-    fi
-
-    # Step 3a & 3b: XML Replace Engine
-    log_info "[foldpager] Replacing XML and Drawable assets..."
-    local fold_xml=$(find "$fp_work/extracted" -name "fold_screen_settings.xml" -type f | head -n 1)
-    local tablet_xml=$(find "$fp_work/extracted" -name "ic_tablet_screen_settings.xml" -type f | head -n 1)
-    
-    mkdir -p "$fp_work/assets_bin/res/xml"
-    mkdir -p "$fp_work/assets_bin/res/drawable"
-    mkdir -p "$fp_work/assets_bin/res/drawable-night-v8"
-    
-    [ -n "$fold_xml" ] && cp "$fold_xml" "$fp_work/assets_bin/res/xml/"
-    [ -n "$tablet_xml" ] && cp "$tablet_xml" "$fp_work/assets_bin/res/drawable/"
-    [ -n "$tablet_xml" ] && cp "$tablet_xml" "$fp_work/assets_bin/res/drawable-night-v8/"
-    
-    cd "$fp_work/assets_bin"
-    zip -q -u -r "$settings_apk" res/
-    cd - >/dev/null
-    
-    log_success "[foldpager] XML replacements injected"
-    log_success "✅ Fold-Pager mod injected successfully"
-}
 
 # ── Mod 4: Wallpaper Pack ────────────────────────────────────
 inject_wallpaper_pack() {
@@ -2426,12 +2297,7 @@ for part in $LOGICALS; do
             process_mt_smali "$DUMP_DIR"
         fi
 
-        # B4. SYSTEM_EXT SPECIFIC MODS
-        if [ "$part" == "system_ext" ] && [ -n "$MODS_SELECTED" ]; then
-            if [[ ",$MODS_SELECTED," == *",fold_pager,"* ]]; then
-                inject_foldpager_mod "$DUMP_DIR"
-            fi
-        fi
+
 
         # C. MIUI BOOSTER - DEVICE LEVEL OVERRIDE (COMPLETE METHOD REPLACEMENT)
         if [ "$part" == "system_ext" ]; then
@@ -2774,15 +2640,45 @@ PYTHON_EOF
                         unzip -o "${_SETTINGS_APK}.apkbuild" 'classes*.dex' >/dev/null 2>&1
                         _DEX_COUNT=$(ls classes*.dex 2>/dev/null | wc -l)
                         if [ "$_DEX_COUNT" -gt 0 ]; then
-                            # Inject DEX-only into original APK — resources.arsc untouched
-                            zip -0 -u "$_SETTINGS_APK" classes*.dex >/dev/null 2>&1
+                            # MT-Manager style: inject DEX-only, keep resources.arsc STORED + aligned
                             cd "$GITHUB_WORKSPACE"
-                            # Re-align after DEX injection (DEX entries may shift offsets)
-                            _ZA=$(which zipalign 2>/dev/null ||                                   find "$BIN_DIR/android-sdk" -name zipalign 2>/dev/null | head -1)
-                            if [ -n "$_ZA" ]; then
-                                "$_ZA" -p -f 4 "$_SETTINGS_APK" "${_SETTINGS_APK}.aligned"                                     && mv "${_SETTINGS_APK}.aligned" "$_SETTINGS_APK"                                     && log_success "  ✓ zipalign applied"
-                            fi
-                            log_success "✓ OtherPersonalSettings: DEX injected, resources.arsc preserved"
+                            for _dex_file in "$_OPS_DEX"/classes*.dex; do
+                                _dex_base=$(basename "$_dex_file")
+                                python3 - "$_SETTINGS_APK" "$_dex_base" "$_dex_file" << 'OPS_INJECT_PY'
+import sys, zipfile, os
+apk, dex_name, new_dex = sys.argv[1], sys.argv[2], sys.argv[3]
+ALIGN = 4
+with open(new_dex, 'rb') as f: dex_bytes = f.read()
+tmp = apk + ".mtinject.tmp"
+with zipfile.ZipFile(apk, 'r') as zin:
+    with zipfile.ZipFile(tmp, 'w') as zout:
+        for item in zin.infolist():
+            if item.filename == dex_name:
+                zi = zipfile.ZipInfo(item.filename)
+                zi.compress_type = zipfile.ZIP_STORED
+                zi.external_attr = item.external_attr
+                hdr = 30 + len(zi.filename.encode('utf-8'))
+                zi.extra = b'\x00' * ((ALIGN - (hdr % ALIGN)) % ALIGN)
+                zout.writestr(zi, dex_bytes)
+            elif item.filename == 'resources.arsc':
+                data = zin.read(item.filename)
+                zi = zipfile.ZipInfo(item.filename)
+                zi.compress_type = zipfile.ZIP_STORED
+                zi.external_attr = item.external_attr
+                hdr = 30 + len(zi.filename.encode('utf-8'))
+                zi.extra = b'\x00' * ((ALIGN - (hdr % ALIGN)) % ALIGN)
+                zout.writestr(zi, data)
+            else:
+                data = zin.read(item.filename)
+                zi = zipfile.ZipInfo(item.filename)
+                zi.compress_type = item.compress_type
+                zi.external_attr = item.external_attr
+                zi.extra = item.extra
+                zout.writestr(zi, data)
+os.replace(tmp, apk)
+OPS_INJECT_PY
+                            done
+                            log_success "✓ OtherPersonalSettings: DEX injected (MT-Manager mode), resources.arsc preserved"
                         else
                             cd "$GITHUB_WORKSPACE"
                             log_warning "No DEX found in apktool output — OtherPersonalSettings skipped"
