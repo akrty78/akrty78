@@ -1038,6 +1038,23 @@ EOF
         fi
     done
 
+    # ── POST-INJECTION: zipalign resources.arsc (Android R+ requirement) ──
+    # zip -0 shifts byte offsets → resources.arsc loses 4-byte alignment.
+    # Without this, every patched APK crashes with error -124.
+    if [ "$IS_ARCHIVE" -eq 1 ] && command -v zipalign &>/dev/null; then
+        _info "Aligning $OUTPUT (4-byte boundary for resources.arsc)..."
+        local aligned_out="${OUTPUT%.apk}_aligned.apk"
+        if zipalign -p -f 4 "$OUTPUT" "$aligned_out" 2>/dev/null; then
+            mv -f "$aligned_out" "$OUTPUT"
+            _ok "zipalign complete"
+        else
+            _warn "zipalign failed — APK may crash on R+ devices"
+            rm -f "$aligned_out"
+        fi
+    elif [ "$IS_ARCHIVE" -eq 1 ]; then
+        _warn "zipalign not found — APK may crash on R+ devices. Install: sudo apt-get install zipalign"
+    fi
+
     rm -rf "$MTCLI_TMP"
     _ok "Done. $APPLIED/$PATCH_COUNT patches applied. Output: $OUTPUT"
     return 0
