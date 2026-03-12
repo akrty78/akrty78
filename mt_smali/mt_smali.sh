@@ -1022,38 +1022,113 @@ EOF
         _ok "Recompilation of $mod_dex successful"
 
         if [ "$IS_ARCHIVE" -eq 1 ]; then
-            _info "Injecting $mod_dex into $(basename "$OUTPUT")..."
-            cp "$PATCHED_DEX" "$MTCLI_TMP/$mod_dex"
-            cd "$MTCLI_TMP"
-            zip -j -0 "$OUTPUT" "$mod_dex" > /dev/null 2>&1 || { _die "Failed to inject $mod_dex into $OUTPUT"; return 1; }
-            cd - > /dev/null
+            _info "Injecting $mod_dex into $(basename "$OUTPUT") (MT-Manager mode)..."
+            # ── MT-Manager principal DEX injection ──
+            # Python-based: reads APK entry-by-entry, replaces only the target DEX,
+            # keeps resources.arsc STORED + 4-byte aligned, preserves all other entries.
+            # No zip/zipalign binary dependency required.
+            python3 - "$OUTPUT" "$mod_dex" "$PATCHED_DEX" << 'INJECT_PY'
+import sys, zipfile, os, struct, shutil
+
+apk_path   = sys.argv[1]
+dex_name   = sys.argv[2]
+new_dex    = sys.argv[3]
+
+tmp_path = apk_path + ".mtinject.tmp"
+ALIGN = 4  # 4-byte alignment for resources.arsc and STORED entries
+
+with open(new_dex, 'rb') as f:
+    dex_bytes = f.read()
+
+with zipfile.ZipFile(apk_path, 'r') as zin:
+    with zipfile.ZipFile(tmp_path, 'w') as zout:
+        for item in zin.infolist():
+            if item.filename == dex_name:
+                # Replace DEX — always STORED (uncompressed), matching MT Manager
+                info = zipfile.ZipInfo(item.filename)
+                info.compress_type = zipfile.ZIP_STORED
+                info.external_attr = item.external_attr
+                # Align STORED entry to 4 bytes
+                # ZipInfo header overhead: 30 + len(filename) + len(extra)
+                header_size = 30 + len(info.filename.encode('utf-8'))
+                pad_needed = (ALIGN - (header_size % ALIGN)) % ALIGN
+                info.extra = b'\x00' * pad_needed
+                zout.writestr(info, dex_bytes)
+            elif item.filename == 'resources.arsc':
+                # resources.arsc MUST stay STORED and 4-byte aligned (Android R+ requirement)
+                data = zin.read(item.filename)
+                info = zipfile.ZipInfo(item.filename)
+                info.compress_type = zipfile.ZIP_STORED
+                info.external_attr = item.external_attr
+                header_size = 30 + len(info.filename.encode('utf-8'))
+                pad_needed = (ALIGN - (header_size % ALIGN)) % ALIGN
+                info.extra = b'\x00' * pad_needed
+                zout.writestr(info, data)
+            else:
+                # Preserve original entry exactly (same compression, same data)
+                data = zin.read(item.filename)
+                info = zipfile.ZipInfo(item.filename)
+                info.compress_type = item.compress_type
+                info.external_attr = item.external_attr
+                info.extra = item.extra
+                zout.writestr(info, data)
+
+os.replace(tmp_path, apk_path)
+print("OK")
+INJECT_PY
+            if [ $? -ne 0 ]; then
+                _die "Python DEX injection failed for $mod_dex" || return 1
+            fi
             _ok "DEX injected into $OUTPUT"
         elif [ "$INPUT_EXT_LOWER" = "dex" ]; then
             cp "$PATCHED_DEX" "$OUTPUT"
         else
-            cp "$PATCHED_DEX" "$MTCLI_TMP/$mod_dex"
-            cd "$MTCLI_TMP"
-            zip -j -0 "$OUTPUT" "$mod_dex" > /dev/null 2>&1 || cp "$PATCHED_DEX" "$OUTPUT"
-            cd - > /dev/null
+            _info "Injecting $mod_dex (MT-Manager mode)..."
+            python3 - "$OUTPUT" "$mod_dex" "$PATCHED_DEX" << 'INJECT_PY2'
+import sys, zipfile, os
+
+apk_path   = sys.argv[1]
+dex_name   = sys.argv[2]
+new_dex    = sys.argv[3]
+ALIGN = 4
+
+with open(new_dex, 'rb') as f:
+    dex_bytes = f.read()
+
+tmp_path = apk_path + ".mtinject.tmp"
+with zipfile.ZipFile(apk_path, 'r') as zin:
+    with zipfile.ZipFile(tmp_path, 'w') as zout:
+        for item in zin.infolist():
+            if item.filename == dex_name:
+                info = zipfile.ZipInfo(item.filename)
+                info.compress_type = zipfile.ZIP_STORED
+                info.external_attr = item.external_attr
+                header_size = 30 + len(info.filename.encode('utf-8'))
+                pad_needed = (ALIGN - (header_size % ALIGN)) % ALIGN
+                info.extra = b'\x00' * pad_needed
+                zout.writestr(info, dex_bytes)
+            elif item.filename == 'resources.arsc':
+                data = zin.read(item.filename)
+                info = zipfile.ZipInfo(item.filename)
+                info.compress_type = zipfile.ZIP_STORED
+                info.external_attr = item.external_attr
+                header_size = 30 + len(info.filename.encode('utf-8'))
+                pad_needed = (ALIGN - (header_size % ALIGN)) % ALIGN
+                info.extra = b'\x00' * pad_needed
+                zout.writestr(info, data)
+            else:
+                data = zin.read(item.filename)
+                info = zipfile.ZipInfo(item.filename)
+                info.compress_type = item.compress_type
+                info.external_attr = item.external_attr
+                info.extra = item.extra
+                zout.writestr(info, data)
+os.replace(tmp_path, apk_path)
+print("OK")
+INJECT_PY2
+            [ $? -ne 0 ] && cp "$PATCHED_DEX" "$OUTPUT"
         fi
     done
-
-    # ── POST-INJECTION: zipalign resources.arsc (Android R+ requirement) ──
-    # zip -0 shifts byte offsets → resources.arsc loses 4-byte alignment.
-    # Without this, every patched APK crashes with error -124.
-    if [ "$IS_ARCHIVE" -eq 1 ] && command -v zipalign &>/dev/null; then
-        _info "Aligning $OUTPUT (4-byte boundary for resources.arsc)..."
-        local aligned_out="${OUTPUT%.apk}_aligned.apk"
-        if zipalign -p -f 4 "$OUTPUT" "$aligned_out" 2>/dev/null; then
-            mv -f "$aligned_out" "$OUTPUT"
-            _ok "zipalign complete"
-        else
-            _warn "zipalign failed — APK may crash on R+ devices"
-            rm -f "$aligned_out"
-        fi
-    elif [ "$IS_ARCHIVE" -eq 1 ]; then
-        _warn "zipalign not found — APK may crash on R+ devices. Install: sudo apt-get install zipalign"
-    fi
 
     rm -rf "$MTCLI_TMP"
     _ok "Done. $APPLIED/$PATCH_COUNT patches applied. Output: $OUTPUT"
