@@ -1028,14 +1028,14 @@ EOF
             # keeps resources.arsc STORED + 4-byte aligned, preserves all other entries.
             # No zip/zipalign binary dependency required.
             python3 - "$OUTPUT" "$mod_dex" "$PATCHED_DEX" << 'INJECT_PY'
-import sys, zipfile, os, struct, shutil
+import sys, zipfile, os
 
 apk_path   = sys.argv[1]
 dex_name   = sys.argv[2]
 new_dex    = sys.argv[3]
 
 tmp_path = apk_path + ".mtinject.tmp"
-ALIGN = 4  # 4-byte alignment for resources.arsc and STORED entries
+ALIGN = 4  # 4-byte boundary for resources.arsc + STORED entries
 
 with open(new_dex, 'rb') as f:
     dex_bytes = f.read()
@@ -1044,34 +1044,33 @@ with zipfile.ZipFile(apk_path, 'r') as zin:
     with zipfile.ZipFile(tmp_path, 'w') as zout:
         for item in zin.infolist():
             if item.filename == dex_name:
-                # Replace DEX — always STORED (uncompressed), matching MT Manager
-                info = zipfile.ZipInfo(item.filename)
-                info.compress_type = zipfile.ZIP_STORED
-                info.external_attr = item.external_attr
-                # Align STORED entry to 4 bytes
-                # ZipInfo header overhead: 30 + len(filename) + len(extra)
-                header_size = 30 + len(info.filename.encode('utf-8'))
-                pad_needed = (ALIGN - (header_size % ALIGN)) % ALIGN
-                info.extra = b'\x00' * pad_needed
-                zout.writestr(info, dex_bytes)
+                data = dex_bytes
+                compress = zipfile.ZIP_STORED
             elif item.filename == 'resources.arsc':
-                # resources.arsc MUST stay STORED and 4-byte aligned (Android R+ requirement)
                 data = zin.read(item.filename)
-                info = zipfile.ZipInfo(item.filename)
-                info.compress_type = zipfile.ZIP_STORED
-                info.external_attr = item.external_attr
-                header_size = 30 + len(info.filename.encode('utf-8'))
-                pad_needed = (ALIGN - (header_size % ALIGN)) % ALIGN
-                info.extra = b'\x00' * pad_needed
-                zout.writestr(info, data)
+                compress = zipfile.ZIP_STORED
             else:
-                # Preserve original entry exactly (same compression, same data)
                 data = zin.read(item.filename)
-                info = zipfile.ZipInfo(item.filename)
-                info.compress_type = item.compress_type
-                info.external_attr = item.external_attr
-                info.extra = item.extra
-                zout.writestr(info, data)
+                compress = item.compress_type
+
+            info = zipfile.ZipInfo(item.filename)
+            info.compress_type = compress
+            info.external_attr = item.external_attr
+
+            # For STORED entries: align DATA start to 4-byte boundary
+            # relative to the BEGINNING OF THE FILE (not the header).
+            # data_offset = file_pos + 30 + len(filename) + len(extra)
+            # We need: data_offset % ALIGN == 0
+            if compress == zipfile.ZIP_STORED:
+                fname_len = len(info.filename.encode('utf-8'))
+                offset = zout.fp.tell()
+                data_start = offset + 30 + fname_len  # without extra
+                pad = (ALIGN - (data_start % ALIGN)) % ALIGN
+                info.extra = b'\x00' * pad
+            else:
+                info.extra = item.extra if item.extra else b''
+
+            zout.writestr(info, data)
 
 os.replace(tmp_path, apk_path)
 print("OK")
@@ -1086,43 +1085,29 @@ INJECT_PY
             _info "Injecting $mod_dex (MT-Manager mode)..."
             python3 - "$OUTPUT" "$mod_dex" "$PATCHED_DEX" << 'INJECT_PY2'
 import sys, zipfile, os
-
-apk_path   = sys.argv[1]
-dex_name   = sys.argv[2]
-new_dex    = sys.argv[3]
+apk_path, dex_name, new_dex = sys.argv[1], sys.argv[2], sys.argv[3]
 ALIGN = 4
-
-with open(new_dex, 'rb') as f:
-    dex_bytes = f.read()
-
+with open(new_dex, 'rb') as f: dex_bytes = f.read()
 tmp_path = apk_path + ".mtinject.tmp"
 with zipfile.ZipFile(apk_path, 'r') as zin:
     with zipfile.ZipFile(tmp_path, 'w') as zout:
         for item in zin.infolist():
             if item.filename == dex_name:
-                info = zipfile.ZipInfo(item.filename)
-                info.compress_type = zipfile.ZIP_STORED
-                info.external_attr = item.external_attr
-                header_size = 30 + len(info.filename.encode('utf-8'))
-                pad_needed = (ALIGN - (header_size % ALIGN)) % ALIGN
-                info.extra = b'\x00' * pad_needed
-                zout.writestr(info, dex_bytes)
+                data, compress = dex_bytes, zipfile.ZIP_STORED
             elif item.filename == 'resources.arsc':
-                data = zin.read(item.filename)
-                info = zipfile.ZipInfo(item.filename)
-                info.compress_type = zipfile.ZIP_STORED
-                info.external_attr = item.external_attr
-                header_size = 30 + len(info.filename.encode('utf-8'))
-                pad_needed = (ALIGN - (header_size % ALIGN)) % ALIGN
-                info.extra = b'\x00' * pad_needed
-                zout.writestr(info, data)
+                data, compress = zin.read(item.filename), zipfile.ZIP_STORED
             else:
-                data = zin.read(item.filename)
-                info = zipfile.ZipInfo(item.filename)
-                info.compress_type = item.compress_type
-                info.external_attr = item.external_attr
-                info.extra = item.extra
-                zout.writestr(info, data)
+                data, compress = zin.read(item.filename), item.compress_type
+            info = zipfile.ZipInfo(item.filename)
+            info.compress_type = compress
+            info.external_attr = item.external_attr
+            if compress == zipfile.ZIP_STORED:
+                offset = zout.fp.tell()
+                pad = (ALIGN - ((offset + 30 + len(info.filename.encode('utf-8'))) % ALIGN)) % ALIGN
+                info.extra = b'\x00' * pad
+            else:
+                info.extra = item.extra if item.extra else b''
+            zout.writestr(info, data)
 os.replace(tmp_path, apk_path)
 print("OK")
 INJECT_PY2
