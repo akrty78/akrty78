@@ -1,0 +1,61 @@
+{
+  "title": "Pixel Fold",
+  "titleResId": "wallpaper_pixel_fold_title",
+  "subtitle": "Pixel Fold",
+  "cardType": 1,
+  "count": 10,
+  "slideCount": 10,
+  "randomOrder": false,
+  "wallpapers": [
+    {
+      "thumbPath": "./Pixel-Fold-Wallpaper-1.jpg",
+      "originPath": "./Pixel-Fold-Wallpaper-1.jpg",
+      "type": "wallpaper"
+    },
+    {
+      "thumbPath": "./Pixel-Fold-Wallpaper-2.jpg",
+      "originPath": "./Pixel-Fold-Wallpaper-2.jpg",
+      "type": "wallpaper"
+    },
+    {
+      "thumbPath": "./Pixel-Fold-Wallpaper-3.jpg",
+      "originPath": "./Pixel-Fold-Wallpaper-3.jpg",
+      "type": "wallpaper"
+    },
+    {
+      "thumbPath": "./Pixel-Fold-Wallpaper-4.jpg",
+      "originPath": "./Pixel-Fold-Wallpaper-4.jpg",
+      "type": "wallpaper"
+    },
+    {
+      "thumbPath": "./Pixel-Fold-Wallpaper-5.jpg",
+      "originPath": "./Pixel-Fold-Wallpaper-5.jpg",
+      "type": "wallpaper"
+    },
+    {
+      "thumbPath": "./Pixel-Fold-Wallpaper-6.jpg",
+      "originPath": "./Pixel-Fold-Wallpaper-6.jpg",
+      "type": "wallpaper"
+    },
+    {
+      "thumbPath": "./Pixel-Fold-Wallpaper-7.jpg",
+      "originPath": "./Pixel-Fold-Wallpaper-7.jpg",
+      "type": "wallpaper"
+    },
+    {
+      "thumbPath": "./Pixel-Fold-Wallpaper-8.jpg",
+      "originPath": "./Pixel-Fold-Wallpaper-8.jpg",
+      "type": "wallpaper"
+    },
+    {
+      "thumbPath": "./Pixel-Fold-Wallpaper-9.jpg",
+      "originPath": "./Pixel-Fold-Wallpaper-9.jpg",
+      "type": "wallpaper"
+    },
+    {
+      "thumbPath": "./Pixel-Fold-Wallpaper-10.jpg",
+      "originPath": "./Pixel-Fold-Wallpaper-10.jpg",
+      "type": "wallpaper"
+    }
+  ]
+}
