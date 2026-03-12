@@ -1054,27 +1054,21 @@ def _inject_dex(archive: Path, dex_name: str, dex_bytes: bytes) -> bool:
             with zipfile.ZipFile(tmp_path, 'w') as zout:
                 for item in zin.infolist():
                     if item.filename == dex_name:
-                        info_new = zipfile.ZipInfo(item.filename)
-                        info_new.compress_type = zipfile.ZIP_STORED
-                        info_new.external_attr = item.external_attr
-                        hdr = 30 + len(info_new.filename.encode('utf-8'))
-                        info_new.extra = b'\x00' * ((ALIGN - (hdr % ALIGN)) % ALIGN)
-                        zout.writestr(info_new, dex_bytes)
+                        data, compress = dex_bytes, zipfile.ZIP_STORED
                     elif item.filename == 'resources.arsc':
-                        data = zin.read(item.filename)
-                        info_new = zipfile.ZipInfo(item.filename)
-                        info_new.compress_type = zipfile.ZIP_STORED
-                        info_new.external_attr = item.external_attr
-                        hdr = 30 + len(info_new.filename.encode('utf-8'))
-                        info_new.extra = b'\x00' * ((ALIGN - (hdr % ALIGN)) % ALIGN)
-                        zout.writestr(info_new, data)
+                        data, compress = zin.read(item.filename), zipfile.ZIP_STORED
                     else:
-                        data = zin.read(item.filename)
-                        info_new = zipfile.ZipInfo(item.filename)
-                        info_new.compress_type = item.compress_type
-                        info_new.external_attr = item.external_attr
-                        info_new.extra = item.extra
-                        zout.writestr(info_new, data)
+                        data, compress = zin.read(item.filename), item.compress_type
+                    info_new = zipfile.ZipInfo(item.filename)
+                    info_new.compress_type = compress
+                    info_new.external_attr = item.external_attr
+                    if compress == zipfile.ZIP_STORED:
+                        offset = zout.fp.tell()
+                        pad = (ALIGN - ((offset + 30 + len(info_new.filename.encode('utf-8'))) % ALIGN)) % ALIGN
+                        info_new.extra = b'\x00' * pad
+                    else:
+                        info_new.extra = item.extra if item.extra else b''
+                    zout.writestr(info_new, data)
         os.replace(tmp_path, str(archive))
         return True
     except Exception as exc:
