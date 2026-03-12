@@ -31,7 +31,7 @@ jobs:
       - name: 🛠️ Setup Build Environment
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3 python3-pip zip unzip aria2 jq erofs-utils
+          sudo apt-get install -y python3 python3-pip zip unzip aria2 jq erofs-utils zipalign
           chmod +x bin/*
 
       - name: 🚀 Execute Modder Engine
