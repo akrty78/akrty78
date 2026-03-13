@@ -469,11 +469,11 @@
                 "class": "Lcom/android/systemui/MiuiOperatorCustomizedPolicy;",
                 "method": "*",
                 "op": "replace_line",
-                "match": "sget-boolean [pv]([0-9]+), Lmiui/os/Build;->IS_INTERNATIONAL_BUILD:Z",
+                "match": "sget-boolean ([pv])([0-9]+), Lmiui/os/Build;->IS_INTERNATIONAL_BUILD:Z",
                 "match_mode": "regex",
                 "occurrence": "all",
                 "replacement": [
-                    "const/4 v\\1, 0x1"
+                    "const/4 \\1\\2, 0x1"
                 ],
                 "optional": true
             },
@@ -482,11 +482,11 @@
                 "class": "Lcom/android/systemui/statusbar/policy/MiuiCarrierTextController;",
                 "method": "*",
                 "op": "replace_line",
-                "match": "sget-boolean [pv]([0-9]+), Lmiui/os/Build;->IS_INTERNATIONAL_BUILD:Z",
+                "match": "sget-boolean ([pv])([0-9]+), Lmiui/os/Build;->IS_INTERNATIONAL_BUILD:Z",
                 "match_mode": "regex",
                 "occurrence": "all",
                 "replacement": [
-                    "const/4 v\\1, 0x1"
+                    "const/4 \\1\\2, 0x1"
                 ],
                 "optional": true
             },
@@ -495,11 +495,11 @@
                 "class": "Lcom/android/systemui/statusbar/pipeline/mobile/ui/viewmodel/MiuiCellularIconVM;",
                 "method": "*",
                 "op": "replace_line",
-                "match": "sget-boolean [pv]([0-9]+), Lmiui/os/Build;->IS_INTERNATIONAL_BUILD:Z",
+                "match": "sget-boolean ([pv])([0-9]+), Lmiui/os/Build;->IS_INTERNATIONAL_BUILD:Z",
                 "match_mode": "regex",
                 "occurrence": "all",
                 "replacement": [
-                    "const/4 v\\1, 0x1"
+                    "const/4 \\1\\2, 0x1"
                 ],
                 "optional": true
             },
@@ -508,11 +508,11 @@
                 "class": "Lcom/android/systemui/statusbar/pipeline/mobile/ui/binder/MiuiMobileIconBinder;",
                 "method": "*",
                 "op": "replace_line",
-                "match": "sget-boolean [pv]([0-9]+), Lmiui/os/Build;->IS_INTERNATIONAL_BUILD:Z",
+                "match": "sget-boolean ([pv])([0-9]+), Lmiui/os/Build;->IS_INTERNATIONAL_BUILD:Z",
                 "match_mode": "regex",
                 "occurrence": "all",
                 "replacement": [
-                    "const/4 v\\1, 0x1"
+                    "const/4 \\1\\2, 0x1"
                 ],
                 "optional": true
             }
@@ -528,11 +528,11 @@
                 "class": "Lcom/android/systemui/qs/pipeline/domain/interactor/CurrentTilesInteractorImpl;",
                 "method": "*",
                 "op": "replace_line",
-                "match": "sget-boolean [pv]([0-9]+), Lcom/miui/utils/configs/MiuiConfigs;->IS_INTERNATIONAL_BUILD:Z",
+                "match": "sget-boolean ([pv])([0-9]+), Lcom/miui/utils/configs/MiuiConfigs;->IS_INTERNATIONAL_BUILD:Z",
                 "match_mode": "regex",
                 "occurrence": "all",
                 "replacement": [
-                    "const/4 v\\1, 0x1"
+                    "const/4 \\1\\2, 0x1"
                 ],
                 "optional": true
             }
@@ -548,11 +548,11 @@
                 "class": "Lcom/android/systemui/statusbar/notification/utils/NotificationUtil;",
                 "method": "isEmptySummary",
                 "op": "replace_line",
-                "match": "sget-boolean [pv]([0-9]+), Lcom/miui/utils/configs/MiuiConfigs;->IS_INTERNATIONAL_BUILD:Z",
+                "match": "sget-boolean ([pv])([0-9]+), Lcom/miui/utils/configs/MiuiConfigs;->IS_INTERNATIONAL_BUILD:Z",
                 "match_mode": "regex",
                 "occurrence": "all",
                 "replacement": [
-                    "const/4 v\\1, 0x1"
+                    "const/4 \\1\\2, 0x1"
                 ],
                 "optional": true
             },
