@@ -349,9 +349,7 @@ Commands:
   voice-recorder-ai   SoundRecorder        → isAiRecordEnable = true
   services-jar        ActivityManagerService$$ExternalSyntheticLambda31 → run() = void
   provision-gms       Provision.apk        → IS_INTERNATIONAL_BUILD (Lmiui/os/Build;) = 1
-  miui-service        miui-services.jar    → IS_INTERNATIONAL_BUILD (Lmiui/os/Build;) = 1
   systemui-volte      MiuiSystemUI.apk     → IS_INTERNATIONAL_BUILD + QuickShare + WA-notif
-  miui-framework      miui-framework.jar   → validateTheme = void  +  IS_GLOBAL_BUILD = 1
   settings-region     Settings.apk         → IS_GLOBAL_BUILD = 1 (locale classes)
 """
 
@@ -1291,85 +1289,6 @@ def _provision_gms_patch(dex_name: str, dex: bytearray) -> bool:
     ok(f"  ✓ Provision Utils::setGmsAppEnabledStateForCn → const/16 v0, 0x1 ({n} sget, no NOP)")
     return True
 
-
-# ── miui-services.jar: global IS_INTERNATIONAL_BUILD sweep  ──────────
-def _miui_service_patch(dex_name: str, dex: bytearray) -> bool:
-    """
-    Global sweep of Lmiui/os/Build;->IS_INTERNATIONAL_BUILD in miui-services.jar.
-    No class filter — flips all region gates in the service jar.
-    Uses const/4 (opcode 0x12) which is safe for all boolean registers (always ≤ 15).
-    Replaces the deleted _intl_build_patch which was using 0x15 (const/high16, wrong).
-    """
-    raw = bytes(dex)
-    if b'IS_INTERNATIONAL_BUILD' not in raw: return False
-    n  = binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD',
-                                    use_const4=True)
-    n += _raw_sget_scan(dex, 'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD',
-                        use_const4=True)
-    return n > 0
-
-# ── miui-framework.jar  ─────────────────────────────────────────
-# Target classes for IS_INTERNATIONAL_BUILD in miui-framework
-_FW_INTL_CLASSES = [
-    'AppOpsManagerInjector',   'NearbyUtils',             'ShortcutFunctionManager',
-    'MiInputShortcutFeature',  'MiInputShortcutUtil',     'FeatureConfiguration',
-    'InputFeature',            'TelephonyManagerEx',       'SystemServiceRegistryImpl',
-    'PackageManagerImpl',      'PackageParserImpl',        'LocaleComparator',
-    'MiuiSignalStrengthImpl',
-]
-
-def _miui_framework_patch(dex_name: str, dex: bytearray) -> bool:
-    """
-    miui-framework.jar — two binary passes:
-
-    Pass 1 — IS_INTERNATIONAL_BUILD → const/4 1
-      Scoped to 13 specific classes only. These are the framework-side gating
-      classes that block international features. A global sweep is intentionally
-      avoided — it would flip IS_GLOBAL_BUILD-adjacent paths that crash Settings.
-
-    Pass 2 — showSystemReadyErrorDialogsIfNeeded → return-void
-      Scan all classes for ActivityTaskManagerInternal (or any class that defines
-      the method) and stub it. Prevents AMS from showing system-ready error dialogs
-      on CN ROMs running in global mode.
-
-    NOTE: IS_GLOBAL_BUILD is NOT patched here (Settings crash risk).
-          Gboard IME swap is done via apktool in manager (string not in DEX pool).
-    """
-    raw = bytes(dex)
-    patched = False
-
-    # Pass 1a — IS_INTERNATIONAL_BUILD in 13 framework classes
-    if b'IS_INTERNATIONAL_BUILD' in raw:
-        n = 0
-        for cls in _FW_INTL_CLASSES:
-            n += binary_patch_sget_to_true(dex, 'Lmiui/os/Build;', 'IS_INTERNATIONAL_BUILD',
-                                            only_class=cls, use_const4=True)
-        if n > 0:
-            patched = True
-            raw = bytes(dex)
-
-    # Pass 2 — showSystemReadyErrohhhfffrDialogsIfNeeded in ActivityTghaskManagerInternal
-    if b'ActivityTaskManagerIntkkhernal' in raw:
-        hdr = _parse_header(raw)
-        if hdr:
-            for i in range(hdr['class_defs_size']):
-                base = hdr['class_defs_off'] + i * 32
-                if struct.unpack_from('<I', raw, base + 24)[0] == 0: continue
-                cls_idx = struct.unpack_from('<I', raw, base)[0]
-                try:
-                    sidx     = struct.unpack_from('<I', raw, hdr['type_ids_off'] + cls_idx * 4)[0]
-                    type_str = _get_str(raw, hdr, sidx)
-                    if 'ActivityTaskManagerInternal' not in type_str: continue
-                    cls_path = type_str[1:-1]
-                    if binary_patch_method(dex, cls_path,
-                            'showSystemReadyErrorDialogsIfNeeded', 1, _STUB_VOID):
-                        patched = True
-                        raw = bytes(dex)
-                except Exception:
-                    continue
-
-    return patched
-
 # ── SystemUI combined: VoLTE + QuickShare + WA notification  ─────
 def _systemui_all_patch(dex_name: str, dex: bytearray) -> bool:
     """
@@ -1435,9 +1354,7 @@ PROFILES = {
     "voice-recorder-ai": _recorder_ai_patch,        # AiDeviceUtil::isAiSupportedDevice
     "services-jar":      _services_jar_patch,
     "provision-gms":     _provision_gms_patch,    # Utils::setGmsAppEnabledStateForCn only
-    "miui-service":      _miui_service_patch,    # global IS_INTERNATIONAL_BUILD sweep
     "systemui-volte":    _systemui_all_patch,       # VoLTE + QuickShare(const/4) + WA-notif
-    "miui-framework":    _miui_framework_patch,     # validateTheme(trim) + IS_GLOBAL_BUILD
 }
 
 def main():
@@ -2663,68 +2580,10 @@ PYTHON_EOF
 
             # D3/D4b. Settings AI + OtherPersonalSettings — now handled via mt_smali patches.json
 
-            # D5. MIUI service CN→Global
-            _run_dex_patch "MIUI SERVICE CN→GLOBAL" "miui-service" \
-                "$(find "$DUMP_DIR" -name "miui-services.jar" -type f | head -n1)"
-            cd "$GITHUB_WORKSPACE"
-
             # D6. SystemUI: VoLTE + QuickShare + WhatsApp notification fix
             _run_dex_patch "SYSTEMUI ALL" "systemui-volte" \
                 "$(find "$DUMP_DIR" \( -name "MiuiSystemUI.apk" -o -name "SystemUI.apk" \) -type f | head -n1)"
             cd "$GITHUB_WORKSPACE"
-
-            # D7. miui-framework: IS_INTERNATIONAL_BUILD(13 classes) + showSystemReadyErrorDialogsIfNeeded
-            _FW_JAR="$(find "$DUMP_DIR" -name "miui-framework.jar" -type f | head -n1)"
-            _run_dex_patch "MIUI FRAMEWORK" "miui-framework" "$_FW_JAR"
-            cd "$GITHUB_WORKSPACE"
-
-            # D8b. miui-framework: Gboard IME swap via apktool
-            #   binary_swap_string can't inject a new string — Gboard package name is
-            #   longer than Baidu's and not in the DEX string pool. apktool smali sed
-            #   is the only reliable approach.
-            if [ -n "$_FW_JAR" ]; then
-                log_info "🎹 miui-framework: Gboard IME swap..."
-                _FW_WORK="$TEMP_DIR/fw_smali"
-                rm -rf "$_FW_WORK"
-                _FW_APPLIED=0
-                if timeout 20m apktool d -r -f "$_FW_JAR" -o "$_FW_WORK" >/dev/null 2>&1; then
-                    # Patch 1a: InputMethodServiceInjector — Baidu → Gboard
-                    _IMSI=$(find "$_FW_WORK" -name "InputMethodServiceInjector.smali" -type f | head -1)
-                    if [ -n "$_IMSI" ] && grep -q "com\.baidu\.input_mi" "$_IMSI"; then
-                        sed -i 's|com\.baidu\.input_mi|com.google.android.inputmethod.latin|g' "$_IMSI"
-                        log_success "  ✓ Gboard swap in InputMethodServiceInjector"
-                        _FW_APPLIED=1
-                    else
-                        log_info "  InputMethodServiceInjector: com.baidu.input_mi not present"
-                    fi
-                    # Patch 1b: InputMethodManagerStubImpl — Baidu → Gboard
-                    #   Separate class from 1a; may or may not exist depending on build.
-                    _IMMS=$(find "$_FW_WORK" -name "InputMethodManagerStubImpl.smali" -type f | head -1)
-                    if [ -n "$_IMMS" ] && grep -q "com\.baidu\.input_mi" "$_IMMS"; then
-                        sed -i 's|com\.baidu\.input_mi|com.google.android.inputmethod.latin|g' "$_IMMS"
-                        log_success "  ✓ Gboard swap in InputMethodManagerStubImpl"
-                        _FW_APPLIED=1
-                    else
-                        log_info "  InputMethodManagerStubImpl: com.baidu.input_mi not present"
-                    fi
-                    if [ "$_FW_APPLIED" -eq 1 ]; then
-                        log_info "  ⚙️  Rebuilding miui-framework.jar with apktool (may take 1-2 min)..."
-                        if timeout 20m apktool b -c "$_FW_WORK" -o "${_FW_JAR}.fwTmp" >/dev/null 2>&1; then
-                            mv "${_FW_JAR}.fwTmp" "$_FW_JAR"
-                            log_success "✓ miui-framework apktool patches applied"
-                        else
-                            rm -f "${_FW_JAR}.fwTmp"
-                            log_warning "apktool build failed — miui-framework apktool patches skipped"
-                        fi
-                    else
-                        log_info "  miui-framework: no apktool patches needed"
-                    fi
-                else
-                    log_warning "apktool decompile failed — miui-framework apktool patches skipped"
-                fi
-                rm -rf "$_FW_WORK"
-                cd "$GITHUB_WORKSPACE"
-            fi
 
             # D8. nexdroid.rc — bootloader spoof init script
             log_info "💉 Writing nexdroid.rc bootloader spoof..."
