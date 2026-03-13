@@ -193,6 +193,33 @@ EOF
         declare -A SMALI_DEX_DIRS; SMALI_DEX_DIRS["$DEX_NAME"]="$SMALI_DIR"
     fi
 
+    # ── Post-disassembly: strip redundant consecutive .line directives ──
+    # baksmali 3.x emits a .line for every source line including blank/comment
+    # lines, producing runs like ".line 2 / .line 3" before a single instruction.
+    # MT Manager (and smali assembler) only needs the last .line before each
+    # instruction.  Collapse consecutive .line blocks to just the last entry.
+    if [ "$NO_BAKSMALI" -eq 0 ]; then
+        _info "Stripping redundant .line directives from disassembled smali..."
+        local _dedup_dir _dedup_count=0
+        for _dedup_dir in "${SMALI_DEX_DIRS[@]}"; do
+            while IFS= read -r -d '' sf; do
+                awk '
+                /^[[:space:]]*\.line [0-9]+[[:space:]]*$/ {
+                    pending = $0
+                    next
+                }
+                {
+                    if (pending != "") { print pending; pending = "" }
+                    print
+                }
+                END { if (pending != "") print pending }
+                ' "$sf" > "${sf}.dedup" && mv "${sf}.dedup" "$sf"
+                _dedup_count=$((_dedup_count + 1))
+            done < <(find "$_dedup_dir" -name '*.smali' -print0)
+        done
+        _ok "Deduplicated .line directives in $_dedup_count smali files"
+    fi
+
     # ══════════════════════════════════════════════════════════════════
     # PATCH ENGINE — Core Functions
     # ══════════════════════════════════════════════════════════════════
