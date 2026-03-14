@@ -2559,8 +2559,8 @@ PYTHON_EOF
             # cd "$GITHUB_WORKSPACE"
 
             # ── Framework Patches (apktool-based, optional via MODS_SELECTED) ──
-            if declare -f run_framework_patches > /dev/null 2>&1; then
-                run_framework_patches "$DUMP_DIR"
+            if declare -f run_fw_patches_system > /dev/null 2>&1; then
+                run_fw_patches_system "$DUMP_DIR"
             fi
         fi
 
@@ -2574,6 +2574,11 @@ PYTHON_EOF
 
         # ── system_ext partition ──────────────────────────────────
         if [ "$part" == "system_ext" ]; then
+
+            # ── Framework Patches for system_ext (miui-services.jar + Kaorios APK) ──
+            if declare -f run_fw_patches_system_ext > /dev/null 2>&1; then
+                run_fw_patches_system_ext "$DUMP_DIR"
+            fi
 
             # B3. WIZARD APK — must live in system_ext/priv-app (not product)
             if [ -d "$GITHUB_WORKSPACE/gapps_src" ]; then
