@@ -4,11 +4,11 @@
 # All Python helpers are verbatim ports from FrameworkPatcher/patcher_a16.sh (Android 16).
 
 # ── Logging (reuse mod.sh helpers if available, fallback to echo) ─────
-_fp_log()     { if declare -f log_info    &>/dev/null; then log_info    "$1"; else echo "[FP] $1"; fi; }
-_fp_success() { if declare -f log_success &>/dev/null; then log_success "$1"; else echo "[FP] ✓ $1"; fi; }
-_fp_warn()    { if declare -f log_warning &>/dev/null; then log_warning "$1"; else echo "[FP] ⚠ $1"; fi; }
-_fp_err()     { if declare -f log_error   &>/dev/null; then log_error   "$1"; else echo "[FP] ✗ $1" >&2; fi; }
-_fp_step()    { if declare -f log_step    &>/dev/null; then log_step    "$1"; else echo "[FP] $1"; fi; }
+_fp_log()     { if declare -f log_info    &>/dev/null; then log_info    "$1" >&2; else echo "[FP] $1" >&2; fi; }
+_fp_success() { if declare -f log_success &>/dev/null; then log_success "$1" >&2; else echo "[FP] ✓ $1" >&2; fi; }
+_fp_warn()    { if declare -f log_warning &>/dev/null; then log_warning "$1" >&2; else echo "[FP] ⚠ $1" >&2; fi; }
+_fp_err()     { if declare -f log_error   &>/dev/null; then log_error   "$1" >&2; else echo "[FP] ✗ $1" >&2; fi; }
+_fp_step()    { if declare -f log_step    &>/dev/null; then log_step    "$1" >&2; else echo "[FP] $1" >&2; fi; }
 
 # ── Decompile a JAR using system apktool (same pattern as MiuiBooster) ─
 # Usage: local dec_dir; dec_dir=$(fp_decompile "$JAR_PATH")
