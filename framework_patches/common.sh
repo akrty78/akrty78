@@ -3,9 +3,6 @@
 # Shared helpers for all Framework Patcher scripts — sourced by each patch script.
 # All Python helpers are verbatim ports from FrameworkPatcher/patcher_a16.sh (Android 16).
 
-FP_WORK_DIR="${TEMP_DIR:-/tmp}/fp_work"
-FP_TOOLS_DIR="${GITHUB_WORKSPACE}/tools"   # must have apktool.jar
-
 # ── Logging (reuse mod.sh helpers if available, fallback to echo) ─────
 _fp_log()     { if declare -f log_info    &>/dev/null; then log_info    "$1"; else echo "[FP] $1"; fi; }
 _fp_success() { if declare -f log_success &>/dev/null; then log_success "$1"; else echo "[FP] ✓ $1"; fi; }
@@ -13,36 +10,62 @@ _fp_warn()    { if declare -f log_warning &>/dev/null; then log_warning "$1"; el
 _fp_err()     { if declare -f log_error   &>/dev/null; then log_error   "$1"; else echo "[FP] ✗ $1" >&2; fi; }
 _fp_step()    { if declare -f log_step    &>/dev/null; then log_step    "$1"; else echo "[FP] $1"; fi; }
 
-# ── Decompile a JAR into $FP_WORK_DIR/<basename>/ ──────────────
+# ── Decompile a JAR using system apktool (same pattern as MiuiBooster) ─
+# Usage: local dec_dir; dec_dir=$(fp_decompile "$JAR_PATH")
 fp_decompile() {
     local jar="$1"
     local name; name="$(basename "$jar" .jar)"
-    local out="$FP_WORK_DIR/$name"
-    rm -rf "$out"
-    mkdir -p "$out"
-    _fp_log "Decompiling $name..."
-    if ! timeout 30m java -jar "$FP_TOOLS_DIR/apktool.jar" d -q -f "$jar" -o "$out" 2>&1; then
-        _fp_err "apktool decompile failed: $name"
+    local work="${TEMP_DIR:-/tmp}/fp_${name}_work"
+    rm -rf "$work" && mkdir -p "$work"
+    cd "$work"
+    _fp_log "Decompiling $name.jar with apktool..."
+    if timeout 10m apktool d -r -f "$jar" -o "decompiled" 2>&1 | tee apktool_decompile.log | grep -q "I: Baksmaling\|I: Copying"; then
+        _fp_success "Decompiled $name.jar"
+        echo "$work/decompiled"   # return path via stdout
+    else
+        _fp_err "apktool decompile failed for $name.jar"
+        cat apktool_decompile.log | tail -10 | while IFS= read -r line; do _fp_err "   $line"; done
+        cd "${GITHUB_WORKSPACE}"
         return 1
     fi
-    echo "$out"   # return path via stdout
 }
 
 # ── Recompile decompiled dir back into JAR & replace original ─────────
+# Usage: fp_recompile "$JAR_PATH" "$DECOMPILED_DIR"
 fp_recompile() {
     local jar="$1"
     local src_dir="$2"
-    local tmp="${jar}.fp_tmp"
-    _fp_log "Recompiling $(basename "$jar")..."
-    if ! timeout 30m java -jar "$FP_TOOLS_DIR/apktool.jar" b -q -f "$src_dir" -o "$tmp" 2>&1; then
-        _fp_err "apktool recompile failed: $(basename "$jar")"
-        rm -f "$tmp"
+    local name; name="$(basename "$jar" .jar)"
+    local work; work="$(dirname "$src_dir")"
+    cd "$work"
+    _fp_log "Rebuilding $name.jar with apktool..."
+    if timeout 10m apktool b -c "$src_dir" -o "${name}_patched.jar" 2>&1 | tee apktool_build.log | grep -q "Built\|I: Building"; then
+        if [ -f "${name}_patched.jar" ]; then
+            mv "${name}_patched.jar" "$jar"
+            _fp_success "$name.jar patched and replaced"
+        else
+            _fp_err "Patched JAR not found after build for $name"
+            cp "${jar}.bak" "$jar" 2>/dev/null || true
+            cd "${GITHUB_WORKSPACE}"
+            return 1
+        fi
+    else
+        _fp_err "apktool build failed for $name.jar"
+        cat apktool_build.log | tail -10 | while IFS= read -r line; do _fp_err "   $line"; done
+        cp "${jar}.bak" "$jar" 2>/dev/null || true
+        cd "${GITHUB_WORKSPACE}"
         return 1
     fi
-    mv "$tmp" "$jar"
-    _fp_success "$(basename "$jar") patched and replaced"
+    cd "${GITHUB_WORKSPACE}"
     return 0
 }
+
+# ── Cleanup a framework patch work dir ─────────────────────────────────
+fp_cleanup() {
+    local name="$1"
+    rm -rf "${TEMP_DIR:-/tmp}/fp_${name}_work"
+}
+
 
 # ── Find smali file containing a method ────────────────────────────────
 find_smali_method_file() {
