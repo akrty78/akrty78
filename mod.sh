@@ -100,6 +100,12 @@ else
     log_warning "mt_smali.sh not found. MT-Smali engine disabled."
 fi
 
+if [ -f "$GITHUB_WORKSPACE/framework_patches/fw_patcher.sh" ]; then
+    source "$GITHUB_WORKSPACE/framework_patches/fw_patcher.sh"
+else
+    log_warning "fw_patcher.sh not found. Framework Patcher features disabled."
+fi
+
 # --- BLOATWARE LIST ---
 BLOAT_LIST="
 com.xiaomi.aiasst.vision com.miui.carlink com.bsp.catchlog com.miui.nextpay
@@ -2551,7 +2557,11 @@ PYTHON_EOF
             # _run_dex_patch "SERVICES DIALOGS" "services-jar" \
             #     "$(find "$DUMP_DIR" -path "*/framework/services.jar" -type f | head -n1)"
             # cd "$GITHUB_WORKSPACE"
-            :
+
+            # ── Framework Patches (apktool-based, optional via MODS_SELECTED) ──
+            if declare -f run_framework_patches > /dev/null 2>&1; then
+                run_framework_patches "$DUMP_DIR"
+            fi
         fi
 
         # ── product partition ────────────────────────────────────────
