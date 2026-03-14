@@ -570,44 +570,86 @@ modify_invoke_custom_methods() {
     local decompile_dir="$1"
     _fp_log "Checking for invoke-custom in $(basename "$decompile_dir")..."
 
-    local smali_files
-    smali_files=$(find "$decompile_dir" -type f -name "*.smali" 2>/dev/null | while read -r f; do
-        if [ -f "$f" ] && grep -s -q "invoke-custom" "$f" 2>/dev/null; then
-            echo "$f"
-        fi
-    done)
+    python3 - "$decompile_dir" <<'PYTHON_EOF'
+import os
+import sys
 
-    [ -z "$smali_files" ] && { _fp_log "No invoke-custom found"; return 0; }
+def patch_smali_file(filepath):
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            lines = f.read().splitlines()
+    except Exception:
+        return False
 
-    local count=0
-    while IFS= read -r smali_file; do
-        [ ! -f "$smali_file" ] && continue
-        count=$((count + 1))
+    if 'invoke-custom' not in '\n'.join(lines):
+        return False
 
-        # equals
-        sed -i "/.method.*equals(/,/^.end method$/ {
-            /^    .registers/c\\    .registers 2
-            /^    invoke-custom/d
-            /^    move-result/d
-            /^    return/c\\    const/4 v0, 0x0\n\n    return v0
-        }" "$smali_file" 2>/dev/null || true
+    changed = False
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        
+        # Check for target methods
+        if line.lstrip().startswith('.method') and ('equals(' in line or 'hashCode(' in line or 'toString(' in line):
+            is_to_string = 'toString(' in line
+            
+            # Find end of method
+            end_idx = i
+            has_invoke_custom = False
+            for j in range(i + 1, len(lines)):
+                if lines[j].lstrip().startswith('.end method'):
+                    end_idx = j
+                    break
+                if 'invoke-custom' in lines[j]:
+                    has_invoke_custom = True
+            
+            if has_invoke_custom and end_idx > i:
+                changed = True
+                new_block = [lines[i]]
+                if is_to_string:
+                    new_block.extend([
+                        '    .registers 1',
+                        '    const/4 v0, 0x0',
+                        '',
+                        '    return-object v0'
+                    ])
+                else:
+                    new_block.extend([
+                        '    .registers 2',
+                        '    const/4 v0, 0x0',
+                        '',
+                        '    return v0'
+                    ])
+                new_block.append('.end method')
+                
+                # Replace the old block with the new block
+                lines[i:end_idx + 1] = new_block
+                # Adjust loop counter since we shortened the file
+                i += len(new_block)
+                continue
+                
+        i += 1
 
-        # hashCode
-        sed -i "/.method.*hashCode(/,/^.end method$/ {
-            /^    .registers/c\\    .registers 2
-            /^    invoke-custom/d
-            /^    move-result/d
-            /^    return/c\\    const/4 v0, 0x0\n\n    return v0
-        }" "$smali_file" 2>/dev/null || true
+    if changed:
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(lines) + '\n')
+        return True
+    return False
 
-        # toString
-        sed -i "/.method.*toString(/,/^.end method$/ {
-            s/^[[:space:]]*\\.registers.*/    .registers 1/
-            /^    invoke-custom/d
-            /^    move-result.*/d
-            /^    return.*/c\\    const/4 v0, 0x0\n\n    return-object v0
-        }" "$smali_file" 2>/dev/null || true
-    done <<<"$smali_files"
+decompile_dir = sys.argv[1]
+count = 0
 
-    [ "$count" -gt 0 ] && _fp_success "Modified $count files with invoke-custom"
+for root, _, files in os.walk(decompile_dir):
+    for file in files:
+        if file.endswith('.smali'):
+            if patch_smali_file(os.path.join(root, file)):
+                count += 1
+
+if count > 0:
+    print(f"✓ Modified {count} files with invoke-custom")
+PYTHON_EOF
+
+    local status=$?
+    [ $status -ne 0 ] && _fp_warn "modify_invoke_custom_methods encountered an error (status $status)"
+    return 0
 }
